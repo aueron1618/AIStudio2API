@@ -7,21 +7,23 @@ import (
 
 // eventLoop 在单个 goroutine 中按到达顺序串行执行 VM 任务与计时器回调
 type eventLoop struct {
-	mu     sync.Mutex
-	queue  []func()
-	wake   chan struct{}
-	done   chan struct{}
-	closed bool
-	timers map[*time.Timer]struct{}
+	mu      sync.Mutex
+	queue   []func()
+	wake    chan struct{}
+	done    chan struct{}
+	stopped chan struct{}
+	closed  bool
+	timers  map[*time.Timer]struct{}
 }
 
 func newEventLoop() *eventLoop {
-	loop := &eventLoop{wake: make(chan struct{}, 1), done: make(chan struct{}), timers: make(map[*time.Timer]struct{})}
+	loop := &eventLoop{wake: make(chan struct{}, 1), done: make(chan struct{}), stopped: make(chan struct{}), timers: make(map[*time.Timer]struct{})}
 	go loop.run()
 	return loop
 }
 
 func (loop *eventLoop) run() {
+	defer close(loop.stopped)
 	for {
 		loop.mu.Lock()
 		if loop.closed {
@@ -67,6 +69,12 @@ func (loop *eventLoop) schedule(delay time.Duration, job func()) {
 		loop.post(job)
 		return
 	}
+	loop.mu.Lock()
+	if loop.closed {
+		loop.mu.Unlock()
+		return
+	}
+	// 注册与回调取锁串行，避免短计时器先触发、后注册而永久留在 timers 中。
 	var timer *time.Timer
 	timer = time.AfterFunc(delay, func() {
 		loop.mu.Lock()
@@ -74,12 +82,6 @@ func (loop *eventLoop) schedule(delay time.Duration, job func()) {
 		loop.mu.Unlock()
 		loop.post(job)
 	})
-	loop.mu.Lock()
-	if loop.closed {
-		loop.mu.Unlock()
-		timer.Stop()
-		return
-	}
 	loop.timers[timer] = struct{}{}
 	loop.mu.Unlock()
 }

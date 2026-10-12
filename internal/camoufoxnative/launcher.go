@@ -67,7 +67,9 @@ func launchBrowser(ctx context.Context, options Options, config map[string]any) 
 		return nil, "", err
 	}
 	if options.Headless {
-		prefs["layout.frame_rate"] = headlessFrameRate
+		for key, value := range headlessPreferences() {
+			prefs[key] = value
+		}
 	}
 	if options.CacheDirectory != "" {
 		for key, value := range cachePreferences(options.CacheDirectory) {
@@ -226,6 +228,19 @@ func normalizeBiDiEndpoint(endpoint string) string {
 
 // headlessFrameRate 为无头 Worker 的页面刷新帧率
 const headlessFrameRate = 1
+
+// headlessPreferences 限制单页 Worker 的闲置进程与缓存，不关闭沙箱、站点隔离、
+// 图片、字体或 WebGL；有头登录不应用这些取舍。缓存容量单位为 KiB。
+func headlessPreferences() map[string]any {
+	return map[string]any{
+		"layout.frame_rate":                        headlessFrameRate,
+		"dom.ipc.processPrelaunch.enabled":         false,
+		"browser.cache.memory.capacity":            16 * 1024,
+		"browser.sessionhistory.max_total_viewers": 0,
+		"image.mem.surfacecache.max_size_kb":       32 * 1024,
+		"image.mem.surfacecache.size_factor":       64,
+	}
+}
 
 // browserProxy 为带账号密码的代理启动本机 SOCKS5 中转，返回浏览器使用的代理 URL
 func browserProxy(value string) (*proxydial.Relay, string, error) {

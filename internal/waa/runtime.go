@@ -52,7 +52,9 @@ const promptScript = `((prompt, submit) => {
 })`
 
 // promptProgram 是预编译的 promptScript，各 Runtime 共享
-var promptProgram = goja.MustCompile(hostScriptName, promptScript, false)
+var promptProgram = sync.OnceValue(func() *goja.Program {
+	return goja.MustCompile(hostScriptName, promptScript, false)
+})
 
 // NewRuntime 在 Firefox 宿主中加载解释器并初始化 challenge program
 func NewRuntime(ctx context.Context, options Options) (*Runtime, error) {
@@ -71,13 +73,12 @@ func NewRuntime(ctx context.Context, options Options) (*Runtime, error) {
 		return nil, err
 	}
 	loop := newEventLoop()
-	runtime := &Runtime{loop: loop}
+	runtime := &Runtime{loop: loop, vm: goja.New()}
 	ready := make(chan error, 1)
 	var readyOnce sync.Once
 	complete := func(err error) { readyOnce.Do(func() { ready <- err }) }
 	if !loop.post(func() {
-		vm := goja.New()
-		runtime.vm = vm
+		vm := runtime.vm
 		source, err := newFirefoxRandSource()
 		if err != nil {
 			complete(fmt.Errorf("初始化 WAA 随机源: %w", err))
@@ -148,12 +149,12 @@ func NewRuntime(ctx context.Context, options Options) (*Runtime, error) {
 	select {
 	case err := <-ready:
 		if err != nil {
-			loop.close()
+			runtime.stopVM(err)
 			return nil, err
 		}
 		return runtime, nil
 	case <-ctx.Done():
-		loop.close()
+		runtime.stopVM(ctx.Err())
 		return nil, ctx.Err()
 	}
 }
@@ -240,7 +241,7 @@ func (runtime *Runtime) FillPrompt(ctx context.Context, prompt string, submit bo
 func (runtime *Runtime) fillPrompt(ctx context.Context, prompt string, submit bool) error {
 	result := make(chan error, 1)
 	if !runtime.loop.post(func() {
-		function, err := runtime.vm.RunProgram(promptProgram)
+		function, err := runtime.vm.RunProgram(promptProgram())
 		if err != nil {
 			result <- err
 			return
@@ -330,19 +331,32 @@ func (runtime *Runtime) snapshotWith(ctx context.Context, options func(*goja.Run
 
 // Close 结束 VM 生命周期并停止事件循环
 func (runtime *Runtime) Close() {
+	runtime.operationMu.Lock()
+	defer runtime.operationMu.Unlock()
 	runtime.closeOnce.Do(func() {
-		if runtime.shutdown != nil {
-			done := make(chan struct{})
-			if runtime.loop.post(func() {
+		done := make(chan struct{})
+		if runtime.loop.post(func() {
+			if runtime.shutdown != nil {
 				_, _ = runtime.shutdown(goja.Undefined())
-				close(done)
-			}) {
-				select {
-				case <-done:
-				case <-time.After(time.Second):
-				}
+			}
+			close(done)
+		}) {
+			select {
+			case <-done:
+			case <-time.After(time.Second):
 			}
 		}
-		runtime.loop.close()
+		runtime.stopVM(errors.New("WAA runtime 已关闭"))
 	})
+}
+
+// stopVM 中断残留 JS 并等待事件循环退出，再解除闭包和 VM 引用。
+// 只在初始化失败或持有 operationMu 关闭时调用，不能从事件循环自身调用。
+func (runtime *Runtime) stopVM(reason error) {
+	runtime.vm.Interrupt(reason)
+	runtime.loop.close()
+	<-runtime.loop.stopped
+	runtime.vm = nil
+	runtime.snapshot = nil
+	runtime.shutdown = nil
 }

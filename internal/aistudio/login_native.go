@@ -53,6 +53,29 @@ func (driver *NativeLoginDriver) Login(ctx context.Context, request IsolatedLogi
 	if err != nil {
 		return IsolatedLoginResult{}, err
 	}
+	return decodeNativeLoginResult(result, "camoufox")
+}
+
+// ImportCookies 使用无头隔离 Camoufox 校验 Cookie 并识别实际账户。
+func (driver *NativeLoginDriver) ImportCookies(ctx context.Context, request IsolatedLoginRequest, state StorageState) (IsolatedLoginResult, error) {
+	if driver == nil {
+		return IsolatedLoginResult{}, errors.New("纯 Go Camoufox 登录驱动未初始化")
+	}
+	if err := state.Validate(); err != nil {
+		return IsolatedLoginResult{}, err
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return IsolatedLoginResult{}, fmt.Errorf("编码 Cookie 导入状态: %w", err)
+	}
+	result, err := camoufoxnative.ImportCookies(ctx, driver.options(request), encoded)
+	if err != nil {
+		return IsolatedLoginResult{}, err
+	}
+	return decodeNativeLoginResult(result, "cookie")
+}
+
+func decodeNativeLoginResult(result camoufoxnative.LoginResult, source string) (IsolatedLoginResult, error) {
 	var state StorageState
 	if err := json.Unmarshal(result.StorageStateJSON, &state); err != nil {
 		return IsolatedLoginResult{}, fmt.Errorf("解析隔离登录状态: %w", err)
@@ -61,7 +84,7 @@ func (driver *NativeLoginDriver) Login(ctx context.Context, request IsolatedLogi
 		return IsolatedLoginResult{}, err
 	}
 	if err := state.SetAuthExtension(AuthExtension{
-		Source: AuthSource{Browser: "camoufox", Email: result.Email},
+		Source: AuthSource{Browser: source, Email: result.Email},
 	}); err != nil {
 		return IsolatedLoginResult{}, err
 	}

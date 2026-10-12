@@ -18,19 +18,19 @@ const hostScriptName = "\x00waa-host"
 
 // hostRegistry 保存同一 agent 内各 Realm 共享的原生函数源码与可信类型标记
 type hostRegistry struct {
-	trusted map[*goja.Object]string
-	native  map[*goja.Object]string
+	trusted *objectStrings
+	native  *objectStrings
 }
 
 func newHostRegistry() *hostRegistry {
-	return &hostRegistry{trusted: make(map[*goja.Object]string), native: make(map[*goja.Object]string)}
+	return &hostRegistry{trusted: newObjectStrings(), native: newObjectStrings()}
 }
 
 // evalTransformer 将 TrustedScript 解包为源码，blockStrings 时按页面 CSP 拒绝字符串 eval
 func (registry *hostRegistry) evalTransformer(vm *goja.Runtime, blockStrings bool) func(goja.Value) goja.Value {
 	return func(argument goja.Value) goja.Value {
 		if object, ok := argument.(*goja.Object); ok {
-			if source, trusted := registry.trusted[object]; trusted {
+			if source, trusted := registry.trusted.get(object); trusted {
 				return vm.ToValue(source)
 			}
 			return argument

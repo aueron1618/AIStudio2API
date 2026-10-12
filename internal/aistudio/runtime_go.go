@@ -122,6 +122,12 @@ func newGoWAARuntime(ctx context.Context, options camoufoxnative.Options) (*goWA
 		return nil, err
 	}
 	runtime := &goWAARuntime{options: options, client: client, storage: storage}
+	ready := false
+	defer func() {
+		if !ready {
+			_ = runtime.Close()
+		}
+	}()
 	runtime.profile, runtime.userAgent, runtime.acceptLanguage = profileFromFingerprint(fingerprint)
 	runtime.pageURL = aiStudioOrigin + "/prompts/new_chat?model=" + url.QueryEscape(options.Model)
 	if options.TemporaryChat {
@@ -183,6 +189,7 @@ func newGoWAARuntime(ctx context.Context, options camoufoxnative.Options) (*goWA
 	}
 	runtime.vm = vm
 	runtime.scheduleRefresh()
+	ready = true
 	return runtime, nil
 }
 
@@ -562,8 +569,8 @@ func (runtime *goWAARuntime) loadImage(address string) bool {
 		return false
 	}
 	defer response.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 4<<20))
-	return response.StatusCode == http.StatusOK && strings.HasPrefix(response.Header.Get("Content-Type"), "image/") && len(body) > 0
+	size, _ := io.Copy(io.Discard, io.LimitReader(response.Body, 4<<20))
+	return response.StatusCode == http.StatusOK && strings.HasPrefix(response.Header.Get("Content-Type"), "image/") && size > 0
 }
 
 // currentVM 返回未过期的 VM，到期时按官网刷新流程重建
@@ -672,10 +679,15 @@ func (runtime *goWAARuntime) Close() error {
 	runtime.closed = true
 	if runtime.refreshTimer != nil {
 		runtime.refreshTimer.Stop()
+		runtime.refreshTimer = nil
 	}
 	if runtime.vm != nil {
 		runtime.vm.Close()
 		runtime.vm = nil
+	}
+	runtime.interpreter = ""
+	if runtime.client != nil {
+		runtime.client.CloseIdleConnections()
 	}
 	return nil
 }

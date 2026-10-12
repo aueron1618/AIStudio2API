@@ -29,7 +29,7 @@
 
 - **Dual Quota Channels**: Every account has separate Playground and Build app proxy quotas, and `UPSTREAM_CHANNELS` enables either or both; when one channel hits its limit, the same account continues on the other
 - **High-Concurrency Multi-Account**: Detects Free, Pro, Ultra, and Plus benefits and routes across accounts by the live model catalog with round-robin or fill-first
-- **Two WAA Backends**: Camoufox holds the official WAA lifecycle by default; with `WAA_BACKEND=go`, pure Go generates the official proof and no browser is downloaded or launched at runtime
+- **Low-Memory Runtime**: Pure Go WAA by default, no resident browser. Workers start on demand and close after 30 idle seconds with the default zero warm pool. Camoufox remains optional
 - **Four API Protocols**: OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Gemini GenerateContent
 - **Mainstream Agent Clients**: Works with Claude Code, Codex, OpenCode, pi, omp, OpenClaw, and Hermes, including file read and write tool calls; native web search works in Claude Code, Codex, and omp
 
@@ -55,7 +55,7 @@
 - **Linux Release Runtime**: Extract `linux-amd64.tar.gz` and run `./aistudio2api`; Camoufox needs the Firefox system libraries, on Debian/Ubuntu run `sudo apt install libgtk-3-0 libasound2 libnss3 libdbus-glib-1-2 libxtst6 libxrandr2 libgbm1 libxkbcommon0 libpango-1.0-0 libcairo2 libxcomposite1 libxdamage1 libxfixes3 fonts-liberation`
 - **Source Build**: Go 1.26.0+, Node.js 22.13+ or 24+, and its bundled npm
 - **Operating System**: Windows, macOS, Linux
-- **Memory**: 2GB+ available memory for one account; each resident prewarmed account adds about 0.6GB
+- **Memory**: Pure Go with no resident Workers by default; cold starts and large contexts still require extra memory. The optional Camoufox backend recommends 2GB+ available memory per account. See [runtime memory](docs/memory.md) (Chinese) for measurements and trade-offs.
 - **Network**: Stable internet connection to Google AI Studio
 
 ## Installation
@@ -80,7 +80,7 @@ Then double-click `start.bat`. You can also run it from PowerShell:
 
 The script runs an existing `aistudio2api.exe` immediately. In a source checkout without the executable, it installs frontend dependencies and builds the frontend and Go program.
 
-The first launch downloads Camoufox for the current platform to `runtime/camoufox/`. Set `CAMOUFOX_PATH` to use an existing executable instead.
+The default pure Go generation service does not download or launch Camoufox. The optional Camoufox backend and browser login/verification prepare it on demand in `runtime/camoufox/`. Set `CAMOUFOX_PATH` to use an existing executable instead.
 
 ### Method 2: Linux and macOS Source Build
 
@@ -117,20 +117,26 @@ The first Linux or macOS launch also prepares the matching Camoufox build automa
 mkdir aistudio2api && cd aistudio2api
 curl -fsSLO https://raw.githubusercontent.com/Mag1cFall/AIStudio2API/main/docker-compose.yml
 mkdir data
-cat > data/.env <<'EOF'
+# Replace the placeholders below with two different strong secrets
+cat > .env <<'EOF'
 PROXY_API_KEY=<API key>
-ADMIN_AUTH_ENABLED=true
+ADMIN_USERNAME=admin
 ADMIN_PASSWORD=<console password>
 EOF
+chmod 600 .env
 docker compose up -d
 ```
 
-The image supports linux/amd64 and linux/arm64, and the service listens on `0.0.0.0:2048` inside the container. `data/` holds `.env`, `auth/`, and `runtime/`; with the Camoufox backend, the first start downloads Camoufox to `data/runtime/camoufox/`. To migrate an existing installation, copy these three items into `data/`. The container runs as root, so files the service writes in `data/` are owned by root; edit them with `sudo` on Linux hosts.
+The image supports linux/amd64 and linux/arm64, and the service listens on `0.0.0.0:2048` inside the container. Compose explicitly enables console login and passes administrator credentials and the API key from the adjacent `.env` file (or host environment variables) into the container. Startup is rejected if `ADMIN_PASSWORD` or `PROXY_API_KEY` is missing. This `.env` file supplies Compose interpolation values; its entire contents are not automatically passed into the container.
 
-- Set `PROXY_API_KEY` when the port is reachable from other machines. Opening the console from outside the container requires `ADMIN_AUTH_ENABLED=true` and a console password; the default username is `admin`.
+The image bundles Camoufox for the target architecture and its system libraries at build time, using the same browser version as the source. The image sets `CAMOUFOX_PATH=/opt/camoufox/camoufox-bin`, so cookie import, session verification, and the Camoufox backend do not download a browser at runtime. Pure Go WAA remains the default; bundling the browser does not start a resident browser process. Building requires access to GitHub Releases, and the image includes the full browser size.
+
+`data/` holds the application's `.env`, `auth/`, and `runtime/`. The browser is outside the `/data` mount and is updated with the image; the old `data/runtime/camoufox/` browser directory does not need to be migrated. To migrate an existing installation, copy these three items into `data/` and configure administrator credentials and the API key in the `.env` next to the Compose file. Container environment variables take precedence over `data/.env`, so editing these injected settings in the console or `data/.env` does not override Compose. The container runs as root, so files the service writes in `data/` are owned by root; edit them with `sudo` on Linux hosts.
+
+- Open `http://server-ip:2048/login` and sign in with the administrator credentials to access the console; the default username is `admin`. `PROXY_API_KEY` separately protects generation APIs. Use an HTTPS reverse proxy for public deployments, preserving the original `Host` and setting `X-Forwarded-Proto: https`.
 - Add accounts: copy `auth/<Google email>/` from a computer that can sign in to Google into `data/auth/`, or click "Add remotely" on the console Accounts page to get a pairing token, open an SSH tunnel with `ssh -L 2048:127.0.0.1:2048 <server>`, and run `setup --remote http://127.0.0.1:2048` on that computer.
 - `PROXY` and account proxies are reached from inside the container; when the proxy runs on the host, use the host's LAN address and allow LAN connections on the proxy.
-- Run `docker compose restart` after editing `data/.env`, `docker compose pull && docker compose up -d` to update the image, and `docker compose up -d --build` in the source directory to build from source.
+- After editing the `.env` next to the Compose file or `docker-compose.yml`, run `docker compose up -d --force-recreate`; `restart` alone does not update container environment variables. Use `docker compose restart` after editing settings in `data/.env` that are not overridden by environment variables. Run `docker compose pull && docker compose up -d` to update the image, and `docker compose up -d --build` in the source directory to build from source.
 
 ## Quick Start
 
@@ -161,6 +167,9 @@ The image supports linux/amd64 and linux/arm64, and the service listens on `0.0.
 3. **Add another account**:
    - Open Accounts
    - "Import Chrome accounts" supports selecting multiple local Chrome accounts
+   - "Import cookies" accepts pasted text or a file: Cookie request headers, Cookie-Editor JSON arrays, storage-state JSON containing a `cookies` array, or Netscape cookies (up to 1 MiB). Valid `SAPISID`, `__Secure-1PAPISID`, and `__Secure-3PAPISID` cookies are required. Copy the full `Cookie` request header from the Network tab on a signed-in AI Studio page; `document.cookie` omits HttpOnly cookies. Headless Camoufox is prepared on demand to verify the session and detect the default signed-in account email, then refreshed cookies and the fingerprint are saved. Existing accounts are not overwritten.
+     - Management endpoint: `POST /api/accounts/import/cookies`, with JSON fields `cookies` (text) and optional `proxy`, `locale`, and `timezone`. Management authentication and same-origin protection apply.
+     - Only Google cookies are imported; uploaded identity/OAuth metadata is not trusted and expired cookies are not extended. This does not obtain Chrome renewal credentials or perform interactive Drive consent, so related features may require browser login. Cookies are login credentials: only import your own accounts, use HTTPS or an SSH tunnel, and never share or commit them.
    - "Browser login" opens an isolated Camoufox window, detects the email after login, authorizes Google Drive, and saves the account; when Google asks to verify your identity, confirm it in that window or on your phone
 
 4. **Start the API**:
@@ -471,17 +480,17 @@ cp .env.example .env
 | `PROXY` | empty | HTTP, HTTPS, or SOCKS5 proxy used by Chrome import, login, and accounts without an override |
 | `INIT_TIMEOUT` | `2m` | Per-account WAA initialization timeout |
 | `REQUEST_TIMEOUT` | `5m` | Maximum request execution time |
-| `WARM_WORKER_LIMIT` | `5` | Number of resident prewarmed accounts |
-| `MAX_ACTIVE_WORKERS` | `10` | Maximum workers active during peak load |
-| `WARM_STARTUP_CONCURRENCY` | `5` | Camoufox workers cold-started concurrently, shared by prewarming and on-demand scaling; unlimited with `WAA_BACKEND=go` |
-| `PER_ACCOUNT_CONCURRENCY` | `2` | Concurrent requests allowed per account |
+| `WARM_WORKER_LIMIT` | `0` | Resident warm accounts; 0 starts on demand and releases all Workers after 30 idle seconds |
+| `MAX_ACTIVE_WORKERS` | `1` | Active Worker limit |
+| `WARM_STARTUP_CONCURRENCY` | `1` | Concurrent Worker cold starts, for both backends |
+| `PER_ACCOUNT_CONCURRENCY` | `1` | Concurrent requests allowed per account |
 | `ROUTING_STRATEGY` | `round-robin` | `round-robin` rotates accounts; `fill-first` reuses the first available account |
 | `UPSTREAM_CHANNELS` | `playground,build` | Upstream channels for generation requests; either one can be used alone |
 | `BUILD_NATIVE_NONSTREAM` | `true` | Prefer native Build unary calls for non-streaming requests; log any fallback to stream collection |
-| `WAA_BACKEND` | `camoufox` | `camoufox` runs WAA in a Camoufox page; `go` runs WAA inside the service process and neither downloads nor starts Camoufox |
+| `WAA_BACKEND` | `go` | `camoufox` runs WAA in a Camoufox page; `go` runs WAA inside the service process and neither downloads nor starts Camoufox |
 | `TEMPORARY_CHAT` | `false` | Use Temporary Chat for the WAA prewarm page |
 
-The service loads every account from `AISTUDIO_AUTH_STATES`. `WARM_WORKER_LIMIT` sets the resident warm pool, `MAX_ACTIVE_WORKERS` caps peak worker count, `WARM_STARTUP_CONCURRENCY` controls how many Camoufox workers cold-start at once, and `PER_ACCOUNT_CONCURRENCY` controls request slots per account.
+The service loads every account from `AISTUDIO_AUTH_STATES`. `WARM_WORKER_LIMIT` sets the resident warm pool, `MAX_ACTIVE_WORKERS` caps peak worker count, `WARM_STARTUP_CONCURRENCY` controls how many workers cold-start at once for either backend, and `PER_ACCOUNT_CONCURRENCY` controls request slots per account.
 
 ### Port Configuration
 

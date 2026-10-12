@@ -127,6 +127,11 @@ type IsolatedLoginDriver interface {
 	Verify(context.Context, IsolatedLoginRequest, StorageState) (LoginVerification, error)
 }
 
+// CookieLoginDriver 定义无需交互登录的 Cookie 验证与身份识别能力。
+type CookieLoginDriver interface {
+	ImportCookies(context.Context, IsolatedLoginRequest, StorageState) (IsolatedLoginResult, error)
+}
+
 // LoadStorageState 读取并校验 Playwright storage state
 func LoadStorageState(filePath string) (StorageState, error) {
 	data, err := os.ReadFile(filePath)

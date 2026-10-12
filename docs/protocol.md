@@ -1227,7 +1227,7 @@ POST /api/control/start
   -> if cache is empty, wait for the first non-empty live catalog
   -> prewarm up to WARM_WORKER_LIMIT workers
      with WARM_STARTUP_CONCURRENCY bootstraps
-  -> first worker ready
+  -> first worker ready (or skip prewarm when WARM_WORKER_LIMIT=0)
   -> RUNNING
   -> continue full catalog fan-out and remaining worker prewarm in background
   -> every 30s, fan out ListModels to every pending account

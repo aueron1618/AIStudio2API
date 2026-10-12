@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -256,7 +257,7 @@ func (err *accountWorkerInitError) Unwrap() error {
 	return err.err
 }
 
-// newAccountWorkerManager 创建账户 worker 配置，纯 Go 后端同时启动的 Worker 数只受活动上限约束
+// newAccountWorkerManager 创建账户 worker 配置，两种后端均限制并行冷启动以控制峰值内存
 func newAccountWorkerManager(
 	pool *aistudio.AccountPool,
 	accounts []*aistudio.Account,
@@ -269,9 +270,6 @@ func newAccountWorkerManager(
 	warmConcurrency int,
 	temporaryChat bool,
 ) *accountWorkerManager {
-	if camoufoxPath == "" {
-		warmConcurrency = max(maxActive, 1)
-	}
 	lifecycle, cancel := context.WithCancel(context.Background())
 	manager := &accountWorkerManager{
 		pool: pool, accounts: make(map[string]*accountWorker, len(accounts)), requests: requests, camoufox: camoufoxPath,
@@ -389,16 +387,37 @@ func (manager *accountWorkerManager) runtimeAvailable(accountIDs []string) ([]st
 // workerIdleTimeout 为超出热池目标的 Worker 空闲多久后关闭
 const workerIdleTimeout = 5 * time.Minute
 
-// reapIdleWorkers 定期关闭超出热池目标且空闲超时的 Worker
+// onDemandIdleTimeout 是零热池模式的回收等待，避免连续请求重复冷启动。
+const onDemandIdleTimeout = 30 * time.Second
+
+func (manager *accountWorkerManager) idleTimeout() time.Duration {
+	if manager.warmTarget == 0 {
+		return onDemandIdleTimeout
+	}
+	return workerIdleTimeout
+}
+
+// reapIdleWorkers 定期关闭超出热池目标且空闲超时的 Worker。
+// 零热池模式可释放最后一个 Worker；仅在实际释放资源后把空闲堆归还系统。
 func (manager *accountWorkerManager) reapIdleWorkers() {
-	ticker := time.NewTicker(workerIdleTimeout / 10)
+	timeout := manager.idleTimeout()
+	ticker := time.NewTicker(timeout / 10)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-manager.lifecycle.Done():
 			return
 		case <-ticker.C:
-			for manager.reapIdleWorker(time.Now().Add(-workerIdleTimeout)) {
+			before := time.Now().Add(-timeout)
+			released := false
+			for manager.reapIdleWorker(before) {
+				released = true
+			}
+			if manager.warmTarget == 0 {
+				released = aistudio.ReleaseIdleTokenizer(before) || released
+				if released {
+					debug.FreeOSMemory()
+				}
 			}
 		}
 	}
@@ -1308,6 +1327,26 @@ func (manager *accountWorkerManager) ensureWorker(
 			}
 			continue
 		}
+		if manager.warmTarget == 0 {
+			// 最低内存模式先释放空闲旧账户，再竞争启动槽位，避免跨账户替换时
+			// 同时保留旧 VM 与 pending VM。失败时不保留旧热实例，交给后续请求重建。
+			evicted, err := manager.evictIdleWorker(ctx, victim)
+			manager.rebalanceMu.Unlock()
+			if err != nil {
+				return nil, err
+			}
+			if evicted {
+				debug.FreeOSMemory()
+				continue
+			}
+			if !waitForOpening {
+				return nil, errAccountWorkerCapacity
+			}
+			if err := waitWarmCandidate(ctx, 100*time.Millisecond); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		manager.reserveVictim(victim)
 		defer func() { manager.releaseVictim(victim) }()
 		opening := make(chan struct{})
@@ -1439,6 +1478,11 @@ func (manager *accountWorkerManager) StartPrewarm(ctx context.Context) <-chan er
 	manager.mu.RUnlock()
 	if closed {
 		first <- fmt.Errorf("WAA worker manager 已关闭")
+		close(first)
+		return first
+	}
+	if manager.warmTarget == 0 {
+		first <- ctx.Err()
 		close(first)
 		return first
 	}

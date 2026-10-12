@@ -52,18 +52,32 @@ const protectedFetch = `(id, url, headers, body) => {
       state.headers = [...response.headers.entries()];
       if (!response.body) return;
       const reader = response.body.getReader();
-      for (;;) {
-        const {value, done} = await reader.read();
+      // 同时限制块数与块大小：队列最多持有 512 KiB 原始数据（Base64 约 683 KiB）。
+      // Fetch 的单次 read 大小不受控，不能把整个 value 转成一个大字符串。
+      const waitForSpace = async () => {
         while (state.chunks.length >= 8) {
           if (state.controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
           await new Promise(resolve => setTimeout(resolve, 5));
         }
-        if (done) break;
-        let binary = "";
-        for (let offset = 0; offset < value.length; offset += 32768) {
-          binary += String.fromCharCode(...value.subarray(offset, offset + 32768));
+        if (state.controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+      };
+      try {
+        for (;;) {
+          await waitForSpace();
+          const {value, done} = await reader.read();
+          if (done) break;
+          for (let offset = 0; offset < value.length; offset += 65536) {
+            await waitForSpace();
+            const end = Math.min(offset + 65536, value.length);
+            let binary = "";
+            for (let part = offset; part < end; part += 32768) {
+              binary += String.fromCharCode(...value.subarray(part, Math.min(part + 32768, end)));
+            }
+            state.chunks.push(btoa(binary));
+          }
         }
-        state.chunks.push(btoa(binary));
+      } finally {
+        reader.releaseLock();
       }
     } catch (error) {
       state.error = String(error);
@@ -224,6 +238,9 @@ func (body *protectedResponseBody) Read(target []byte) (int, error) {
 	if body.closed {
 		return 0, io.ErrClosedPipe
 	}
+	if len(target) == 0 {
+		return 0, nil
+	}
 	for len(body.buffer) == 0 && !body.done {
 		if err := body.ctx.Err(); err != nil {
 			return 0, err
@@ -237,11 +254,10 @@ func (body *protectedResponseBody) Read(target []byte) (int, error) {
 			body.done = true
 			return 0, errors.Join(errors.New(chunk.Error), body.worker.cancelProtectedRequest(body.requestID))
 		}
-		for _, data := range chunk.Data {
-			body.buffer, err = base64.StdEncoding.AppendDecode(body.buffer, []byte(data))
-			if err != nil {
-				return 0, fmt.Errorf("解码浏览器响应块: %w", err)
-			}
+		body.buffer, err = decodeProtectedData(chunk.Data)
+		if err != nil {
+			body.done = true
+			return 0, errors.Join(err, body.worker.cancelProtectedRequest(body.requestID))
 		}
 		body.done = chunk.Done
 		if len(body.buffer) == 0 && !body.done {
@@ -259,7 +275,30 @@ func (body *protectedResponseBody) Read(target []byte) (int, error) {
 	}
 	n := copy(target, body.buffer)
 	body.buffer = body.buffer[n:]
+	if len(body.buffer) == 0 {
+		body.buffer = nil
+	}
 	return n, nil
+}
+
+// decodeProtectedData 一次分配本轮解码缓冲，避免逐块 append 扩容时同时保留多份数据。
+func decodeProtectedData(chunks []string) ([]byte, error) {
+	capacity := 0
+	for _, chunk := range chunks {
+		capacity += base64.StdEncoding.DecodedLen(len(chunk))
+	}
+	var buffer []byte
+	if capacity > 0 {
+		buffer = make([]byte, 0, capacity)
+	}
+	for _, chunk := range chunks {
+		var err error
+		buffer, err = base64.StdEncoding.AppendDecode(buffer, []byte(chunk))
+		if err != nil {
+			return nil, fmt.Errorf("解码浏览器响应块: %w", err)
+		}
+	}
+	return buffer, nil
 }
 
 func (body *protectedResponseBody) Close() error {
@@ -270,6 +309,7 @@ func (body *protectedResponseBody) Close() error {
 		return nil
 	}
 	body.closed = true
+	body.buffer = nil
 	done := body.done
 	body.mu.Unlock()
 	if done {
@@ -308,6 +348,7 @@ func (worker *Worker) cancelProtectedRequest(requestID string) error {
   const state = window.__aistudioProtectedRequests?.get(%s);
   if (!state) return true;
   state.controller.abort();
+  state.chunks.length = 0;
   window.__aistudioProtectedRequests.delete(%s);
   return true;
 })()`, encodedID, encodedID)

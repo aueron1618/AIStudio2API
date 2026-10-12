@@ -9,5 +9,12 @@ services:
       - "2048:2048"
     environment:
       TZ: Asia/Shanghai
+      LISTEN_ADDR: 0.0.0.0:2048
+      # 公网管理必须登录；凭据从宿主机环境或同目录 .env 显式传入。
+      ADMIN_AUTH_ENABLED: "true"
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in the shell or the Compose .env file}
+      # 生成 API 使用独立密钥，管理登录不会保护 /v1 等公开接口。
+      PROXY_API_KEY: ${PROXY_API_KEY:?Set PROXY_API_KEY in the shell or the Compose .env file}
     volumes:
       - ./data:/data

@@ -29,7 +29,7 @@
 
 - **双额度通道**: 每个账户同时拥有 Playground 与 Build 应用代理两份独立额度，`UPSTREAM_CHANNELS` 可单独或同时启用；一个通道触发限额后，同一账户由另一个通道继续
 - **多账户高并发**: 识别 Free、Pro、Ultra 与 Plus 权益，按实时模型目录在账户间轮询或优先复用
-- **两种 WAA 后端**: 默认由 Camoufox 持有官方 WAA 生命周期；设置 `WAA_BACKEND=go` 后由纯 Go 生成官方 proof，运行时不下载、不启动浏览器
+- **低内存运行时**: 默认 `WAA_BACKEND=go`，纯 Go 生成官方 proof，不常驻浏览器；零热池按需启动，空闲 30 秒后释放 Worker。仍可选择 Camoufox 后端
 - **四套 API 协议**: OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 Gemini GenerateContent
 - **主流 agent 客户端**: 支持 Claude Code、Codex、OpenCode、pi、omp、OpenClaw、Hermes 的文件读写工具调用，Claude Code、Codex、omp 的原生联网搜索可直接使用
 
@@ -55,7 +55,7 @@
 - **Linux Release 运行**: 解压 `linux-amd64.tar.gz` 后运行 `./aistudio2api`，Camoufox 需要 Firefox 系运行库，Debian/Ubuntu 执行 `sudo apt install libgtk-3-0 libasound2 libnss3 libdbus-glib-1-2 libxtst6 libxrandr2 libgbm1 libxkbcommon0 libpango-1.0-0 libcairo2 libxcomposite1 libxdamage1 libxfixes3 fonts-liberation`
 - **源码运行**: Go 1.26.0+、Node.js 22.13+ 或 24+，以及配套 npm
 - **操作系统**: Windows、macOS、Linux
-- **内存**: 单账户建议 2GB+ 可用内存，每个常驻预热账户约增加 0.6GB
+- **内存**: 默认纯 Go、零常驻 Worker；首次请求和大上下文仍需要额外内存。Camoufox 后端单账户建议 2GB+ 可用内存；配置取舍及离线基准见 [运行时内存](docs/memory.md)
 - **网络**: 稳定的互联网连接访问 Google AI Studio
 
 ## 安装步骤
@@ -80,7 +80,7 @@ copy .env.example .env
 
 已有 `aistudio2api.exe` 时脚本立即运行；源码目录缺少可执行文件时，脚本自动安装前端依赖并构建前端与 Go 程序。
 
-首次启动会自动下载当前平台的 Camoufox 到 `runtime/camoufox/`。也可以通过环境变量 `CAMOUFOX_PATH` 指定已有可执行文件。
+默认纯 Go 生成服务不下载、不启动 Camoufox。选择 Camoufox 后端或使用浏览器登录/验证时，才按需下载到 `runtime/camoufox/`；也可以通过环境变量 `CAMOUFOX_PATH` 指定已有可执行文件。
 
 ### 方式二：Linux 与 macOS 源码构建
 
@@ -117,20 +117,26 @@ Linux 与 macOS 首次运行同样会自动准备对应平台的 Camoufox。
 mkdir aistudio2api && cd aistudio2api
 curl -fsSLO https://raw.githubusercontent.com/Mag1cFall/AIStudio2API/main/docker-compose.yml
 mkdir data
-cat > data/.env <<'EOF'
+# 将下面的占位值替换为两个不同的强密钥
+cat > .env <<'EOF'
 PROXY_API_KEY=<API key>
-ADMIN_AUTH_ENABLED=true
+ADMIN_USERNAME=admin
 ADMIN_PASSWORD=<管理密码>
 EOF
+chmod 600 .env
 docker compose up -d
 ```
 
-镜像支持 linux/amd64 与 linux/arm64，服务在容器内监听 `0.0.0.0:2048`。`data/` 保存 `.env`、`auth/` 与 `runtime/`，Camoufox 后端首次启动时把 Camoufox 下载到 `data/runtime/camoufox/`；迁移已有安装时把这三项复制到 `data/`。容器以 root 运行，服务写入 `data/` 的文件属于 root，Linux 宿主机上用 `sudo` 编辑。
+镜像支持 linux/amd64 与 linux/arm64，服务在容器内监听 `0.0.0.0:2048`。Compose 显式开启管理登录，并把同目录 `.env`（或宿主机环境变量）中的管理员凭据与 API 密钥传入容器；未设置 `ADMIN_PASSWORD` 或 `PROXY_API_KEY` 时拒绝启动。这里的 `.env` 用于 Compose 变量替换，不会自动整份传入容器。
 
-- 端口对外开放时设置 `PROXY_API_KEY`；从容器外打开管理页面需要 `ADMIN_AUTH_ENABLED=true` 与管理密码，用户名默认为 `admin`
+镜像在构建时已打包对应架构的 Camoufox 和运行库，浏览器版本与源码保持一致，路径为 `/opt/camoufox/camoufox-bin`，通过镜像内的 `CAMOUFOX_PATH` 指定。Cookie 导入、登录验证及 Camoufox 后端无需在容器运行时再次下载浏览器；默认仍使用纯 Go WAA，不会因预装浏览器而常驻浏览器进程。构建镜像需要能访问 GitHub Releases，镜像体积会包含完整浏览器。
+
+`data/` 保存程序配置 `.env`、`auth/` 与 `runtime/`；浏览器位于 `/data` 挂载之外，更新镜像即可更新配套浏览器，不需要迁移旧的 `data/runtime/camoufox/`。迁移已有安装时把这三项复制到 `data/`，并将管理员凭据与 API 密钥配置到 Compose 同目录的 `.env`。容器环境变量优先于 `data/.env`，因此通过面板或 `data/.env` 修改这些已注入的配置不会覆盖 Compose 配置。容器以 root 运行，服务写入 `data/` 的文件属于 root，Linux 宿主机上用 `sudo` 编辑。
+
+- 打开 `http://服务器IP:2048/login`，使用管理员账号密码登录后访问面板，用户名默认为 `admin`；`PROXY_API_KEY` 独立用于生成 API。公网部署应使用 HTTPS 反向代理，并保留原始 `Host`、设置 `X-Forwarded-Proto: https`
 - 添加账户：把能登录 Google 的电脑上的 `auth/<Google 邮箱>/` 复制到 `data/auth/`；或在管理页面账户页点击“远程添加”取得配对令牌，经 SSH 隧道 `ssh -L 2048:127.0.0.1:2048 <服务器>` 后在该电脑运行 `setup --remote http://127.0.0.1:2048`
 - `PROXY` 与账户代理从容器内访问，代理运行在宿主机时填写宿主机的局域网地址，并允许代理接受局域网连接
-- 修改 `data/.env` 后执行 `docker compose restart`；更新镜像执行 `docker compose pull && docker compose up -d`；在源码目录中执行 `docker compose up -d --build` 从源码构建
+- 修改 Compose 同目录的 `.env` 或 `docker-compose.yml` 后执行 `docker compose up -d --force-recreate`，仅 `restart` 不会更新容器环境变量；修改 `data/.env` 中未被环境变量覆盖的配置后可执行 `docker compose restart`。更新镜像执行 `docker compose pull && docker compose up -d`；在源码目录中执行 `docker compose up -d --build` 从源码构建
 
 ## 快速开始
 
@@ -161,6 +167,9 @@ docker compose up -d
 3. **添加其他账户**:
    - 打开“账户”页面
    - “Chrome 批量导入”可多选本机 Chrome 账户
+   - “Cookie 导入”支持粘贴或读取 Cookie 请求头文本、Cookie-Editor JSON 数组、含 `cookies` 数组的 storage-state JSON、Netscape 文件（最大 1 MiB）。需包含有效的 `SAPISID`、`__Secure-1PAPISID`、`__Secure-3PAPISID`；建议在已登录的 AI Studio 页面从开发者工具 Network 中复制完整 `Cookie` 请求头，`document.cookie` 会遗漏 HttpOnly Cookie。导入时按需准备无头 Camoufox，验证后自动识别默认登录账号的邮箱，保存轮换后的 Cookie 与指纹；已有账户不会被覆盖。
+     - 管理接口：`POST /api/accounts/import/cookies`，JSON 字段为 `cookies`（文本）、可选的 `proxy`、`locale`、`timezone`，沿用管理端认证与同源保护。
+     - 仅保存 Google Cookie，不信任上传文件的身份或 OAuth 扩展；过期 Cookie 不会被延长。Cookie 导入不取得 Chrome 续签材料，也不执行交互式 Drive 授权，相关功能可能需要浏览器登录。Cookie 等同登录凭据，请仅导入自己的账号并使用 HTTPS 或 SSH 隧道，勿分享或提交到版本库。
    - “浏览器登录”会打开独立 Camoufox 窗口，登录完成后自动识别邮箱、授权 Google Drive 并保存；Google 要求验证身份时，在该窗口或手机上确认
 
 4. **启动 API**:
@@ -471,17 +480,17 @@ cp .env.example .env
 | `PROXY` | 空 | Chrome 导入、登录和账户默认使用的 HTTP、HTTPS 或 SOCKS5 代理 |
 | `INIT_TIMEOUT` | `2m` | 单账户 WAA 初始化超时 |
 | `REQUEST_TIMEOUT` | `5m` | 单次请求最大执行时间 |
-| `WARM_WORKER_LIMIT` | `5` | 常驻预热账户数 |
-| `MAX_ACTIVE_WORKERS` | `10` | 高峰期最多同时运行的 Worker 数 |
-| `WARM_STARTUP_CONCURRENCY` | `5` | 同时冷启动的 Camoufox Worker 数，预热与按需扩容共用；`WAA_BACKEND=go` 时不限制 |
-| `PER_ACCOUNT_CONCURRENCY` | `2` | 单账号同时执行的请求数 |
+| `WARM_WORKER_LIMIT` | `0` | 常驻预热账户数；0 为按需启动，空闲 30 秒后回收全部 Worker |
+| `MAX_ACTIVE_WORKERS` | `1` | 高峰期活动 Worker 上限 |
+| `WARM_STARTUP_CONCURRENCY` | `1` | 同时冷启动的 Worker 数，两种后端均适用 |
+| `PER_ACCOUNT_CONCURRENCY` | `1` | 单账号同时执行的请求数 |
 | `ROUTING_STRATEGY` | `round-robin` | `round-robin` 轮询；`fill-first` 账号粘性优先 |
 | `UPSTREAM_CHANNELS` | `playground,build` | 生成请求使用的上游通道，可只保留其一 |
 | `BUILD_NATIVE_NONSTREAM` | `true` | 非流式请求优先使用 Build 原生单次调用；不可用时回退流式并记录原因 |
-| `WAA_BACKEND` | `camoufox` | `camoufox` 在 Camoufox 页面运行 WAA；`go` 在服务进程内运行 WAA，不下载也不启动 Camoufox |
+| `WAA_BACKEND` | `go` | `camoufox` 在 Camoufox 页面运行 WAA；`go` 在服务进程内运行 WAA，不下载也不启动 Camoufox |
 | `TEMPORARY_CHAT` | `false` | WAA 预热页是否使用临时对话 |
 
-服务启动时会载入 `AISTUDIO_AUTH_STATES` 中的全部账户；`WARM_WORKER_LIMIT` 控制常驻预热规模，`MAX_ACTIVE_WORKERS` 控制峰值 Worker 上限，`WARM_STARTUP_CONCURRENCY` 控制同时冷启动的 Camoufox Worker 数，`PER_ACCOUNT_CONCURRENCY` 控制单账户请求槽位。
+服务启动时会载入 `AISTUDIO_AUTH_STATES` 中的全部账户；`WARM_WORKER_LIMIT` 控制常驻预热规模，`MAX_ACTIVE_WORKERS` 控制峰值 Worker 上限，`WARM_STARTUP_CONCURRENCY` 控制两种后端同时冷启动的 Worker 数，`PER_ACCOUNT_CONCURRENCY` 控制单账户请求槽位。
 
 ### 端口配置
 
