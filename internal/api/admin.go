@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
@@ -17,6 +18,7 @@ type AdminService interface {
 	CreateAccount(context.Context, AccountCreateInput) (AdminAccount, error)
 	ChromeImportProfiles(context.Context) ([]ChromeImportProfile, error)
 	ImportChromeAccounts(context.Context, ChromeImportInput) ([]AdminAccount, error)
+	ImportCookieAccount(context.Context, CookieImportInput) (AdminAccount, error)
 	ImportAccountState(context.Context, AccountStateInput) (AdminAccount, error)
 	UpdateAccount(context.Context, string, AccountInput) (AdminAccount, error)
 	DeleteAccount(context.Context, string) error
@@ -180,6 +182,14 @@ type ChromeImportInput struct {
 	Timezone   string   `json:"timezone"`
 }
 
+// CookieImportInput 表示 Cookie 文本及账户环境；邮箱由上游登录页面识别。
+type CookieImportInput struct {
+	Cookies  string `json:"cookies"`
+	Proxy    string `json:"proxy"`
+	Locale   string `json:"locale"`
+	Timezone string `json:"timezone"`
+}
+
 // RuntimeConfig 表示全局运行配置
 type RuntimeConfig struct {
 	AutoStart                 bool     `json:"auto_start"`
@@ -242,6 +252,7 @@ func (s *server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/accounts", s.handleCreateAccount)
 	mux.HandleFunc("GET /api/accounts/import/chrome", s.handleChromeImportProfiles)
 	mux.HandleFunc("POST /api/accounts/import/chrome", s.handleImportChromeAccounts)
+	mux.HandleFunc("POST /api/accounts/import/cookies", s.handleImportCookieAccount)
 	mux.HandleFunc("POST /api/pairing", s.handleCreatePairing)
 	mux.HandleFunc("PUT /api/accounts/{id}", s.handleUpdateAccount)
 	mux.HandleFunc("DELETE /api/accounts/{id}", s.handleDeleteAccount)
@@ -304,6 +315,26 @@ func (s *server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	account, err := s.config.Admin.CreateAccount(r.Context(), input)
+	if err != nil {
+		writeAdminUpstreamError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]AdminAccount{"account": account})
+}
+
+func (s *server) handleImportCookieAccount(w http.ResponseWriter, r *http.Request) {
+	// JSON 转义后的文本可能大于原始 Cookie，解析前后分别限制大小。
+	r.Body = http.MaxBytesReader(w, r.Body, 8*aistudio.MaxCookieImportBytes)
+	var input CookieImportInput
+	if err := decodeJSON(r, &input); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "Cookie 导入请求必须是有效且不超限的 JSON")
+		return
+	}
+	if strings.TrimSpace(input.Cookies) == "" || len(input.Cookies) > aistudio.MaxCookieImportBytes {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "Cookie 文本不能为空且不能超过 1 MiB")
+		return
+	}
+	account, err := s.config.Admin.ImportCookieAccount(r.Context(), input)
 	if err != nil {
 		writeAdminUpstreamError(w, err)
 		return

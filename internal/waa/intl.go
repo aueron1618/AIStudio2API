@@ -24,7 +24,9 @@ var intlJavaScript string
 const intlScriptName = hostScriptName + "-intl"
 
 // intlInstaller 是预编译的 intl.js，各 Realm 共享
-var intlInstaller = goja.MustCompile(intlScriptName, intlJavaScript, false)
+var intlInstaller = sync.OnceValue(func() *goja.Program {
+	return goja.MustCompile(intlScriptName, intlJavaScript, false)
+})
 
 // intlCommonData 是 Firefox Intl 的取值列表、可用区域设置、默认值、数字系统与时区别名
 type intlCommonData struct {

@@ -19,10 +19,10 @@ const (
 	defaultListenAddr         = "127.0.0.1:2048"
 	defaultInitTimeout        = 2 * time.Minute
 	defaultRequestTimeout     = 5 * time.Minute
-	defaultWarmWorkerLimit    = 5
-	defaultMaxActiveWorkers   = 10
-	defaultWarmConcurrency    = 5
-	defaultAccountConcurrency = 2
+	defaultWarmWorkerLimit    = 0
+	defaultMaxActiveWorkers   = 1
+	defaultWarmConcurrency    = 1
+	defaultAccountConcurrency = 1
 )
 
 var configKeys = [...]string{
@@ -96,7 +96,7 @@ func Default() Config {
 		PerAccountConcurrency:  defaultAccountConcurrency,
 		RoutingStrategy:        "round-robin",
 		UpstreamChannels:       append([]string(nil), upstreamChannels...),
-		WAABackend:             WAABackendCamoufox,
+		WAABackend:             WAABackendGo,
 	}
 }
 
@@ -168,9 +168,9 @@ func Load(path string) (Config, error) {
 		}
 	}
 	if value, ok := values["WARM_WORKER_LIMIT"]; ok {
-		cfg.WarmWorkerLimit, err = parsePositiveInt("WARM_WORKER_LIMIT", value)
+		cfg.WarmWorkerLimit, err = strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
-			return Config{}, err
+			return Config{}, fmt.Errorf("WARM_WORKER_LIMIT 必须是非负整数: %w", err)
 		}
 	}
 	if value, ok := values["MAX_ACTIVE_WORKERS"]; ok {
@@ -270,8 +270,11 @@ func (c Config) Validate() error {
 	if c.RequestTimeout <= 0 {
 		return fmt.Errorf("REQUEST_TIMEOUT 必须是正数时长")
 	}
-	if c.WarmWorkerLimit <= 0 {
-		return fmt.Errorf("WARM_WORKER_LIMIT 必须是正整数")
+	if c.WarmWorkerLimit < 0 {
+		return fmt.Errorf("WARM_WORKER_LIMIT 必须是非负整数，0 表示按需启动")
+	}
+	if c.MaxActiveWorkers <= 0 {
+		return fmt.Errorf("MAX_ACTIVE_WORKERS 必须是正整数")
 	}
 	if c.MaxActiveWorkers < c.WarmWorkerLimit {
 		return fmt.Errorf("MAX_ACTIVE_WORKERS 必须大于或等于 WARM_WORKER_LIMIT")

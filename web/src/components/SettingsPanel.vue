@@ -42,13 +42,13 @@ const form = reactive<ServiceConfig>({
   proxy: '',
   init_timeout: '2m',
   request_timeout: '5m',
-  warm_worker_limit: 5,
-  max_active_workers: 10,
-  warm_startup_concurrency: 5,
-  per_account_concurrency: 2,
+  warm_worker_limit: 0,
+  max_active_workers: 1,
+  warm_startup_concurrency: 1,
+  per_account_concurrency: 1,
   routing_strategy: 'round-robin',
   upstream_channels: ['playground', 'build'],
-  waa_backend: 'camoufox',
+  waa_backend: 'go',
   temporary_chat: false,
 })
 
@@ -358,7 +358,7 @@ async function saveConfig(): Promise<void> {
                 v-model.number="form.warm_worker_limit"
                 :class="inputClass"
                 type="number"
-                min="1"
+                min="0"
               />
             </SettingRow>
             <SettingRow
@@ -373,7 +373,7 @@ async function saveConfig(): Promise<void> {
                 v-model.number="form.max_active_workers"
                 :class="inputClass"
                 type="number"
-                :min="form.warm_worker_limit"
+                :min="Math.max(1, form.warm_worker_limit)"
               />
             </SettingRow>
             <SettingRow

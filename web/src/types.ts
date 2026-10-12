@@ -46,6 +46,10 @@ export interface PairingToken {
   expires_at: string
 }
 
+export interface CookieImportInput extends AccountLoginInput {
+  cookies: string
+}
+
 export interface ChromeImportInput extends AccountLoginInput {
   account_ids: string[]
 }

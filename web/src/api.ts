@@ -5,6 +5,7 @@ import type {
   AccountLoginInput,
   AdminEvent,
   ChromeImportInput,
+  CookieImportInput,
   ChromeImportProfile,
   PairingToken,
   Model,
@@ -166,6 +167,11 @@ export const api = {
     }),
   chromeImportProfiles: async () =>
     (await requestJSON<ChromeProfilesResponse>('/api/accounts/import/chrome')).profiles,
+  importCookieAccount: (input: CookieImportInput) =>
+    requestJSON<AccountResponse>('/api/accounts/import/cookies', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
   importChromeAccounts: (input: ChromeImportInput) =>
     requestJSON<AccountsResponse>('/api/accounts/import/chrome', {
       method: 'POST',

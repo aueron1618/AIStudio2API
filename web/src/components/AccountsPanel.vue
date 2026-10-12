@@ -29,6 +29,8 @@ const defaultAccountTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone 
 const showEditor = ref(false)
 const showBrowserLogin = ref(false)
 const showChromeImport = ref(false)
+const showCookieImport = ref(false)
+const cookieText = ref('')
 const editingAccountID = ref('')
 const pendingAction = ref('')
 const chromeProfiles = ref<ChromeImportProfile[]>([])
@@ -196,6 +198,45 @@ async function importChromeAccounts(): Promise<void> {
   }
 }
 
+function closeCookieImport(): void {
+  if (pendingAction.value !== '') return
+  showCookieImport.value = false
+  cookieText.value = ''
+}
+
+async function readCookieFile(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  pendingAction.value = 'cookie-file'
+  cookieText.value = ''
+  try {
+    if (file.size > 1024 * 1024) throw new Error(t('accounts.cookieTooLarge'))
+    cookieText.value = await file.text()
+  } catch (error) {
+    actionError(error)
+  } finally {
+    input.value = ''
+    pendingAction.value = ''
+  }
+}
+
+async function importCookieAccount(): Promise<void> {
+  if (pendingAction.value !== '' || !cookieText.value.trim()) return
+  pendingAction.value = 'cookie-import'
+  try {
+    await api.importCookieAccount({ cookies: cookieText.value, ...accountEnvironment })
+    cookieText.value = ''
+    showCookieImport.value = false
+    emit('refresh')
+    emit('notice', t('accounts.importComplete').replace('{count}', '1'), 'success')
+  } catch (error) {
+    actionError(error)
+  } finally {
+    pendingAction.value = ''
+  }
+}
+
 // saveAccount 保存已有账户配置并刷新产品数据
 async function saveAccount(): Promise<void> {
   if (editingAccountID.value === '') return
@@ -278,6 +319,15 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
         >
           <UiIcon name="accounts" :size="15" />
           {{ t('accounts.importChrome') }}
+        </button>
+        <button
+          class="flex items-center gap-2 rounded border border-line bg-raised px-4 py-2 text-sm font-medium text-gray-200 transition hover:bg-line disabled:opacity-50"
+          type="button"
+          :disabled="pendingAction !== ''"
+          @click="showCookieImport = true"
+        >
+          <UiIcon name="accounts" :size="15" />
+          {{ t('accounts.importCookies') }}
         </button>
         <button
           class="flex items-center gap-2 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
@@ -566,6 +616,123 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
               :aria-busy="pendingAction === 'browser-login'"
             >
               {{ t('accounts.browserLogin') }}
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <div v-if="showCookieImport" class="modal-overlay" @click.self="closeCookieImport">
+        <form
+          class="mx-4 max-h-[90vh] w-full max-w-lg overflow-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="cookie-import-title"
+          @submit.prevent="importCookieAccount"
+          @keydown.esc="closeCookieImport"
+        >
+          <div class="mb-4 flex items-center justify-between">
+            <h3 id="cookie-import-title" class="text-lg font-bold text-white">
+              {{ t('accounts.importCookies') }}
+            </h3>
+            <button
+              class="rounded p-1 text-gray-500 hover:bg-line hover:text-white disabled:opacity-50"
+              type="button"
+              :disabled="pendingAction !== ''"
+              :aria-label="t('common.close')"
+              @click="closeCookieImport"
+            >
+              <UiIcon name="close" :size="16" />
+            </button>
+          </div>
+          <p class="mb-3 text-sm leading-6 text-gray-400">{{ t('accounts.cookieHelp') }}</p>
+          <p
+            class="mb-4 rounded border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-5 text-amber-200"
+          >
+            {{ t('accounts.cookieSecurity') }}
+          </p>
+          <fieldset class="space-y-4" :disabled="pendingAction !== ''">
+            <label class="block">
+              <span class="mb-1 block text-sm font-medium text-gray-400">{{
+                t('accounts.cookieFile')
+              }}</span>
+              <input
+                class="w-full text-sm text-gray-400"
+                type="file"
+                accept=".json,.txt,.cookies,application/json,text/plain"
+                @change="readCookieFile"
+              />
+            </label>
+            <label class="block">
+              <span class="mb-1 block text-sm font-medium text-gray-400">{{
+                t('accounts.cookieData')
+              }}</span>
+              <textarea
+                v-model="cookieText"
+                class="w-full rounded border border-line bg-canvas px-3 py-2 font-mono text-xs text-white focus:border-blue-500 focus:outline-none"
+                rows="7"
+                maxlength="1048576"
+                placeholder="SAPISID=…; __Secure-1PAPISID=…; __Secure-3PAPISID=…; …"
+                autocomplete="off"
+                autocapitalize="off"
+                :spellcheck="false"
+                required
+              ></textarea>
+            </label>
+            <label class="block">
+              <span class="mb-1 block text-sm font-medium text-gray-400">{{
+                t('accounts.proxy')
+              }}</span>
+              <input
+                v-model.trim="accountEnvironment.proxy"
+                class="w-full rounded border border-line bg-canvas px-3 py-2 text-white focus:border-blue-500 focus:outline-none"
+                placeholder="socks5://127.0.0.1:1080"
+              />
+            </label>
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <label class="block">
+                <span class="mb-1 block text-sm font-medium text-gray-400">{{
+                  t('accounts.locale')
+                }}</span>
+                <input
+                  v-model.trim="accountEnvironment.locale"
+                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white focus:border-blue-500 focus:outline-none"
+                  required
+                />
+              </label>
+              <label class="block">
+                <span class="mb-1 block text-sm font-medium text-gray-400">{{
+                  t('accounts.timezone')
+                }}</span>
+                <input
+                  v-model.trim="accountEnvironment.timezone"
+                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white focus:border-blue-500 focus:outline-none"
+                  required
+                />
+              </label>
+            </div>
+          </fieldset>
+          <div class="mt-6 flex gap-2">
+            <button
+              class="flex-1 rounded bg-raised py-2 text-sm text-gray-300 hover:bg-line disabled:opacity-50"
+              type="button"
+              :disabled="pendingAction !== ''"
+              @click="closeCookieImport"
+            >
+              {{ t('common.cancel') }}
+            </button>
+            <button
+              class="flex-1 rounded bg-blue-600 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-50"
+              type="submit"
+              :disabled="pendingAction !== '' || !cookieText.trim()"
+              :aria-busy="pendingAction === 'cookie-import'"
+            >
+              {{
+                t(
+                  pendingAction === 'cookie-import'
+                    ? 'accounts.cookieImporting'
+                    : 'accounts.importCookies',
+                )
+              }}
             </button>
           </div>
         </form>

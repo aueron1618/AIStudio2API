@@ -8,15 +8,16 @@ WAA（Web Application Attestation）为 AI Studio 的受保护 RPC 提供 BotGua
 
 | 值 | VM 位置 | 受保护请求发送 | 浏览器依赖 |
 | --- | --- | --- | --- |
-| `camoufox`（默认） | 账户固定指纹的 Camoufox 页面 | 页面原生 `fetch` | 启动时定位或下载 Camoufox |
-| `go` | 服务进程内的 goja VM | Go HTTP，Firefox 152 网络形状 | 仅账户登录与验证时按需准备 |
+| `camoufox` | 账户固定指纹的 Camoufox 页面 | 页面原生 `fetch` | 启动时定位或下载 Camoufox |
+| `go`（默认） | 服务进程内的 goja VM | Go HTTP，Firefox 152 网络形状 | 仅账户登录与验证时按需准备 |
 
 - 配置来源为 `.env`、管理页面设置中的“WAA 后端”或 `PUT /api/config` 的 `waa_backend`；取值去除空白并转小写，其他值在配置校验时报错；保存值在下一次启动生成服务时生效
 - `go` 后端装配运行时时输出 `运行时装配 | 2/3 | WAA 后端=go | 账户=<数量>`，不定位、不下载、不启动 Camoufox，也不清理遗留 Camoufox profile
 - 账户页的浏览器登录与账户验证使用按需创建的登录驱动：第一次调用时定位 Camoufox，缺失时下载当前平台的固定版本，之后复用该驱动
 - 账户指纹由 Go 生成并保存到 `camoufox-fingerprint.json`，两种后端读取同一份文件
 - Worker 配置没有 Camoufox 路径时启动纯 Go Worker；Worker 状态中 `RuntimeID` 为 `go-waa`，`PID` 为服务进程 PID
-- 调度、热池容量、runtime 租约、重试与冷却在两种后端上相同，见 [开发与贡献](development.md)
+- 调度、热池容量、runtime 租约、重试与冷却在两种后端上相同；默认零热池、活动上限 1，两种后端冷启动并发均为 1。零热池按需创建 Worker，空闲 30 秒后释放，见 [运行时内存](memory.md) 与 [开发与贡献](development.md)
+- Firefox 形状表使用进程共享的只读 Go 数据和各 VM 的动态包装，避免每账户重复 JSON.parse；弱缓存随最后一个使用者释放后可被 GC 回收。账户 DOM、JS 构造器与原型仍各自隔离
 - 纯 Go 后端不含平台相关代码，随同一 Go 程序在各发布平台运行；浏览器登录依赖 Camoufox 发行包覆盖的 Windows、Linux 与 macOS
 
 两种后端通过同一组 Worker 能力接入请求编码器：

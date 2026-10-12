@@ -84,6 +84,15 @@ func (lazy *lazyLoginDriver) Login(ctx context.Context, request aistudio.Isolate
 	return driver.Login(ctx, request)
 }
 
+// ImportCookies 按需准备无头 Camoufox，验证导入 Cookie 并识别邮箱。
+func (lazy *lazyLoginDriver) ImportCookies(ctx context.Context, request aistudio.IsolatedLoginRequest, state aistudio.StorageState) (aistudio.IsolatedLoginResult, error) {
+	driver, err := lazy.resolve(ctx)
+	if err != nil {
+		return aistudio.IsolatedLoginResult{}, err
+	}
+	return driver.ImportCookies(ctx, request, state)
+}
+
 // Verify 使用按需准备的 Camoufox 校验账户登录态
 func (lazy *lazyLoginDriver) Verify(ctx context.Context, request aistudio.IsolatedLoginRequest, state aistudio.StorageState) (aistudio.LoginVerification, error) {
 	driver, err := lazy.resolve(ctx)

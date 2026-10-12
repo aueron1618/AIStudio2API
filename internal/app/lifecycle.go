@@ -373,6 +373,13 @@ func (manager *runtimeManager) ImportChromeAccounts(ctx context.Context, input a
 	return manager.current.admin.ImportChromeAccounts(ctx, input)
 }
 
+// ImportCookieAccount 在当前生成服务验证并导入 Cookie 账户。
+func (manager *runtimeManager) ImportCookieAccount(ctx context.Context, input api.CookieImportInput) (api.AdminAccount, error) {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return manager.current.admin.ImportCookieAccount(ctx, input)
+}
+
 // ImportAccountState 在当前生成服务导入远程配对账户
 func (manager *runtimeManager) ImportAccountState(ctx context.Context, input api.AccountStateInput) (api.AdminAccount, error) {
 	manager.mu.RLock()

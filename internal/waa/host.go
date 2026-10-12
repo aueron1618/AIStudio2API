@@ -27,6 +27,7 @@ func gunzip(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer reader.Close()
 	return io.ReadAll(reader)
 }
 
@@ -128,6 +129,23 @@ const hostJavaScript = `
 })
 `
 
+// 宿主字节码不含 Realm 状态，首次使用时编译一次；Camoufox 后端不加载这些脚本。
+var domProgram = sync.OnceValue(func() *goja.Program {
+	return goja.MustCompile(hostScriptName, domJavaScript, false)
+})
+
+var hostProgram = sync.OnceValue(func() *goja.Program {
+	return goja.MustCompile(hostScriptName, hostJavaScript, false)
+})
+
+var firefoxOrderShape = sync.OnceValues(func() (*globalOrderShape, error) {
+	source, err := firefoxShapeJSON()
+	if err != nil {
+		return nil, err
+	}
+	return parseGlobalOrderShape(source)
+})
+
 // installRealmHost 在指定 Realm 安装宿主并返回该 Realm 的 DOM 接口
 func (state *hostState) installRealmHost(vm *goja.Runtime, realm string, createIframe func() *goja.Object) (goja.Value, error) {
 	if err := installBinaryEncoding(vm); err != nil {
@@ -136,11 +154,11 @@ func (state *hostState) installRealmHost(vm *goja.Runtime, realm string, createI
 	if err := installQueueMicrotask(vm); err != nil {
 		return nil, err
 	}
-	installDOM, err := vm.RunScript(hostScriptName, domJavaScript)
+	installDOM, err := vm.RunProgram(domProgram())
 	if err != nil {
 		return nil, fmt.Errorf("编译 WAA DOM 宿主: %w", err)
 	}
-	hostFunction, err := vm.RunScript(hostScriptName, hostJavaScript)
+	hostFunction, err := vm.RunProgram(hostProgram())
 	if err != nil {
 		return nil, fmt.Errorf("编译 WAA Realm 宿主: %w", err)
 	}
@@ -149,16 +167,11 @@ func (state *hostState) installRealmHost(vm *goja.Runtime, realm string, createI
 		return nil, errors.New("WAA Realm 宿主不是函数")
 	}
 	if state.shape == nil {
-		shapeJSON, err := firefoxShapeJSON()
-		if err != nil {
-			return nil, fmt.Errorf("读取 Firefox 形状表: %w", err)
-		}
-		parse, _ := goja.AssertFunction(vm.Get("JSON").ToObject(vm).Get("parse"))
-		state.shape, err = parse(goja.Undefined(), vm.ToValue(shapeJSON))
+		state.shape, err = firefoxShape(vm)
 		if err != nil {
 			return nil, fmt.Errorf("解析 Firefox 形状表: %w", err)
 		}
-		state.order, err = parseGlobalOrderShape(shapeJSON)
+		state.order, err = firefoxOrderShape()
 		if err != nil {
 			return nil, fmt.Errorf("解析 Firefox 全局键顺序: %w", err)
 		}
@@ -180,13 +193,13 @@ func (state *hostState) installRealmHost(vm *goja.Runtime, realm string, createI
 	input := vm.NewObject()
 	_ = input.Set("markNative", func(call goja.FunctionCall) goja.Value {
 		if object, ok := call.Argument(0).(*goja.Object); ok {
-			state.registry.native[object] = call.Argument(1).String()
+			state.registry.native.set(object, call.Argument(1).String())
 		}
 		return call.Argument(0)
 	})
 	_ = input.Set("nativeSource", func(call goja.FunctionCall) goja.Value {
 		if object, ok := call.Argument(0).(*goja.Object); ok {
-			if source, exists := state.registry.native[object]; exists {
+			if source, exists := state.registry.native.get(object); exists {
 				return vm.ToValue(source)
 			}
 		}
@@ -194,7 +207,7 @@ func (state *hostState) installRealmHost(vm *goja.Runtime, realm string, createI
 	})
 	_ = input.Set("trust", func(call goja.FunctionCall) goja.Value {
 		if object, ok := call.Argument(0).(*goja.Object); ok {
-			state.registry.trusted[object] = call.Argument(1).String()
+			state.registry.trusted.set(object, call.Argument(1).String())
 		}
 		return goja.Undefined()
 	})
@@ -202,7 +215,7 @@ func (state *hostState) installRealmHost(vm *goja.Runtime, realm string, createI
 	if err != nil {
 		return nil, err
 	}
-	installIntl, err := vm.RunProgram(intlInstaller)
+	installIntl, err := vm.RunProgram(intlInstaller())
 	if err != nil {
 		return nil, fmt.Errorf("编译 WAA Intl 宿主: %w", err)
 	}

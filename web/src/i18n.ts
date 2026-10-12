@@ -61,7 +61,7 @@ const zhCN = {
   'common.error': '请求失败',
   'common.unknown': '未知',
   'accounts.empty': '暂无账户',
-  'accounts.emptyHint': '通过浏览器登录或从 Chrome 导入账户',
+  'accounts.emptyHint': '通过浏览器登录、Chrome 或 Cookie 导入账户',
   'accounts.proxy': '账户代理',
   'accounts.locale': '语言区域',
   'accounts.timezone': '时区',
@@ -70,6 +70,15 @@ const zhCN = {
   'accounts.direct': '直连',
   'accounts.browserLogin': '浏览器登录',
   'accounts.importChrome': 'Chrome 批量导入',
+  'accounts.importCookies': 'Cookie 导入',
+  'accounts.cookieHelp':
+    '粘贴 AI Studio 的完整 Cookie 请求头、Cookie-Editor JSON 数组、storage-state JSON 或 Netscape 文本。通过无头浏览器验证后自动识别默认登录账号的邮箱，不覆盖已有账户。',
+  'accounts.cookieSecurity':
+    'Cookie 等同登录凭据，请仅导入自己的账号，并使用 HTTPS 或本机连接。不会获取 Chrome 续签材料或交互授权 Drive；过期后可能需要重新导入或登录。',
+  'accounts.cookieData': 'Cookie 内容',
+  'accounts.cookieFile': '从文件读取（可选）',
+  'accounts.cookieTooLarge': 'Cookie 文件不能超过 1 MiB',
+  'accounts.cookieImporting': '正在验证并导入…',
   'accounts.chromeTitle': '选择 Chrome 账户',
   'accounts.chromeEmpty': '没有可导入的 Chrome 账户',
   'accounts.importSelected': '导入所选账户',
@@ -142,7 +151,7 @@ const zhCN = {
   'settings.requestTimeout': '请求超时',
   'settings.warmWorkerLimit': '常驻 Worker 数',
   'settings.maxActiveWorkers': '峰值 Worker 上限',
-  'settings.warmStartupConcurrency': 'Camoufox 启动并发',
+  'settings.warmStartupConcurrency': 'Worker 启动并发',
   'settings.perAccountConcurrency': '单账户请求并发',
   'settings.routingStrategy': '账户选择策略',
   'settings.routingRoundRobin': '轮询',
@@ -281,11 +290,12 @@ const zhCN = {
   'settings.listenHelp': '管理页面与公开 API 共用的监听地址。',
   'settings.apiKeyHelp': '公开 API 请求携带的密钥。为空时，浏览器中只有本机页面可以直接调用接口。',
   'settings.authPathHelp': '账户文件、目录或多个逗号分隔的路径。',
-  'settings.warmWorkerLimitHelp': '生成服务启动后常驻预热的账户数。',
+  'settings.warmWorkerLimitHelp':
+    '常驻预热账户数。0 为最低内存模式：按需启动，空闲 30 秒后释放全部 Worker；首个请求需要冷启动。',
   'settings.maxActiveWorkersHelp':
-    '高峰期最多同时运行的 Worker 数；超出常驻数的 Worker 空闲 5 分钟后关闭。',
+    '高峰期最多同时运行的 Worker 数；零热池空闲 30 秒后关闭，否则超出常驻数的 Worker 空闲 5 分钟后关闭。',
   'settings.warmStartupConcurrencyHelp':
-    '同时冷启动的 Camoufox Worker 数，预热与按需扩容共用；纯 Go 后端不受此限制。',
+    '同时冷启动的 Worker 数，纯 Go 和 Camoufox 均适用；设为 1 可减少启动峰值内存。',
   'settings.perAccountConcurrencyHelp': '单个账户同时执行的请求数。',
   'settings.buildNativeHelp':
     '非流式请求优先使用账户的 Build 原生单次调用；该账户 Build 冷却或不支持模型时，使用同一账户的 Playground。',
@@ -498,7 +508,7 @@ const en: Record<TranslationKey, string> = {
   'common.error': 'Request failed',
   'common.unknown': 'Unknown',
   'accounts.empty': 'No accounts',
-  'accounts.emptyHint': 'Log in with a browser or import accounts from Chrome',
+  'accounts.emptyHint': 'Log in with a browser, or import Chrome accounts or cookies',
   'accounts.proxy': 'Account proxy',
   'accounts.locale': 'Locale',
   'accounts.timezone': 'Timezone',
@@ -507,6 +517,15 @@ const en: Record<TranslationKey, string> = {
   'accounts.direct': 'Direct',
   'accounts.browserLogin': 'Browser login',
   'accounts.importChrome': 'Import Chrome accounts',
+  'accounts.importCookies': 'Import cookies',
+  'accounts.cookieHelp':
+    'Paste the full AI Studio Cookie header, a Cookie-Editor JSON array, storage-state JSON, or Netscape text. A headless browser verifies the session and detects the default signed-in account email. Existing accounts are not overwritten.',
+  'accounts.cookieSecurity':
+    'Cookies are login credentials. Only import your own accounts over HTTPS or a local connection. Chrome renewal credentials and interactive Drive consent are not obtained; expired cookies may require reimport or login.',
+  'accounts.cookieData': 'Cookie data',
+  'accounts.cookieFile': 'Read from file (optional)',
+  'accounts.cookieTooLarge': 'Cookie files must not exceed 1 MiB',
+  'accounts.cookieImporting': 'Verifying and importing…',
   'accounts.chromeTitle': 'Select Chrome accounts',
   'accounts.chromeEmpty': 'No Chrome accounts are available to import',
   'accounts.importSelected': 'Import selected',
@@ -580,7 +599,7 @@ const en: Record<TranslationKey, string> = {
   'settings.requestTimeout': 'Request timeout',
   'settings.warmWorkerLimit': 'Resident workers',
   'settings.maxActiveWorkers': 'Active worker limit',
-  'settings.warmStartupConcurrency': 'Camoufox startup concurrency',
+  'settings.warmStartupConcurrency': 'Worker startup concurrency',
   'settings.perAccountConcurrency': 'Concurrent requests per account',
   'settings.routingStrategy': 'Account selection strategy',
   'settings.routingRoundRobin': 'Round robin',
@@ -724,11 +743,12 @@ const en: Record<TranslationKey, string> = {
   'settings.apiKeyHelp':
     'Key sent with public API requests. When empty, only pages on this machine can call the API from a browser.',
   'settings.authPathHelp': 'Account file, directory or several comma-separated paths.',
-  'settings.warmWorkerLimitHelp': 'Accounts kept warm after the generation service starts.',
+  'settings.warmWorkerLimitHelp':
+    'Resident warm accounts. Use 0 for minimum memory: start on demand and release all Workers after 30 idle seconds. The first request needs a cold start.',
   'settings.maxActiveWorkersHelp':
-    'Maximum Workers running at peak; Workers above the warm count close after 5 idle minutes.',
+    'Maximum Workers running at peak. A zero warm pool closes Workers after 30 idle seconds; otherwise excess Workers close after 5 idle minutes.',
   'settings.warmStartupConcurrencyHelp':
-    'Camoufox Workers cold-starting at once, shared by prewarm and scale-up; the pure Go backend is not limited.',
+    'Workers cold-starting at once for both pure Go and Camoufox. Use 1 to reduce startup memory peaks.',
   'settings.perAccountConcurrencyHelp': 'Requests one account runs at the same time.',
   'settings.buildNativeHelp':
     "Non-streaming requests prefer the account's native Build call; when that account's Build is cooling down or lacks the model, the same account's Playground is used.",
