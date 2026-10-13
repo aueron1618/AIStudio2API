@@ -283,7 +283,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, status)
 		return
 	}
-	if _, err := s.service.Models(r.Context()); err != nil {
+	if _, err := s.models(r.Context()); err != nil {
 		writeAdminUpstreamError(w, err)
 		return
 	}

@@ -105,6 +105,13 @@ func buildMethodSelection(selection AccountSelection) bool {
 
 // selectionChannelsLocked 返回选择可使用的通道顺序，优先通道排在首位；embedding 只使用 Build，实时方法依次尝试 Playground 与 Build，其余非生成请求只使用 Playground RPC
 func (p *AccountPool) selectionChannelsLocked(selection AccountSelection) []Channel {
+	if selection.Channel != "" {
+		if !p.channelEnabledLocked(selection.Channel) || selection.Channel == ChannelBuild &&
+			!generationChannelSelection(selection) && !buildMethodSelection(selection) {
+			return nil
+		}
+		return []Channel{selection.Channel}
+	}
 	if !generationChannelSelection(selection) {
 		if buildMethodSelection(selection) && p.channelEnabledLocked(ChannelBuild) {
 			if selection.Method == "embedContent" {
@@ -113,12 +120,6 @@ func (p *AccountPool) selectionChannelsLocked(selection AccountSelection) []Chan
 			return []Channel{ChannelPlayground, ChannelBuild}
 		}
 		return []Channel{ChannelPlayground}
-	}
-	if selection.Channel != "" {
-		if p.channelEnabledLocked(selection.Channel) {
-			return []Channel{selection.Channel}
-		}
-		return nil
 	}
 	channels := p.enabledChannelsLocked()
 	if selection.PreferredChannel == "" || !slices.Contains(channels, selection.PreferredChannel) {

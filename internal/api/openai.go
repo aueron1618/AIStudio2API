@@ -133,7 +133,7 @@ func lookupPublicModel(models []aistudio.Model, id string) (aistudio.Model, bool
 }
 
 func (s *server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
-	models, err := s.service.Models(r.Context())
+	models, err := s.models(r.Context())
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
 			if r.Header.Get("Anthropic-Version") != "" {
@@ -157,7 +157,7 @@ func (s *server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 
 // handleOpenAIModel 返回实时目录中的单模型或协议化错误
 func (s *server) handleOpenAIModel(w http.ResponseWriter, r *http.Request) {
-	models, err := s.service.Models(r.Context())
+	models, err := s.models(r.Context())
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
 			if r.Header.Get("Anthropic-Version") != "" {

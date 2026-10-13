@@ -214,7 +214,7 @@ type geminiToolConfig struct {
 }
 
 func (s *server) handleGeminiModels(w http.ResponseWriter, r *http.Request) {
-	models, err := s.service.Models(r.Context())
+	models, err := s.models(r.Context())
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
 			writeGeminiError(w, statusFromError(err), geminiErrorStatus(err), err.Error())
@@ -230,7 +230,7 @@ func (s *server) handleGeminiModels(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleGeminiModel(w http.ResponseWriter, r *http.Request) {
 	modelID := r.PathValue("model")
-	models, err := s.service.Models(r.Context())
+	models, err := s.models(r.Context())
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
 			writeGeminiError(w, statusFromError(err), geminiErrorStatus(err), err.Error())

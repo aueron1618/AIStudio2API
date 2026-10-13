@@ -10,6 +10,7 @@ import type {
   PairingToken,
 } from '@/types'
 import UiIcon from './UiIcon.vue'
+import AccountRegionFields from './AccountRegionFields.vue'
 
 defineProps<{
   accounts: Account[]
@@ -506,28 +507,7 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
                 placeholder="socks5://127.0.0.1:1080"
               />
             </label>
-            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.locale')
-                }}</span>
-                <input
-                  v-model.trim="draft.locale"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                  required
-                />
-              </label>
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.timezone')
-                }}</span>
-                <input
-                  v-model.trim="draft.timezone"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                  required
-                />
-              </label>
-            </div>
+            <AccountRegionFields v-model:locale="draft.locale" v-model:timezone="draft.timezone" />
           </div>
           <div class="mt-6 flex gap-2">
             <button
@@ -577,28 +557,10 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
                 placeholder="socks5://127.0.0.1:1080"
               />
             </label>
-            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.locale')
-                }}</span>
-                <input
-                  v-model.trim="accountEnvironment.locale"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                  required
-                />
-              </label>
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.timezone')
-                }}</span>
-                <input
-                  v-model.trim="accountEnvironment.timezone"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                  required
-                />
-              </label>
-            </div>
+            <AccountRegionFields
+              v-model:locale="accountEnvironment.locale"
+              v-model:timezone="accountEnvironment.timezone"
+            />
           </div>
           <div class="mt-6 flex gap-2">
             <button
@@ -688,28 +650,10 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
                 placeholder="socks5://127.0.0.1:1080"
               />
             </label>
-            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.locale')
-                }}</span>
-                <input
-                  v-model.trim="accountEnvironment.locale"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white focus:border-blue-500 focus:outline-none"
-                  required
-                />
-              </label>
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.timezone')
-                }}</span>
-                <input
-                  v-model.trim="accountEnvironment.timezone"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white focus:border-blue-500 focus:outline-none"
-                  required
-                />
-              </label>
-            </div>
+            <AccountRegionFields
+              v-model:locale="accountEnvironment.locale"
+              v-model:timezone="accountEnvironment.timezone"
+            />
           </fieldset>
           <div class="mt-6 flex gap-2">
             <button
@@ -766,28 +710,10 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
                 placeholder="socks5://127.0.0.1:1080"
               />
             </label>
-            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.locale')
-                }}</span>
-                <input
-                  v-model.trim="accountEnvironment.locale"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                  required
-                />
-              </label>
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.timezone')
-                }}</span>
-                <input
-                  v-model.trim="accountEnvironment.timezone"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                  required
-                />
-              </label>
-            </div>
+            <AccountRegionFields
+              v-model:locale="accountEnvironment.locale"
+              v-model:timezone="accountEnvironment.timezone"
+            />
           </div>
           <div v-if="chromeProfiles.length === 0" class="py-8 text-center text-sm text-gray-500">
             {{ t('accounts.chromeEmpty') }}

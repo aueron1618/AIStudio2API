@@ -327,7 +327,8 @@ func (s *PooledService) Models(ctx context.Context) ([]Model, error) {
 		}
 		return nil, ErrNoEligibleAccount
 	}
-	return models, nil
+	models = mergeModels(models, s.CachedModels())
+	return FilterModelsByChannel(s.pool.EligibleModels(models), ChannelFromContext(ctx)), nil
 }
 
 // RefreshAccountModels 刷新指定账户的权益与模型目录

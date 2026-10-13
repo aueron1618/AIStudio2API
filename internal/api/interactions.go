@@ -51,7 +51,7 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 	}
 	audioExpected := false
 	if slices.Contains(generate.Config.ResponseModalities, aistudio.ResponseModalityAudio) {
-		models, err := s.service.Models(r.Context())
+		models, err := s.models(r.Context())
 		if err != nil {
 			if shouldWriteRequestError(r, err) {
 				writeGeminiError(w, statusFromError(err), geminiErrorStatus(err), err.Error())

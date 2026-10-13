@@ -97,7 +97,9 @@ func NewHandler(service aistudio.Service, config Config) http.Handler {
 	root.Handle("GET /health", corsMiddleware(http.HandlerFunc(s.handleHealth)))
 	publicHandler := bodyLimitMiddleware(browserOriginMiddleware(config.APIKey, authMiddleware(config.APIKey, requestBodyMiddleware(config.Ledger, public))))
 	loggedHandler := requestLoggingMiddleware(config.Admin, corsMiddleware(publicHandler))
-	root.Handle("/v1/", loggedHandler)
+	root.Handle("/v1/", channelMiddleware(aistudio.ChannelPlayground, loggedHandler))
+	root.Handle("/build/v1/", channelMiddleware(aistudio.ChannelBuild,
+		requestLoggingMiddleware(config.Admin, corsMiddleware(http.StripPrefix("/build", publicHandler)))))
 	root.Handle("/v1beta/", loggedHandler)
 	root.Handle("/upload/", requestLoggingMiddleware(config.Admin, corsMiddleware(s.geminiUploadHandler(publicHandler))))
 	root.Handle("/api/", newAdminAuth(config).handler(control))

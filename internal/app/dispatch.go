@@ -31,7 +31,7 @@ func dispatchKey(selection aistudio.AccountSelection) string {
 	slices.Sort(allowed)
 	return strings.Join([]string{
 		selection.ModelID, selection.Method, selection.Capability, selection.AccountID, selection.ResourceID,
-		strings.Join(allowed, ","), strconv.FormatBool(selection.PlaygroundOnly),
+		strings.Join(allowed, ","), strconv.FormatBool(selection.PlaygroundOnly), string(selection.Channel),
 	}, "\x00")
 }
 
