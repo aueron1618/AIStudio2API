@@ -2261,8 +2261,8 @@ func (service *trackedService) finishStop(transitionDone chan struct{}, modelRef
 }
 
 // Models 返回启用账户具有模型资格的公开目录
-func (service *trackedService) Models(context.Context) ([]aistudio.Model, error) {
-	return service.pool.EligibleModels(service.modelSnapshot()), nil
+func (service *trackedService) Models(ctx context.Context) ([]aistudio.Model, error) {
+	return aistudio.FilterModelsByChannel(service.pool.EligibleModels(service.modelSnapshot()), aistudio.ChannelFromContext(ctx)), nil
 }
 
 // catalogModels 返回管理页使用的完整目录与各模型可用通道
@@ -3195,7 +3195,8 @@ func (service *trackedService) generateWithRetry(
 		if resourceID != "" || request.Config.SpeechConfig != nil && request.Config.SpeechConfig.Mode != "" {
 			selection.PlaygroundOnly = true
 		}
-		if !selection.PlaygroundOnly && service.pool.BuildEnabled() && aistudio.RequestNeedsBuildSchema(request) {
+		selection.Channel = aistudio.ChannelFromContext(requestCtx)
+		if selection.Channel == "" && !selection.PlaygroundOnly && service.pool.BuildEnabled() && aistudio.RequestNeedsBuildSchema(request) {
 			selection.Channel = aistudio.ChannelBuild
 		}
 		fallbackReason := ""
@@ -3222,7 +3223,7 @@ func (service *trackedService) generateWithRetry(
 		}
 		nextLease, acquireErr := service.acquireWarmLease(requestCtx, selection)
 		var buildCooling *aistudio.AllCoolingError
-		if acquireErr != nil && selection.Channel == aistudio.ChannelBuild && requestCtx.Err() == nil &&
+		if acquireErr != nil && aistudio.ChannelFromContext(requestCtx) == "" && selection.Channel == aistudio.ChannelBuild && requestCtx.Err() == nil &&
 			(errors.Is(acquireErr, aistudio.ErrNoEligibleAccount) || errors.As(acquireErr, &buildCooling)) {
 			// 没有账户能经 Build 服务时，结构化输出 Schema 改用 Playground 载体
 			selection.Channel = ""

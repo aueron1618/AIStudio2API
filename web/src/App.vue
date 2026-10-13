@@ -54,15 +54,15 @@ function lazyPanel(loader: AsyncComponentLoader) {
 const UsagePanel = lazyPanel(() => import('@/components/UsagePanel.vue'))
 const PlaygroundPanel = lazyPanel(() => import('@/components/PlaygroundPanel.vue'))
 const validTabs: TabID[] = [
-  'logs',
   'accounts',
   'models',
   'requests',
   'usage',
   'settings',
   'playground',
+  'logs',
 ]
-const { tab: currentTab, select: selectTab } = useTabParam(validTabs, 'logs')
+const { tab: currentTab, select: selectTab } = useTabParam(validTabs, 'accounts')
 const navigationBar = ref<HTMLElement | null>(null)
 
 // revealCurrentTab 把窄屏横向导航的当前项横向滚入视野
@@ -108,13 +108,13 @@ const visibleAccounts = computed(() =>
 )
 
 const navigation: { id: TabID; label: TranslationKey; icon: IconName }[] = [
-  { id: 'logs', label: 'nav.logs', icon: 'logs' },
   { id: 'accounts', label: 'nav.accounts', icon: 'accounts' },
   { id: 'models', label: 'nav.models', icon: 'models' },
   { id: 'requests', label: 'nav.requests', icon: 'requests' },
   { id: 'usage', label: 'nav.usage', icon: 'usage' },
   { id: 'settings', label: 'nav.settings', icon: 'settings' },
   { id: 'playground', label: 'nav.playground', icon: 'playground' },
+  { id: 'logs', label: 'nav.logs', icon: 'logs' },
 ]
 
 const serviceState = computed(() => {

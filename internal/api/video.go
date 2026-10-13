@@ -251,7 +251,7 @@ func (s *server) handleOpenAIVideoCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if strings.TrimSpace(request.Model) == "" {
-		models, err := s.service.Models(r.Context())
+		models, err := s.models(r.Context())
 		if err != nil {
 			if shouldWriteRequestError(r, err) {
 				writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())

@@ -113,7 +113,7 @@ func (s *server) translationModels(ctx context.Context, model string) (string, s
 	if model == "" {
 		return aistudio.DefaultTranscriptionModel, openAITranslationModel, nil
 	}
-	models, err := s.service.Models(ctx)
+	models, err := s.models(ctx)
 	if err != nil {
 		return "", "", err
 	}

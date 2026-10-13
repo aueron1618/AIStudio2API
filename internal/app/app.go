@@ -182,6 +182,7 @@ func rootHandler(apiHandler http.Handler) http.Handler {
 	root.Handle("/health", apiHandler)
 	root.Handle("/api/", apiHandler)
 	root.Handle("/v1/", apiHandler)
+	root.Handle("/build/v1/", apiHandler)
 	root.Handle("/v1beta/", apiHandler)
 	root.Handle("/upload/", apiHandler)
 	root.Handle("/", webui.Handler())

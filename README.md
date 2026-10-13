@@ -27,7 +27,7 @@
 
 ## 核心能力
 
-- **双额度通道**: 每个账户同时拥有 Playground 与 Build 应用代理两份独立额度，`UPSTREAM_CHANNELS` 可单独或同时启用；一个通道触发限额后，同一账户由另一个通道继续
+- **双额度通道**: 每个账户同时拥有 Playground 与 Build 应用代理两份独立额度，`UPSTREAM_CHANNELS` 可单独或同时启用；公开 API 按 URL 固定通道，`/v1` 使用 Playground、`/build/v1` 使用 Build，不跨通道回退
 - **多账户高并发**: 识别 Free、Pro、Ultra 与 Plus 权益，按实时模型目录在账户间轮询或优先复用
 - **低内存运行时**: 默认 `WAA_BACKEND=go`，纯 Go 生成官方 proof，不常驻浏览器；零热池按需启动，空闲 30 秒后释放 Worker。仍可选择 Camoufox 后端
 - **四套 API 协议**: OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 Gemini GenerateContent
@@ -234,7 +234,9 @@ curl http://127.0.0.1:2048/v1/chat/completions \
 | Anthropic Messages | `http://127.0.0.1:2048` | `.env` 中的 `PROXY_API_KEY` |
 | Gemini | `http://127.0.0.1:2048` | `.env` 中的 `PROXY_API_KEY` |
 
-模型名称从 `GET /v1/models` 或 `GET /v1beta/models` 读取。`PROXY_API_KEY` 为空时，浏览器中只有本机页面可以直接调用接口；网页版客户端和部分桌面客户端需要设置 `PROXY_API_KEY`。
+OpenAI / Anthropic 的 `/v1` 接口固定使用 **Playground** 通道；使用 **Build** 通道时，将 Base URL 改为 `http://127.0.0.1:2048/build/v1`（Anthropic 客户端的服务器地址改为 `http://127.0.0.1:2048/build`）。`GET /v1/models` 只返回 Playground 可用模型，`GET /build/v1/models` 只返回 Build 可用模型，单模型查询同样按通道过滤。请求不会因限额、结构化输出或非流式优先选项切换到另一通道；目标通道需要在 `UPSTREAM_CHANNELS` 中启用。Build 不支持的专用能力或方法不会自动改走 Playground。`/v1beta` 保持原有调度行为。
+
+模型名称从对应通道的模型接口或 `GET /v1beta/models` 读取。`PROXY_API_KEY` 为空时，浏览器中只有本机页面可以直接调用接口；网页版客户端和部分桌面客户端需要设置 `PROXY_API_KEY`。
 
 以 Cherry Studio 为例：
 

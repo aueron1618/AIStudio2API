@@ -100,6 +100,10 @@ func requestRow(entry api.AccessLog, finished time.Time) requestdb.Row {
 
 // requestProtocol 按公开 API 路径归类请求协议
 func requestProtocol(path string) string {
+	// 保留日志中的原始路径，仅在协议分类时去掉通道前缀。
+	if strings.HasPrefix(path, "/build/v1/") {
+		path = strings.TrimPrefix(path, "/build")
+	}
 	switch {
 	case path == "/v1/chat/completions":
 		return "openai-chat"

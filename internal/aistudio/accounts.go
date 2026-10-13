@@ -1000,6 +1000,7 @@ func (p *AccountPool) AcquireAccount(ctx context.Context, accountID string) (*Ac
 
 // AcquireFor 按模型方法账户或资源粘性获取账户槽位
 func (p *AccountPool) AcquireFor(ctx context.Context, selection AccountSelection) (*AccountLease, error) {
+	selection = selectionWithChannel(ctx, selection)
 	if p == nil {
 		return nil, ErrNoEligibleAccount
 	}
@@ -1090,6 +1091,7 @@ func (p *AccountPool) AcquireFor(ctx context.Context, selection AccountSelection
 
 // TryAcquireFor 尝试获取账户槽位并立即返回当前结果
 func (p *AccountPool) TryAcquireFor(ctx context.Context, selection AccountSelection) (*AccountLease, bool, error) {
+	selection = selectionWithChannel(ctx, selection)
 	if p == nil {
 		return nil, false, ErrNoEligibleAccount
 	}
@@ -2262,6 +2264,7 @@ func (p *AccountPool) ClassifyCandidates(
 	selection AccountSelection,
 	warmAccountIDs []string,
 ) (AccountCandidateGroups, error) {
+	selection = selectionWithChannel(ctx, selection)
 	if p == nil {
 		return AccountCandidateGroups{}, ErrNoEligibleAccount
 	}

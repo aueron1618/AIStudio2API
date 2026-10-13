@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 # Keep the bundled browser aligned with the version used by the Go downloader.
 COPY internal/camoufoxnative/download.go /tmp/camoufox-download.go
+# Drop macOS fonts/config before the final COPY, keeping Windows, Linux and shared emoji fonts.
 RUN set -eu; \
     version="$(sed -n 's/^const camoufoxRelease = "\([^"]*\)"$/\1/p' /tmp/camoufox-download.go)"; \
     test -n "$version"; \
@@ -37,6 +38,7 @@ RUN set -eu; \
     unzip -q /tmp/camoufox.zip -d /opt/camoufox; \
     test -f /opt/camoufox/camoufox-bin; \
     chmod 755 /opt/camoufox/camoufox-bin; \
+    rm -rf /opt/camoufox/fonts/macos /opt/camoufox/fontconfig/macos; \
     rm /tmp/camoufox.zip /tmp/camoufox-download.go
 
 FROM debian:bookworm-slim

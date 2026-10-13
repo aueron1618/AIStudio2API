@@ -17,9 +17,9 @@ func TestChannelSelection(t *testing.T) {
 	}{
 		{AccountSelection{ModelID: "gemini", Method: "generateContent"}, []Channel{ChannelPlayground, ChannelBuild}},
 		{AccountSelection{ModelID: "gemini", Method: "generateContent", Channel: ChannelBuild}, []Channel{ChannelBuild}},
-		{AccountSelection{ModelID: "gemini", Method: "generateContent", ResourceID: "file", Channel: ChannelBuild}, []Channel{ChannelPlayground}},
-		{AccountSelection{ModelID: "gemini", Method: "countTokens", Channel: ChannelBuild}, []Channel{ChannelPlayground}},
-		{AccountSelection{ModelID: "gemini", Method: "generateContent", PlaygroundOnly: true, Channel: ChannelBuild}, []Channel{ChannelPlayground}},
+		{AccountSelection{ModelID: "gemini", Method: "generateContent", ResourceID: "file", Channel: ChannelBuild}, nil},
+		{AccountSelection{ModelID: "gemini", Method: "countTokens", Channel: ChannelBuild}, nil},
+		{AccountSelection{ModelID: "gemini", Method: "generateContent", PlaygroundOnly: true, Channel: ChannelBuild}, nil},
 	} {
 		if got := pool.selectionChannelsLocked(item.selection); !reflect.DeepEqual(got, item.want) {
 			t.Errorf("selection=%+v channels=%v want=%v", item.selection, got, item.want)
