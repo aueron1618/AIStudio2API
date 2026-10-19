@@ -35,6 +35,7 @@ func (s *server) handleOpenAIImageEdits(w http.ResponseWriter, r *http.Request) 
 		Model: r.FormValue("model"), Prompt: r.FormValue("prompt"), Size: r.FormValue("size"),
 		Quality: r.FormValue("quality"), ResponseFormat: r.FormValue("response_format"),
 	}
+	setAccessLogRequestedModel(r.Context(), request.Model)
 	request.Stream, _ = strconv.ParseBool(r.FormValue("stream"))
 	if value := strings.TrimSpace(r.FormValue("n")); value != "" {
 		count, err := strconv.Atoi(value)

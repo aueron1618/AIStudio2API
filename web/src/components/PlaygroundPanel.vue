@@ -72,7 +72,7 @@ const pill =
   'max-w-full rounded-md border border-white/10 bg-transparent px-3 py-1 text-xs text-gray-300 transition-colors hover:bg-white/5'
 // field 是参数浮层中输入控件的样式
 const field =
-  'w-full rounded-lg border border-line bg-canvas px-2.5 py-1.5 text-xs text-white focus:border-blue-500 focus:outline-none'
+  'min-w-0 w-full rounded-lg border border-line bg-canvas px-2.5 py-1.5 text-xs text-white focus:border-blue-500 focus:outline-none'
 
 // markdown 渲染回复正文，原始 HTML 按文本转义，链接在新标签页打开
 const markdown = new MarkdownIt({ linkify: true, breaks: true })
@@ -433,7 +433,7 @@ onUnmounted(() => {
 
 <template>
   <section class="flex min-h-0 flex-1 bg-canvas">
-    <div class="flex min-w-0 flex-1 flex-col">
+    <div class="flex min-h-0 min-w-0 flex-1 flex-col max-lg:overflow-y-auto">
       <header class="flex h-12 shrink-0 items-center gap-2 border-b border-line px-3 md:px-4">
         <div
           class="flex min-w-0 items-center gap-1 overflow-x-auto"
@@ -478,7 +478,7 @@ onUnmounted(() => {
       <div ref="scroller" class="min-h-0 flex-1 overflow-y-auto">
         <div
           v-if="!hasRun"
-          class="flex h-full flex-col items-center justify-center px-6 text-center"
+          class="flex min-h-full flex-col items-center justify-center px-6 text-center"
         >
           <h2 class="text-2xl font-semibold text-gray-100">{{ t('playground.emptyTitle') }}</h2>
           <p class="mt-2 max-w-md text-sm text-gray-500">
@@ -508,7 +508,7 @@ onUnmounted(() => {
                 />
               </summary>
               <div
-                class="mt-2 border-l-2 border-line pl-4 text-[13px] leading-6 whitespace-pre-wrap text-gray-400"
+                class="mt-2 border-l-2 border-line pl-4 text-[13px] leading-6 break-words whitespace-pre-wrap text-gray-400"
                 v-text="result.reasoning"
               ></div>
             </details>
@@ -615,7 +615,7 @@ onUnmounted(() => {
             ref="promptInput"
             v-model="form.prompt"
             rows="1"
-            class="block max-h-60 min-h-[52px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-sm leading-6 text-gray-100 placeholder:text-gray-500 focus:outline-none"
+            class="block max-h-[min(15rem,25dvh)] min-h-[52px] w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-sm leading-6 text-gray-100 placeholder:text-gray-500 focus:outline-none md:max-h-60"
             :aria-label="t('playground.placeholder')"
             :placeholder="t('playground.placeholder')"
             @keydown.enter="submitOnEnter"
@@ -766,7 +766,7 @@ onUnmounted(() => {
     <aside
       v-if="settingsOpen"
       :aria-label="t('playground.options')"
-      class="fixed inset-y-0 right-0 z-50 flex w-[min(22rem,100vw)] flex-col border-l border-line bg-panel shadow-xl shadow-black/40 lg:static lg:z-auto lg:w-80 lg:shrink-0 lg:shadow-none"
+      class="fixed inset-y-0 right-0 z-50 flex h-dvh min-h-0 w-[min(22rem,100vw)] flex-col border-l border-line bg-panel shadow-xl shadow-black/40 lg:static lg:z-auto lg:h-auto lg:w-80 lg:shrink-0 lg:shadow-none"
     >
       <div class="flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
         <h2 class="text-sm font-medium text-gray-200">{{ t('playground.options') }}</h2>

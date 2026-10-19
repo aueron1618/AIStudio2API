@@ -131,6 +131,14 @@ func (e *RPCError) HTTPStatus() int {
 	return e.StatusCode
 }
 
+// RetryAt 返回上游给出的可重试时刻，没有重试时长时返回零值
+func (e *RPCError) RetryAt(now time.Time) time.Time {
+	if e.RetryDelay <= 0 {
+		return time.Time{}
+	}
+	return now.Add(e.RetryDelay)
+}
+
 func (c *Client) do(ctx context.Context, method string, accountID string, requestID string, body []byte, streaming bool) (*RPCResponse, error) {
 	rpc := newRPCRequest(method, accountID, requestID, body, streaming)
 	c.applyBenefitTier(method, accountID, rpc.Header)

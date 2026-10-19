@@ -353,7 +353,7 @@ Playground 私有字段在 Build 请求中不发送：账户时区、GenerateCon
 - 带 `thought: true` 的 `inlineData` 是图片模型思考过程中的草图，不作为输出媒体
 - `groundingMetadata` 读取 `webSearchQueries`、`searchEntryPoint {renderedContent, sdkBlob}`、`groundingChunks` 的 `web`、`retrievedContext`、`maps`（`uri`、`title`、`text`、`placeId`）、`groundingSupports`（segment 的 `partIndex`、`startIndex`、`endIndex`、`text`，`groundingChunkIndices`，`confidenceScores`）与 `googleMapsWidgetContextToken`
 - `usageMetadata` 的 `totalTokenCount` 大于 0 时记录：`promptTokenCount` 为输入，`candidatesTokenCount` 为输出，`thoughtsTokenCount` 为思考，`toolUsePromptTokenCount` 为工具；缺少 `candidatesTokenCount` 时输出为总数减去其余三项
-- 第一次出现 `finishReason` 时先发出最近的 usage，再发出 finish；终止原因为去掉 `FINISH_REASON_` 前缀后的小写枚举名，与 Playground 的规范终止原因一致，`UNSPECIFIED` 为 `unspecified`
+- 第一次出现 `finishReason` 时先发出最近的 usage，再发出 finish；终止原因为去掉 `FINISH_REASON_` 前缀后的小写枚举名，Playground 未定义的名称加 `provider_` 标记，`UNSPECIFIED` 为 `unspecified`
 - 没有 candidate 且带 `promptFeedback.blockReason` 时返回 prompt feedback 错误，原因为去掉 `BLOCK_REASON_` 前缀的小写枚举名
 - candidate 数量不是 1、正文不是 JSON 或 Base64 无效时返回带路径的协议错误；流结束时没有 `finishReason` 同样为协议错误
 
@@ -389,8 +389,8 @@ HTTP 非 200 响应解码为协议错误，保留 HTTP 状态、google.rpc code�
 | 16 | 401 |
 | 其他 | 502 |
 
-- HTTP 429 按元数据或消息识别分钟限额与每日限额：分钟限额冷却到窗口重置，每日限额冷却到下一个额度日；非全局限额写入 `build:<模型>`，全局限额写入账户 `*`
-- 流尾错误按换算后的 HTTP 状态处理；首个上游语义事件之前的 401、403、404、429 与 5xx 进入换号、换通道与冷却流程，之后的错误以流内 error 结束
+- HTTP 429 按元数据或消息识别分钟限额与每日限额：分钟限额冷却到窗口重置，每日限额冷却到下一个额度日；非全局限额写入 `build:<模型>`，全局限额写入账户 `*`。没有明确恢复时间的套餐限额按同一 scope 递增冷却 1、5、15、30、60 分钟，活跃冷却不延长，成功后重置；明确重试时长始终优先，所有额度项均为 `limit: 0` 时标记为无配额
+- 流尾错误按换算后的 HTTP 状态处理；首个上游语义事件之前的 401、403、404、429 与 5xx 进入换号与冷却流程，流式输出开始后的错误以流内 error 结束。非流式请求收齐事件前遇到传输中断，可丢弃部分结果并换号；`/build/v1` 固定 Build，不跨通道回退
 - HTTP 403 与 Code 7 保留账户与模型资格，请求切换到其他账户
 - 模型不存在返回 404 Code 5；只能配合 Computer Use 的模型在纯文本请求时返回 400 Code 3，这类模型不进入 Build 通道
 

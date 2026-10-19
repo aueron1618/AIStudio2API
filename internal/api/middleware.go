@@ -27,6 +27,8 @@ type accessLogMetadata struct {
 	started         bool
 	generation      bool
 	model           string
+	requestedModel  string
+	responseModel   string
 	account         string
 	channel         string
 	finishReason    string
@@ -57,6 +59,8 @@ type accessLogMetadata struct {
 type accessLogSnapshot struct {
 	generation      bool
 	model           string
+	requestedModel  string
+	responseModel   string
 	account         string
 	channel         string
 	finishReason    string
@@ -142,6 +146,7 @@ func (metadata *accessLogMetadata) start(force bool) {
 	admin := metadata.admin
 	entry := AccessLog{
 		Method: metadata.method, Path: metadata.path, Model: metadata.model, Account: metadata.account, Channel: metadata.channel,
+		RequestedModel: metadata.requestedModel, ResponseModel: metadata.responseModel,
 		Temperature: metadata.temperature, TopP: metadata.topP, Thinking: metadata.thinking,
 		MaxOutputTokens: metadata.maxOutputTokens, Generation: metadata.generation, RequestID: metadata.requestID,
 		InputMessages: metadata.inputMessages, InputTextChars: metadata.inputTextChars,
@@ -256,6 +261,7 @@ func (metadata *accessLogMetadata) snapshot() accessLogSnapshot {
 	snapshot := accessLogSnapshot{
 		generation: metadata.generation,
 		model:      metadata.model, account: metadata.account, channel: metadata.channel, finishReason: metadata.finishReason,
+		requestedModel: metadata.requestedModel, responseModel: metadata.responseModel,
 		requestErr: metadata.err, canceled: metadata.canceled,
 		failureStatus: metadata.failureStatus,
 		firstEvent:    metadata.firstEvent,
@@ -375,6 +381,15 @@ func formatLogThinking(config aistudio.GenerationConfig) string {
 	return "默认"
 }
 
+// setAccessLogRequestedModel preserves the client model before alias resolution or retries.
+func setAccessLogRequestedModel(ctx context.Context, model string) {
+	if metadata, ok := ctx.Value(accessLogContextKey{}).(*accessLogMetadata); ok {
+		metadata.mu.Lock()
+		metadata.requestedModel = model
+		metadata.mu.Unlock()
+	}
+}
+
 // SetAccessLogTarget 写入请求实际使用的模型与账户
 func SetAccessLogTarget(ctx context.Context, model string, account string) {
 	if metadata, ok := ctx.Value(accessLogContextKey{}).(*accessLogMetadata); ok {
@@ -447,6 +462,7 @@ func requestLoggingMiddleware(admin AdminService, next http.Handler) http.Handle
 				Thinking: snapshot.thinking, MaxOutputTokens: snapshot.maxOutputTokens,
 				RequestID: snapshot.requestID,
 				Method:    r.Method, Path: r.URL.Path, Model: snapshot.model, Account: snapshot.account, Channel: snapshot.channel,
+				RequestedModel: snapshot.requestedModel, ResponseModel: snapshot.responseModel,
 				FinishReason: snapshot.finishReason, Error: snapshot.requestErr,
 				Canceled: snapshot.canceled, Generation: snapshot.generation, Attempts: snapshot.attempts,
 				Authorized: snapshot.authorized,
@@ -458,6 +474,39 @@ func requestLoggingMiddleware(admin AdminService, next http.Handler) http.Handle
 func setAccessLogResponseError(w http.ResponseWriter, message string) {
 	if writer, ok := w.(interface{ setError(string) }); ok {
 		writer.setError(message)
+	}
+}
+
+// setAccessLogResponseModel reads only the emitted protocol model, not provider_model or content.
+func setAccessLogResponseModel(w http.ResponseWriter, event string, payload any) {
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return
+	}
+	switch {
+	case strings.HasPrefix(event, "response."):
+		object, _ = object["response"].(map[string]any)
+	case event == "message_start":
+		object, _ = object["message"].(map[string]any)
+	case strings.HasPrefix(event, "interaction."):
+		object, _ = object["interaction"].(map[string]any)
+	}
+	model, _ := object["model"].(string)
+	if model == "" {
+		return
+	}
+	for {
+		switch writer := w.(type) {
+		case *accessLogResponseWriter:
+			writer.metadata.mu.Lock()
+			writer.metadata.responseModel = model
+			writer.metadata.mu.Unlock()
+			return
+		case interface{ Unwrap() http.ResponseWriter }:
+			w = writer.Unwrap()
+		default:
+			return
+		}
 	}
 }
 

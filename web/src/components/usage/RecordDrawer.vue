@@ -53,7 +53,8 @@ const summary = computed(() => {
   const record = props.record
   if (record === null) return []
   return [
-    { label: t('usage.dimension.model'), value: record.model || '—' },
+    { label: t('usage.requestedModel'), value: record.requested_model || record.model || '—' },
+    { label: t('usage.responseModel'), value: record.response_model || '—' },
     { label: t('usage.dimension.account'), value: record.account || '—' },
     { label: t('usage.dimension.channel'), value: dimensionLabel('channel', record.channel) },
     { label: t('usage.dimension.protocol'), value: dimensionLabel('protocol', record.protocol) },
@@ -108,7 +109,9 @@ async function copy(kind: string, text: string): Promise<void> {
               {{ t('usage.detailTitle') }}
             </DialogTitle>
             <DialogDescription class="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-400">
-              <code class="font-mono text-gray-300">{{ record.id }}</code>
+              <code class="min-w-0 max-w-full font-mono break-words text-gray-300">{{
+                record.id
+              }}</code>
               <button
                 v-if="clipboardAvailable"
                 type="button"
@@ -122,7 +125,7 @@ async function copy(kind: string, text: string): Promise<void> {
             </DialogDescription>
           </div>
           <DialogClose
-            class="rounded p-1 text-gray-500 hover:bg-raised hover:text-white"
+            class="shrink-0 rounded p-1 text-gray-500 hover:bg-raised hover:text-white"
             :aria-label="t('common.close')"
           >
             <UiIcon name="close" :size="16" />
@@ -160,7 +163,10 @@ async function copy(kind: string, text: string): Promise<void> {
                 class="flex min-w-0 justify-between gap-3"
               >
                 <dt class="shrink-0 text-gray-500">{{ item.label }}</dt>
-                <dd v-tooltip="item.value" class="truncate text-right text-gray-200 tabular-nums">
+                <dd
+                  v-tooltip="item.value"
+                  class="min-w-0 text-right break-words text-gray-200 tabular-nums"
+                >
                   {{ item.value }}
                 </dd>
               </div>
@@ -188,7 +194,7 @@ async function copy(kind: string, text: string): Promise<void> {
                   aria-hidden="true"
                 ></span>
                 <div class="flex flex-wrap gap-x-3 text-gray-300">
-                  <span>{{ attempt.account }}</span>
+                  <span class="min-w-0 max-w-full break-words">{{ attempt.account }}</span>
                   <span class="text-gray-500">{{
                     dimensionLabel('channel', attempt.channel)
                   }}</span>

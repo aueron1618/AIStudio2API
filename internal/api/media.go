@@ -48,6 +48,7 @@ func (s *server) handleOpenAIImages(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	setAccessLogRequestedModel(r.Context(), request.Model)
 	s.writeOpenAIImages(w, r, request, nil, "image_generation")
 }
 
@@ -67,7 +68,7 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 	models, err := s.models(r.Context())
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}
@@ -99,7 +100,7 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 	}, request.N)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}
@@ -252,6 +253,7 @@ func (s *server) handleOpenAISpeech(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	setAccessLogRequestedModel(r.Context(), request.Model)
 	if request.Model == "" || strings.TrimSpace(request.Input) == "" {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "model and input are required")
 		return
@@ -290,14 +292,14 @@ func (s *server) handleOpenAISpeech(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}
 	result, err := consumeEvents(r.Context(), events, nil)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}

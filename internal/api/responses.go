@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -307,6 +308,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	setAccessLogRequestedModel(r.Context(), request.Model)
 	if request.Model == "" {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "model is required")
 		return
@@ -327,7 +329,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}
@@ -339,13 +341,13 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	result, err := consumeEvents(r.Context(), events, nil)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}
 	response, err := buildResponsesObject(responseID, created, request, result)
 	if err != nil {
-		writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+		writeOpenAIRequestError(w, err)
 		return
 	}
 	if request.storesResponse() {
@@ -549,14 +551,19 @@ func (request responsesRequest) toGenerateRequest(id string) (aistudio.GenerateR
 		TopP:            request.TopP,
 		MaxOutputTokens: request.MaxOutputTokens,
 	}
+	config.HideThinking = true
 	if len(request.Reasoning) > 0 && string(request.Reasoning) != "null" {
 		var reasoning struct {
-			Effort string `json:"effort"`
+			Effort          string `json:"effort"`
+			Summary         string `json:"summary"`
+			GenerateSummary string `json:"generate_summary"`
 		}
 		if err := json.Unmarshal(request.Reasoning, &reasoning); err != nil {
 			return aistudio.GenerateRequest{}, nil, fmt.Errorf("invalid reasoning: %w", err)
 		}
 		config.ReasoningEffort = reasoning.Effort
+		summary := cmp.Or(reasoning.Summary, reasoning.GenerateSummary)
+		config.HideThinking = summary == "" || summary == "none"
 	}
 	if len(request.Text) > 0 && string(request.Text) != "null" {
 		var text struct {

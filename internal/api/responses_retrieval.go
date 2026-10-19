@@ -17,6 +17,7 @@ func (s *server) handleResponsesInputTokens(w http.ResponseWriter, r *http.Reque
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	setAccessLogRequestedModel(r.Context(), request.Model)
 	prepared, err := s.prepareResponses(r.Context(), &request, newID("count"))
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
@@ -37,7 +38,7 @@ func (s *server) handleResponsesInputTokens(w http.ResponseWriter, r *http.Reque
 	})
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}

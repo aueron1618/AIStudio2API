@@ -83,6 +83,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	setAccessLogRequestedModel(r.Context(), request.Model)
 	if request.Model == "" {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
@@ -104,7 +105,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeAnthropicError(w, statusFromError(err), anthropicErrorType(err), err.Error())
+			writeAnthropicRequestError(w, err)
 		}
 		return
 	}
@@ -126,7 +127,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	result, err := consumeEvents(r.Context(), events, nil)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeAnthropicError(w, statusFromError(err), anthropicErrorType(err), err.Error())
+			writeAnthropicRequestError(w, err)
 		}
 		return
 	}
@@ -139,6 +140,7 @@ func (s *server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Reque
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	setAccessLogRequestedModel(r.Context(), request.Model)
 	if request.Model == "" {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
@@ -158,7 +160,7 @@ func (s *server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Reque
 	})
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeAnthropicError(w, statusFromError(err), anthropicErrorType(err), err.Error())
+			writeAnthropicRequestError(w, err)
 		}
 		return
 	}
@@ -221,9 +223,11 @@ func (request anthropicRequest) toGenerateRequest(id string) (aistudio.GenerateR
 	if request.Thinking != nil && request.Thinking.Type == "enabled" {
 		config.ThinkingBudget = request.Thinking.BudgetTokens
 	}
+	if request.Thinking == nil || request.Thinking.Type == "disabled" {
+		config.HideThinking = true
+	}
 	if request.Thinking != nil && request.Thinking.Type == "disabled" {
 		config.ReasoningEffort = "none"
-		config.HideThinking = true
 	}
 	if request.OutputConfig != nil {
 		config.ReasoningEffort = request.OutputConfig.Effort
@@ -738,13 +742,14 @@ func anthropicStop(reason string, hasTools bool, stopSequence string) (string, *
 		return "stop_sequence", nil
 	case "pause_turn":
 		return "pause_turn", nil
-	case "", "stop":
+	default:
+		if contentFilterFinishReason(normalized) {
+			return "refusal", nil
+		}
 		if hasTools {
 			return "tool_use", nil
 		}
 		return "end_turn", nil
-	default:
-		return "refusal", nil
 	}
 }
 

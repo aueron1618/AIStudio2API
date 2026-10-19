@@ -220,7 +220,8 @@ function latencyWidth(milliseconds: number): number {
           <PopoverContent
             align="end"
             :side-offset="6"
-            class="ui-popover z-[60] w-48 rounded-lg border border-line bg-panel p-2 shadow-xl shadow-black/40"
+            :collision-padding="12"
+            class="ui-popover z-[60] max-h-[var(--reka-popover-content-available-height)] w-48 max-w-[var(--reka-popover-content-available-width)] overflow-y-auto rounded-lg border border-line bg-panel p-2 shadow-xl shadow-black/40"
           >
             <fieldset>
               <legend class="sr-only">{{ t('usage.columns') }}</legend>
@@ -324,9 +325,17 @@ function latencyWidth(milliseconds: number): number {
                 :key="column"
               >
                 <td v-if="column === 'model'" class="max-w-48 px-4 py-2">
-                  <span v-tooltip="record.model" class="block truncate">{{
-                    record.model || '—'
-                  }}</span>
+                  <span v-tooltip="record.requested_model || record.model" class="block truncate">
+                    <span class="sr-only">{{ t('usage.requestedModel') }}: </span>
+                    {{ record.requested_model || record.model || '—' }}
+                  </span>
+                  <span
+                    v-tooltip="record.response_model"
+                    class="mt-0.5 block truncate text-[11px] text-gray-500"
+                  >
+                    <span class="sr-only">{{ t('usage.responseModel') }}: </span>
+                    {{ record.response_model || '—' }}
+                  </span>
                 </td>
                 <td v-else-if="column === 'account'" class="max-w-56 px-4 py-2">
                   <span v-tooltip="record.account" class="block truncate">{{
@@ -395,7 +404,20 @@ function latencyWidth(milliseconds: number): number {
                 dateTime(record.time, true)
               }}</span>
             </div>
-            <div class="mt-1.5 truncate text-gray-200">{{ record.model || '—' }}</div>
+            <div
+              v-tooltip="record.requested_model || record.model"
+              class="mt-1.5 truncate text-gray-200"
+            >
+              <span class="sr-only">{{ t('usage.requestedModel') }}: </span>
+              {{ record.requested_model || record.model || '—' }}
+            </div>
+            <div
+              v-tooltip="record.response_model"
+              class="mt-0.5 truncate text-[11px] text-gray-500"
+            >
+              <span class="sr-only">{{ t('usage.responseModel') }}: </span>
+              {{ record.response_model || '—' }}
+            </div>
             <div class="mt-0.5 flex gap-3 text-gray-500 tabular-nums">
               <span class="truncate">{{ record.account || '—' }}</span>
               <span class="ml-auto shrink-0">{{ duration(record.duration_ms) }}</span>

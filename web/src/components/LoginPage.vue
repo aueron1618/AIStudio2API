@@ -26,9 +26,9 @@ async function login(): Promise<void> {
 </script>
 
 <template>
-  <main class="flex h-full items-center justify-center overflow-auto bg-canvas p-6">
+  <main class="flex h-full flex-col items-center overflow-auto bg-canvas p-6">
     <form
-      class="w-full max-w-sm space-y-5 rounded-lg border border-line bg-panel p-7"
+      class="my-auto w-full max-w-sm shrink-0 space-y-5 rounded-lg border border-line bg-panel p-7"
       @submit.prevent="login"
     >
       <h1 class="text-xl font-semibold text-white">AI Studio Proxy</h1>

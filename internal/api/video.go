@@ -114,7 +114,7 @@ func (s *server) handleGeminiVideoCreate(w http.ResponseWriter, r *http.Request,
 	}
 	if len(ids) == 0 {
 		if shouldWriteRequestError(r, err) {
-			writeGeminiError(w, statusFromError(err), geminiErrorStatus(err), err.Error())
+			writeGeminiRequestError(w, err)
 		}
 		return
 	}
@@ -221,7 +221,7 @@ func (s *server) handleGeminiVideoOperation(w http.ResponseWriter, r *http.Reque
 		operation, err := service.GetGenerateVideoOperation(r.Context(), id)
 		if err != nil {
 			if shouldWriteRequestError(r, err) {
-				writeGeminiError(w, statusFromError(err), geminiErrorStatus(err), err.Error())
+				writeGeminiRequestError(w, err)
 			}
 			return
 		}
@@ -254,7 +254,7 @@ func (s *server) handleOpenAIVideoCreate(w http.ResponseWriter, r *http.Request)
 		models, err := s.models(r.Context())
 		if err != nil {
 			if shouldWriteRequestError(r, err) {
-				writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+				writeOpenAIRequestError(w, err)
 			}
 			return
 		}
@@ -271,7 +271,7 @@ func (s *server) handleOpenAIVideoCreate(w http.ResponseWriter, r *http.Request)
 	operation, err := service.GenerateVideo(r.Context(), videoRequest)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}
@@ -290,6 +290,7 @@ func parseOpenAIVideoRequest(r *http.Request) (openAIVideoRequest, *aistudio.Vid
 		if err := decodeJSON(r, &request); err != nil {
 			return request, nil, err
 		}
+		setAccessLogRequestedModel(r.Context(), request.Model)
 		if request.InputReference != "" {
 			part, err := fileOrInlinePart(request.InputReference, "")
 			if err != nil {
@@ -303,6 +304,7 @@ func parseOpenAIVideoRequest(r *http.Request) (openAIVideoRequest, *aistudio.Vid
 		}
 		defer r.MultipartForm.RemoveAll()
 		request.Model = r.FormValue("model")
+		setAccessLogRequestedModel(r.Context(), request.Model)
 		request.Prompt = r.FormValue("prompt")
 		request.Seconds = r.FormValue("seconds")
 		request.Size = r.FormValue("size")
@@ -442,7 +444,7 @@ func writeOpenAIVideoError(w http.ResponseWriter, r *http.Request, err error) {
 		writeOpenAIError(w, http.StatusNotFound, "video_not_found", "video not found")
 		return
 	}
-	writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+	writeOpenAIRequestError(w, err)
 }
 
 func openAIVideoObject(operation aistudio.VideoOperation) map[string]any {
@@ -490,7 +492,7 @@ func (s *server) handleOpenAIVideoContent(w http.ResponseWriter, r *http.Request
 	media, err := service.DownloadFile(r.Context(), operation.File.ID)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}

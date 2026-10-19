@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 )
@@ -39,7 +42,9 @@ func decodeJSON(r *http.Request, target any) error {
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	if err := json.NewEncoder(w).Encode(payload); err == nil {
+		setAccessLogResponseModel(w, "", payload)
+	}
 }
 
 // streamHeaders 写入并刷新流式响应头
@@ -65,6 +70,7 @@ func writeSSE(w http.ResponseWriter, event string, payload any) error {
 	if _, err := w.Write(frame); err != nil {
 		return err
 	}
+	setAccessLogResponseModel(w, event, payload)
 	return http.NewResponseController(w).Flush()
 }
 
@@ -207,6 +213,42 @@ func writeGeminiError(w http.ResponseWriter, status int, statusName string, mess
 		"message": message,
 		"status":  statusName,
 	}})
+}
+
+func writeOpenAIRequestError(w http.ResponseWriter, err error) {
+	setRetryAfter(w, err)
+	writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+}
+
+func writeAnthropicRequestError(w http.ResponseWriter, err error) {
+	setRetryAfter(w, err)
+	writeAnthropicError(w, statusFromError(err), anthropicErrorType(err), err.Error())
+}
+
+func writeGeminiRequestError(w http.ResponseWriter, err error) {
+	status := statusFromError(err)
+	payload := map[string]any{"code": status, "message": err.Error(), "status": geminiErrorStatus(err)}
+	if seconds := setRetryAfter(w, err); seconds > 0 {
+		payload["details"] = []any{map[string]any{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": strconv.FormatInt(seconds, 10) + "s"}}
+	}
+	setAccessLogResponseError(w, err.Error())
+	writeJSON(w, status, map[string]any{"error": payload})
+}
+
+// setRetryAfter rounds up so clients do not retry before the upstream cooldown ends.
+func setRetryAfter(w http.ResponseWriter, err error) int64 {
+	var retry interface{ RetryAt(time.Time) time.Time }
+	if !errors.As(err, &retry) {
+		return 0
+	}
+	now := time.Now()
+	at := retry.RetryAt(now)
+	if !at.After(now) {
+		return 0
+	}
+	seconds := int64(math.Ceil(at.Sub(now).Seconds()))
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	return seconds
 }
 
 func writeAdminError(w http.ResponseWriter, status int, code string, message string) {

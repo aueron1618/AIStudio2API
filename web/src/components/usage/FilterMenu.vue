@@ -55,9 +55,9 @@ function toggle(value: string, checked: boolean): void {
         align="start"
         :side-offset="6"
         :collision-padding="12"
-        class="ui-popover z-[60] w-72 rounded-lg border border-line bg-panel p-2 shadow-xl shadow-black/40"
+        class="ui-popover z-[60] flex max-h-[var(--reka-popover-content-available-height)] w-72 max-w-[var(--reka-popover-content-available-width)] flex-col overflow-y-auto rounded-lg border border-line bg-panel p-2 shadow-xl shadow-black/40"
       >
-        <label class="relative mb-2 block">
+        <label class="relative mb-2 block shrink-0">
           <span class="sr-only">{{ t('usage.filterSearch') }}</span>
           <UiIcon
             name="search"
@@ -68,10 +68,10 @@ function toggle(value: string, checked: boolean): void {
             v-model="query"
             type="search"
             :placeholder="t('usage.filterSearch')"
-            class="w-full rounded-md border border-line bg-canvas py-1.5 pr-2 pl-7 text-xs text-white focus:border-blue-500 focus:outline-none"
+            class="w-full min-w-0 rounded-md border border-line bg-canvas py-1.5 pr-2 pl-7 text-xs text-white focus:border-blue-500 focus:outline-none"
           />
         </label>
-        <fieldset class="max-h-64 overflow-y-auto">
+        <fieldset class="max-h-64 min-h-0 min-w-0 overflow-y-auto">
           <legend class="sr-only">{{ label }}</legend>
           <p v-if="visible.length === 0" class="px-2 py-3 text-center text-xs text-gray-500">
             {{ t('usage.filterNone') }}
@@ -91,7 +91,7 @@ function toggle(value: string, checked: boolean): void {
             <span class="min-w-0 flex-1 truncate">{{ format(value) }}</span>
           </label>
         </fieldset>
-        <div v-if="selected.length > 0" class="mt-2 border-t border-line pt-2">
+        <div v-if="selected.length > 0" class="mt-2 shrink-0 border-t border-line pt-2">
           <button
             type="button"
             class="w-full rounded px-2 py-1 text-left text-xs text-gray-400 hover:bg-raised hover:text-white"

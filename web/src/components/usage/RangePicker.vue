@@ -84,9 +84,9 @@ function applyCustom(): void {
         align="start"
         :side-offset="6"
         :collision-padding="12"
-        class="ui-popover z-[60] w-[min(36rem,calc(100vw-24px))] rounded-lg border border-line bg-panel p-3 text-sm shadow-xl shadow-black/40"
+        class="ui-popover z-[60] max-h-[var(--reka-popover-content-available-height)] w-[min(36rem,calc(100vw-24px))] overflow-y-auto rounded-lg border border-line bg-panel p-3 text-sm shadow-xl shadow-black/40"
       >
-        <div class="grid gap-4 sm:grid-cols-[1fr_1.1fr]">
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
           <div class="space-y-3">
             <section
               v-for="group in [
@@ -117,7 +117,10 @@ function applyCustom(): void {
               </div>
             </section>
           </div>
-          <form class="space-y-2 border-line sm:border-l sm:pl-4" @submit.prevent="applyCustom">
+          <form
+            class="min-w-0 space-y-2 border-line sm:border-l sm:pl-4"
+            @submit.prevent="applyCustom"
+          >
             <h4 class="mb-1.5 text-[11px] font-medium tracking-wide text-gray-500 uppercase">
               {{ t('usage.rangeCustom') }}
             </h4>
@@ -127,7 +130,7 @@ function applyCustom(): void {
                 v-model="customFrom"
                 type="datetime-local"
                 :max="localInput(now)"
-                class="mt-1 w-full rounded-md border border-line bg-canvas px-2 py-1.5 text-sm text-white [color-scheme:dark] focus:border-blue-500 focus:outline-none"
+                class="mt-1 w-full min-w-0 rounded-md border border-line bg-canvas px-2 py-1.5 text-sm text-white [color-scheme:dark] focus:border-blue-500 focus:outline-none"
               />
             </label>
             <label class="block text-xs text-gray-400">
@@ -135,7 +138,7 @@ function applyCustom(): void {
               <input
                 v-model="customTo"
                 type="datetime-local"
-                class="mt-1 w-full rounded-md border border-line bg-canvas px-2 py-1.5 text-sm text-white [color-scheme:dark] focus:border-blue-500 focus:outline-none"
+                class="mt-1 w-full min-w-0 rounded-md border border-line bg-canvas px-2 py-1.5 text-sm text-white [color-scheme:dark] focus:border-blue-500 focus:outline-none"
               />
             </label>
             <p v-if="customError" class="text-xs text-red-400" role="alert">{{ customError }}</p>

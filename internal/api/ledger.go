@@ -180,6 +180,8 @@ type UsageRecord struct {
 	Protocol        string           `json:"protocol"`
 	Path            string           `json:"path"`
 	Model           string           `json:"model"`
+	RequestedModel  string           `json:"requested_model"`
+	ResponseModel   string           `json:"response_model"`
 	Account         string           `json:"account"`
 	Channel         string           `json:"channel"`
 	Status          int              `json:"status"`

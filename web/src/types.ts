@@ -253,6 +253,8 @@ export interface UsageRecord {
   protocol: string
   path: string
   model: string
+  requested_model: string
+  response_model: string
   account: string
   channel: string
   status: number

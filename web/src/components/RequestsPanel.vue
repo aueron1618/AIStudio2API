@@ -76,7 +76,7 @@ async function cancelRequest(request: RequestSummary): Promise<void> {
 
 <template>
   <section class="mx-auto w-full max-w-4xl flex-1 overflow-auto p-4 md:p-8">
-    <div class="mb-6 flex items-center justify-between border-b border-line pb-2">
+    <div class="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-line pb-2">
       <h2 class="text-2xl font-bold text-white">{{ t('section.requests.title') }}</h2>
       <button
         class="flex items-center gap-1 rounded bg-blue-600 px-3 py-1.5 text-xs text-white transition hover:bg-blue-500"
@@ -119,7 +119,7 @@ async function cancelRequest(request: RequestSummary): Promise<void> {
                 <strong class="block truncate text-sm text-gray-200">{{
                   cooldown.model_id
                 }}</strong>
-                <span class="text-xs text-gray-500"
+                <span class="text-xs break-words text-gray-500"
                   >{{ accountLabel(cooldown.account_id, cooldown.account_label) }} ·
                   {{ t(channelLabelKey(cooldown.channel)) }}</span
                 >
@@ -162,10 +162,12 @@ async function cancelRequest(request: RequestSummary): Promise<void> {
             <div class="min-w-0 flex-1">
               <div class="flex min-w-0 items-center gap-2">
                 <strong class="truncate text-sm text-gray-300">{{ request.model }}</strong>
-                <span class="text-xs text-gray-500">{{ t(requestStateKeys[request.state]) }}</span>
+                <span class="shrink-0 text-xs text-gray-500">{{
+                  t(requestStateKeys[request.state])
+                }}</span>
               </div>
             </div>
-            <div class="text-right text-xs text-gray-500">
+            <div class="min-w-0 max-w-full text-right text-xs break-words text-gray-500">
               <span class="block"
                 >{{ accountLabel(request.account_id, request.account_label)
                 }}<template v-if="request.channel">

@@ -116,6 +116,8 @@ type AccessLog struct {
 	Method          string
 	Path            string
 	Model           string
+	RequestedModel  string
+	ResponseModel   string
 	Account         string
 	Channel         string
 	FinishReason    string

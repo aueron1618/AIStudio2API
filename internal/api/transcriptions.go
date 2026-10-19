@@ -62,6 +62,7 @@ func (s *server) handleOpenAITranscription(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer r.MultipartForm.RemoveAll()
+	setAccessLogRequestedModel(r.Context(), r.FormValue("model"))
 	model := strings.TrimPrefix(strings.TrimSpace(r.FormValue("model")), "models/")
 	if model == "" {
 		model = aistudio.DefaultTranscriptionModel
@@ -138,7 +139,7 @@ func (s *server) handleOpenAITranscription(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err != nil {
-		writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+		writeOpenAIRequestError(w, err)
 		return
 	}
 	writeTranscriptionResponse(w, responseFormat, language, result)

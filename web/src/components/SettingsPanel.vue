@@ -120,7 +120,7 @@ const current = computed(() => sections.find((item) => item.id === section.value
 
 const upstreamChannelOptions: UpstreamChannel[] = ['playground', 'build']
 const inputClass =
-  'w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm text-white transition focus:border-blue-500 focus:outline-none'
+  'min-w-0 w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm text-white transition focus:border-blue-500 focus:outline-none'
 
 // changedFields 返回表单中与已保存配置不同的字段
 const changedFields = computed(() => {
@@ -197,8 +197,8 @@ async function saveConfig(): Promise<void> {
 </script>
 
 <template>
-  <section class="flex min-h-0 flex-1 flex-col">
-    <header class="border-b border-line px-4 py-4 md:px-8">
+  <section class="flex min-h-0 flex-1 flex-col overflow-auto lg:overflow-visible">
+    <header class="shrink-0 border-b border-line px-4 py-4 md:px-8">
       <h2 class="text-xl font-semibold text-white">{{ t('section.settings.title') }}</h2>
       <p class="mt-1 text-sm text-gray-500">{{ t('section.settings.description') }}</p>
     </header>
@@ -215,12 +215,12 @@ async function saveConfig(): Promise<void> {
     </div>
     <form
       v-else
-      class="flex min-h-0 flex-1 flex-col md:flex-row"
+      class="flex min-w-0 shrink-0 flex-col lg:min-h-0 lg:flex-1 lg:flex-row"
       novalidate
       @submit.prevent="saveConfig"
     >
       <nav
-        class="flex shrink-0 gap-1 overflow-x-auto border-b border-line p-2 md:w-56 md:flex-col md:border-r md:border-b-0 md:p-4"
+        class="flex min-w-0 shrink-0 gap-1 overflow-x-auto border-b border-line p-2 lg:w-56 lg:flex-col lg:border-r lg:border-b-0 lg:p-4"
         :aria-label="t('section.settings.title')"
       >
         <button
@@ -247,7 +247,7 @@ async function saveConfig(): Promise<void> {
         </button>
       </nav>
 
-      <div class="min-h-0 flex-1 overflow-auto">
+      <div class="min-w-0 lg:min-h-0 lg:flex-1 lg:overflow-auto">
         <div class="mx-auto max-w-4xl px-4 pt-4 pb-28 md:px-8 md:pt-6">
           <div
             v-if="config.service_restart_required"
@@ -593,24 +593,24 @@ async function saveConfig(): Promise<void> {
       <Transition name="notice">
         <div
           v-if="changedCount > 0"
-          class="fixed right-4 bottom-4 left-4 z-40 flex items-center gap-3 rounded-lg border border-line bg-overlay px-4 py-3 shadow-2xl shadow-black/50 md:left-auto md:min-w-[26rem]"
+          class="fixed right-4 bottom-4 left-4 z-40 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-overlay px-4 py-3 shadow-2xl shadow-black/50 md:left-auto md:min-w-[26rem]"
           role="region"
           :aria-label="t('settings.unsavedBar')"
         >
           <span class="h-2 w-2 shrink-0 rounded-full bg-amber-400"></span>
-          <span class="flex-1 text-sm text-gray-300">
+          <span class="min-w-0 flex-1 text-sm text-gray-300">
             {{ t('settings.unsavedCount').replace('{count}', String(changedCount)) }}
           </span>
           <button
             type="button"
-            class="rounded-md px-3 py-1.5 text-sm text-gray-400 transition hover:bg-raised hover:text-white"
+            class="shrink-0 rounded-md px-3 py-1.5 text-sm whitespace-nowrap text-gray-400 transition hover:bg-raised hover:text-white"
             :disabled="saving"
             @click="resetForm(config)"
           >
             {{ t('settings.discard') }}
           </button>
           <button
-            class="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
+            class="flex shrink-0 items-center gap-2 rounded-md bg-blue-600 px-4 py-1.5 text-sm font-medium whitespace-nowrap text-white transition hover:bg-blue-500 disabled:opacity-50"
             type="submit"
             :disabled="saving"
           >

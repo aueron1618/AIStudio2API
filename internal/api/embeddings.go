@@ -66,6 +66,7 @@ func (s *server) handleOpenAIEmbeddings(w http.ResponseWriter, r *http.Request) 
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	setAccessLogRequestedModel(r.Context(), request.Model)
 	model := strings.TrimSpace(request.Model)
 	if model == "" {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "model is required")
@@ -95,7 +96,7 @@ func (s *server) handleOpenAIEmbeddings(w http.ResponseWriter, r *http.Request) 
 	result, err := s.embed(r, model, requests)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}
@@ -171,7 +172,7 @@ func (s *server) handleGeminiEmbed(w http.ResponseWriter, r *http.Request, model
 	result, err := s.embed(r, model, requests)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeGeminiError(w, statusFromError(err), geminiErrorStatus(err), err.Error())
+			writeGeminiRequestError(w, err)
 		}
 		return
 	}
