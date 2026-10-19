@@ -30,6 +30,7 @@ func (s *server) handleOpenAITranslation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer r.MultipartForm.RemoveAll()
+	setAccessLogRequestedModel(r.Context(), r.FormValue("model"))
 	responseFormat := strings.TrimSpace(r.FormValue("response_format"))
 	if responseFormat == "" {
 		responseFormat = "json"
@@ -46,7 +47,7 @@ func (s *server) handleOpenAITranslation(w http.ResponseWriter, r *http.Request)
 	transcribeModel, translateModel, err := s.translationModels(r.Context(), r.FormValue("model"))
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}
@@ -66,7 +67,7 @@ func (s *server) handleOpenAITranslation(w http.ResponseWriter, r *http.Request)
 	})
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+			writeOpenAIRequestError(w, err)
 		}
 		return
 	}
@@ -84,7 +85,7 @@ func (s *server) handleOpenAITranslation(w http.ResponseWriter, r *http.Request)
 		translated, err := s.translateSegments(r.Context(), translateModel, sources, strings.TrimSpace(r.FormValue("prompt")), temperature)
 		if err != nil {
 			if shouldWriteRequestError(r, err) {
-				writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+				writeOpenAIRequestError(w, err)
 			}
 			return
 		}

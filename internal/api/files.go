@@ -101,6 +101,7 @@ func (s *server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 			writeFileParseError(w, r, err)
 			return
 		}
+		setRetryAfter(w, err)
 		writeFileError(w, r, statusFromError(err), openAIErrorCode(err), err.Error())
 		return
 	}
@@ -109,6 +110,7 @@ func (s *server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		if !shouldWriteRequestError(r, err) {
 			return
 		}
+		setRetryAfter(w, err)
 		writeFileError(w, r, statusFromError(err), openAIErrorCode(err), err.Error())
 		return
 	}
@@ -468,6 +470,7 @@ func writeFileRequestError(w http.ResponseWriter, r *http.Request, err error) {
 		writeFileError(w, r, http.StatusNotFound, "file_not_found", "file not found")
 		return
 	}
+	setRetryAfter(w, err)
 	writeFileError(w, r, statusFromError(err), openAIErrorCode(err), err.Error())
 }
 

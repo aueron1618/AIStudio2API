@@ -88,6 +88,7 @@ func requestRow(entry api.AccessLog, finished time.Time) requestdb.Row {
 	row := requestdb.Row{
 		ID: entry.RequestID, Time: finished, Protocol: requestProtocol(entry.Path), Path: entry.Path,
 		Model: entry.Model, Account: entry.Account, Channel: entry.Channel, Status: entry.Status, State: data.State,
+		RequestedModel: entry.RequestedModel, ResponseModel: entry.ResponseModel,
 		Duration: entry.Latency, FirstEvent: entry.FirstEvent, Queue: entry.QueueWait, ToolCalls: entry.ToolCalls, Error: data.Error,
 		Attempts: entry.Attempts,
 	}

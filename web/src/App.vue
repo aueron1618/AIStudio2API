@@ -406,7 +406,7 @@ onUnmounted(() => {
     <aside
       class="flex min-w-0 w-full shrink-0 flex-col border-b border-line bg-panel md:w-64 md:border-r md:border-b-0"
     >
-      <div class="flex h-14 items-center justify-between gap-2 border-b border-line px-4">
+      <div class="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-line px-4">
         <div class="flex min-w-0 items-center gap-2">
           <div class="h-3 w-3 rounded-full" :class="statusColor"></div>
           <h1 class="whitespace-nowrap text-lg font-bold text-white">AI Studio Proxy</h1>
@@ -460,20 +460,20 @@ onUnmounted(() => {
       <button
         v-if="adminUsername"
         type="button"
-        class="mx-4 mb-3 rounded border border-line px-3 py-2 text-gray-400 hover:bg-raised hover:text-white"
+        class="mx-4 mb-3 shrink-0 truncate rounded border border-line px-3 py-2 text-gray-400 hover:bg-raised hover:text-white"
         @click="logout"
       >
         {{ adminUsername }} · {{ t('auth.logout') }}
       </button>
 
       <div
-        class="relative min-w-0 overflow-hidden border-t border-line p-2 md:p-4"
+        class="relative grid min-w-0 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 overflow-hidden border-t border-line p-2 md:block md:p-4"
         :class="serviceState === 'launching' ? 'launching-shell' : ''"
       >
         <div v-if="serviceState === 'launching'" class="launching-scan" aria-hidden="true"></div>
-        <div class="mb-2 text-xs text-gray-500">{{ t('app.status') }}</div>
-        <div class="mb-4 flex items-center justify-between">
-          <span class="font-mono font-bold" :class="statusTextColor">
+        <div class="mb-1 text-xs text-gray-500 md:mb-2">{{ t('app.status') }}</div>
+        <div class="col-start-1 flex min-w-0 items-center justify-between gap-2 md:mb-4 md:gap-0">
+          <span class="shrink-0 font-mono font-bold" :class="statusTextColor">
             {{ serviceState.toUpperCase() }}
           </span>
           <span
@@ -485,7 +485,7 @@ onUnmounted(() => {
         </div>
         <button
           v-if="serviceState === 'stopped'"
-          class="flex w-full items-center justify-center gap-2 rounded bg-green-600 py-2 font-bold text-white shadow transition hover:bg-green-500 disabled:opacity-50"
+          class="col-start-2 row-span-2 row-start-1 flex items-center justify-center gap-2 rounded bg-green-600 px-3 py-2 font-bold whitespace-nowrap text-white shadow transition hover:bg-green-500 disabled:opacity-50 md:w-full md:px-0"
           type="button"
           :disabled="startPending || stopPending"
           @click="startService"
@@ -495,7 +495,7 @@ onUnmounted(() => {
         </button>
         <button
           v-else-if="serviceState === 'launching' || serviceState === 'running'"
-          class="flex w-full items-center justify-center gap-2 rounded bg-red-600 py-2 font-bold text-white shadow transition hover:bg-red-500 disabled:opacity-50"
+          class="col-start-2 row-span-2 row-start-1 flex items-center justify-center gap-2 rounded bg-red-600 px-3 py-2 font-bold whitespace-nowrap text-white shadow transition hover:bg-red-500 disabled:opacity-50 md:w-full md:px-0"
           type="button"
           :disabled="stopPending"
           @click="stopService"
@@ -506,7 +506,7 @@ onUnmounted(() => {
       </div>
     </aside>
 
-    <main class="flex min-w-0 flex-1 flex-col bg-canvas">
+    <main class="flex min-h-0 min-w-0 flex-1 flex-col bg-canvas">
       <Transition name="page">
         <KeepAlive include="SettingsPanel">
           <LogsPanel v-if="currentTab === 'logs'" :logs="logs" @clear="clearLogs" />

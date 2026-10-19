@@ -22,6 +22,7 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
+	setAccessLogRequestedModel(r.Context(), request.Model)
 	generate, err := request.toGenerateRequest(newID("int"))
 	if err != nil {
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
@@ -54,7 +55,7 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		models, err := s.models(r.Context())
 		if err != nil {
 			if shouldWriteRequestError(r, err) {
-				writeGeminiError(w, statusFromError(err), geminiErrorStatus(err), err.Error())
+				writeGeminiRequestError(w, err)
 			}
 			return
 		}
@@ -70,7 +71,7 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeGeminiError(w, statusFromError(err), geminiErrorStatus(err), err.Error())
+			writeGeminiRequestError(w, err)
 		}
 		return
 	}
@@ -100,7 +101,7 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if shouldWriteRequestError(r, err) {
-		writeGeminiError(w, statusFromError(err), geminiErrorStatus(err), err.Error())
+		writeGeminiRequestError(w, err)
 	}
 }
 

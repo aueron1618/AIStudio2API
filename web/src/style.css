@@ -64,6 +64,10 @@ body,
   margin: 0;
 }
 
+#app {
+  height: 100dvh;
+}
+
 body {
   display: flex;
   overflow: hidden;
@@ -129,6 +133,7 @@ pre,
   justify-content: center;
   width: 100%;
   height: 100%;
+  height: 100dvh;
   background-color: rgb(0 0 0 / 70%);
 }
 
@@ -282,7 +287,7 @@ button[aria-busy='true']::before {
 .ui-tooltip {
   position: fixed;
   z-index: 80;
-  max-width: 320px;
+  max-width: min(320px, calc(100vw - 16px));
   padding: 4px 8px;
   border: 1px solid var(--color-line);
   border-radius: 6px;

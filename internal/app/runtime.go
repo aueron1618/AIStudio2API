@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -3141,7 +3142,7 @@ func (service *trackedService) Generate(ctx context.Context, request aistudio.Ge
 		return nil, err
 	}
 	events := make(chan aistudio.Event, 8)
-	go service.generateWithRetry(ctx, requestCtx, cancel, generationStartedAt, request, resourceID, events)
+	go service.generateWithRetry(ctx, requestCtx, cancel, generationStartedAt, request, resourceID, service.acquireWarmLease, events)
 	return events, nil
 }
 
@@ -3152,6 +3153,7 @@ func (service *trackedService) generateWithRetry(
 	generationStartedAt time.Time,
 	request aistudio.GenerateRequest,
 	resourceID string,
+	acquire func(context.Context, aistudio.AccountSelection) (*aistudio.AccountLease, error),
 	destination chan<- aistudio.Event,
 ) {
 	maxAttempts := 1
@@ -3221,14 +3223,14 @@ func (service *trackedService) generateWithRetry(
 				}
 			}
 		}
-		nextLease, acquireErr := service.acquireWarmLease(requestCtx, selection)
+		nextLease, acquireErr := acquire(requestCtx, selection)
 		var buildCooling *aistudio.AllCoolingError
 		if acquireErr != nil && aistudio.ChannelFromContext(requestCtx) == "" && selection.Channel == aistudio.ChannelBuild && requestCtx.Err() == nil &&
 			(errors.Is(acquireErr, aistudio.ErrNoEligibleAccount) || errors.As(acquireErr, &buildCooling)) {
 			// 没有账户能经 Build 服务时，结构化输出 Schema 改用 Playground 载体
 			selection.Channel = ""
 			fallbackReason = "Build 通道没有可用账户"
-			nextLease, acquireErr = service.acquireWarmLease(requestCtx, selection)
+			nextLease, acquireErr = acquire(requestCtx, selection)
 		}
 		if acquireErr == nil && selection.PreferredChannel == aistudio.ChannelBuild && nextLease.Channel() != aistudio.ChannelBuild {
 			fallbackReason = "账户 Build 通道冷却或不支持此模型"
@@ -3376,6 +3378,11 @@ func (service *trackedService) generateWithRetry(
 			if err == nil {
 				api.SetAccessLogFirstEvent(requestCtx, time.Since(generationStartedAt))
 				api.SetAccessLogTarget(requestCtx, first.ProviderModel, accountLabel)
+				if request.Unary {
+					source, err = collectGenerateEvents(requestCtx, source)
+				}
+			}
+			if err == nil {
 				temporaryCopies = attemptCopies
 				break
 			}
@@ -3406,18 +3413,19 @@ func (service *trackedService) generateWithRetry(
 				modelAccessScope = ""
 				scopeLabel = "全局"
 			}
-			stateErr := service.pool.MarkCooldownIfGeneration(
-				request.AccountID, modelAccessScope, lease.ModelAccessGeneration(), lease.CheckedAt(),
-				cooldown.Until, cooldown.Reason,
+			until, stateErr := service.pool.MarkQuotaCooldownIfGeneration(
+				request.AccountID, modelAccessScope, lease.ModelAccessGeneration(), lease.CheckedAt(), cooldown,
 			)
 			if stateErr != nil {
 				err = errors.Join(err, stateErr)
 				retryable = false
 			} else {
-				service.requests.log(accountLabel, "WARN", fmt.Sprintf(
-					"账号冷却 | 类型=%s | 范围=%s | 恢复=%s",
-					cooldown.Kind, scopeLabel, cooldown.Until.Format(time.RFC3339),
-				))
+				if !until.IsZero() {
+					service.requests.log(accountLabel, "WARN", fmt.Sprintf(
+						"账号冷却 | 类型=%s | 范围=%s | 恢复=%s",
+						cooldown.Kind, scopeLabel, until.Local().Format(time.RFC3339),
+					))
+				}
 				if !cooldown.Global && service.pool.AccountChannelAvailable(request.AccountID, selection) {
 					delete(attempted, request.AccountID)
 					maxAttempts++
@@ -3526,9 +3534,46 @@ func firstGenerateEvent(ctx context.Context, source <-chan aistudio.Event, onWai
 	}
 }
 
+// collectGenerateEvents 暂存非流式请求的剩余事件，确认传输成功后再交给公开协议。
+// 中断后的清理仍受请求期限约束，避免等待未关闭的事件流时占用账户槽位。
+func collectGenerateEvents(ctx context.Context, source <-chan aistudio.Event) (<-chan aistudio.Event, error) {
+	var events []aistudio.Event
+	var interrupted error
+	for {
+		select {
+		case event, ok := <-source:
+			if !ok {
+				if interrupted != nil {
+					return nil, interrupted
+				}
+				replay := make(chan aistudio.Event, len(events))
+				for _, event := range events {
+					replay <- event
+				}
+				close(replay)
+				return replay, nil
+			}
+			var streamErr *aistudio.StreamInterruptedError
+			if event.Kind == aistudio.EventError && errors.As(event.Err, &streamErr) {
+				interrupted = event.Err
+				events = nil
+			}
+			if interrupted == nil {
+				events = append(events, event)
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
 func retryableGenerateAccountError(ctx context.Context, err error) bool {
 	if errors.Is(err, errStreamClosedBeforeFirstEvent) || errors.Is(err, aistudio.ErrAccountCoolingDown) {
 		return true
+	}
+	var interrupted *aistudio.StreamInterruptedError
+	if errors.As(err, &interrupted) {
+		return ctx.Err() == nil
 	}
 	var workerInitError *accountWorkerInitError
 	if errors.As(err, &workerInitError) {
@@ -3536,6 +3581,10 @@ func retryableGenerateAccountError(ctx context.Context, err error) bool {
 	}
 	if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
 		return true
+	}
+	var transportError *url.Error
+	if errors.As(err, &transportError) {
+		return ctx.Err() == nil
 	}
 	var rpcError *aistudio.RPCError
 	if !errors.As(err, &rpcError) {

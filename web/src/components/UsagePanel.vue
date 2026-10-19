@@ -412,17 +412,17 @@ const statusOptions = computed(() =>
         {{ t('usage.filtersClear') }}
       </button>
     </div>
-    <div v-if="activeChips.length > 0" class="flex flex-wrap gap-1.5 px-4 pt-3 md:px-8">
+    <div v-if="activeChips.length > 0" class="flex min-w-0 flex-wrap gap-1.5 px-4 pt-3 md:px-8">
       <span
         v-for="chip in activeChips"
         :key="`${chip.dimension}:${chip.value}`"
-        class="flex items-center gap-1 rounded-md border border-blue-500/40 bg-blue-600/10 py-0.5 pr-1 pl-2.5 text-xs text-blue-200"
+        class="flex min-w-0 max-w-full items-center gap-1 rounded-md border border-blue-500/40 bg-blue-600/10 py-0.5 pr-1 pl-2.5 text-xs text-blue-200"
       >
-        <span class="text-blue-300/70">{{ t(`usage.dimension.${chip.dimension}`) }}:</span>
-        {{ dimensionLabel(chip.dimension, chip.value) }}
+        <span class="shrink-0 text-blue-300/70">{{ t(`usage.dimension.${chip.dimension}`) }}:</span>
+        <span class="min-w-0 truncate">{{ dimensionLabel(chip.dimension, chip.value) }}</span>
         <button
           type="button"
-          class="rounded-sm p-0.5 hover:bg-blue-500/20"
+          class="shrink-0 rounded-sm p-0.5 hover:bg-blue-500/20"
           :aria-label="`${t('common.close')} ${dimensionLabel(chip.dimension, chip.value)}`"
           @click="
             setFilter(

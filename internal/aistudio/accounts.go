@@ -79,6 +79,11 @@ func (e *AllCoolingError) Error() string {
 	return fmt.Sprintf("模型 %s 的可用账户均在冷却，最早恢复时间 %s", e.ModelID, e.Until.Local().Format(time.RFC3339))
 }
 
+// RetryAt 返回最早恢复的时刻
+func (e *AllCoolingError) RetryAt(time.Time) time.Time {
+	return e.Until
+}
+
 // HTTPStatus 返回额度耗尽对应的公开状态码
 func (e *AllCoolingError) HTTPStatus() int {
 	return http.StatusTooManyRequests
@@ -1980,17 +1985,32 @@ func (p *AccountPool) MarkCooldownIfGeneration(
 	until time.Time,
 	reason string,
 ) error {
-	if !until.After(time.Now()) {
-		return fmt.Errorf("冷却期限必须在未来")
+	_, err := p.MarkQuotaCooldownIfGeneration(accountID, modelAccessScope, generation, checkedAt, QuotaCooldown{
+		Until: until, Reason: reason,
+	})
+	return err
+}
+
+// MarkQuotaCooldownIfGeneration 保存当前目录代际中的额度冷却，返回实际生效的期限；陈旧代际或检查时间被跳过时返回零值
+func (p *AccountPool) MarkQuotaCooldownIfGeneration(
+	accountID string,
+	modelAccessScope string,
+	generation uint64,
+	checkedAt time.Time,
+	cooldown QuotaCooldown,
+) (time.Time, error) {
+	if !cooldown.Escalate && !cooldown.Until.After(time.Now()) {
+		return time.Time{}, fmt.Errorf("冷却期限必须在未来")
 	}
 	checkedAt = checkedAt.UTC()
 	if checkedAt.IsZero() {
-		return fmt.Errorf("冷却检查时间不能为空")
+		return time.Time{}, fmt.Errorf("冷却检查时间不能为空")
 	}
 	modelAccessScope = strings.TrimSpace(modelAccessScope)
 	if modelAccessScope == "" {
 		modelAccessScope = globalCooldownKey
 	}
+	var until time.Time
 	_, err := p.updateRuntime(accountID, func(account *Account, runtimeState *accountRuntimeState) (bool, func(*Account), error) {
 		if generation != account.modelAccessGeneration {
 			return false, nil, nil
@@ -2000,13 +2020,21 @@ func (p *AccountPool) MarkCooldownIfGeneration(
 		if !currentAccess.CheckedAt.Before(checkedAt) {
 			return false, nil, nil
 		}
-		next := CooldownState{Until: until.UTC(), Reason: reason}
+		next := CooldownState{Until: cooldown.Until.UTC(), Reason: cooldown.Reason}
+		if cooldown.Escalate {
+			previous, exists := runtimeState.Cooldowns[modelAccessScope]
+			next = planLimitCooldown(previous, exists, time.Now(), cooldown.Reason)
+		}
+		until = next.Until
 		currentAccess.CheckedAt = checkedAt
 		runtimeState.ModelAccess[modelAccessScope] = currentAccess
 		runtimeState.Cooldowns[modelAccessScope] = next
 		return true, nil, nil
 	})
-	return err
+	if err != nil {
+		return time.Time{}, err
+	}
+	return until, nil
 }
 
 // ClearCooldownIfGeneration 清除当前目录代际中的作用域冷却

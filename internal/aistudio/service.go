@@ -463,19 +463,17 @@ func (s *PooledService) markRetryableFailure(lease *AccountLease, modelAccessSco
 		return lease.MarkAuthenticationRequired(err.Error())
 	}
 	now := time.Now()
-	until := now.Add(30 * time.Second)
-	reason := err.Error()
-	if cooldown, ok := QuotaCooldownForError(err, now); ok {
-		until = cooldown.Until
-		reason = cooldown.Reason
-		if cooldown.Global {
-			modelAccessScope = ""
-		}
+	cooldown, ok := QuotaCooldownForError(err, now)
+	if !ok {
+		cooldown = QuotaCooldown{Until: now.Add(30 * time.Second), Reason: err.Error()}
 	}
-	return s.pool.MarkCooldownIfGeneration(
-		accountID, modelAccessScope, lease.ModelAccessGeneration(), lease.CheckedAt(),
-		until, reason,
+	if cooldown.Global {
+		modelAccessScope = ""
+	}
+	_, markErr := s.pool.MarkQuotaCooldownIfGeneration(
+		accountID, modelAccessScope, lease.ModelAccessGeneration(), lease.CheckedAt(), cooldown,
 	)
+	return markErr
 }
 
 func (s *PooledService) modelsForLease(ctx context.Context, lease *AccountLease) ([]Model, error) {
@@ -733,7 +731,7 @@ func forwardEventsWithLease(
 				if cooldown.Global {
 					scope = ""
 				}
-				if err := pool.MarkCooldownIfGeneration(accountID, scope, accessGeneration, checkedAt, cooldown.Until, cooldown.Reason); err != nil {
+				if _, err := pool.MarkQuotaCooldownIfGeneration(accountID, scope, accessGeneration, checkedAt, cooldown); err != nil {
 					event.Err = errors.Join(event.Err, err)
 				}
 			}

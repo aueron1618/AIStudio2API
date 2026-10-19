@@ -71,7 +71,7 @@ function tokenLimit(value: number | undefined): string {
       />
       <UiSelect
         v-model="selectedMethod"
-        class="rounded border border-line bg-canvas px-3 py-2 text-sm text-gray-300 focus:border-blue-500 focus:outline-none"
+        class="max-w-full rounded border border-line bg-canvas px-3 py-2 text-sm text-gray-300 focus:border-blue-500 focus:outline-none"
         :aria-label="t('models.methods')"
       >
         <option value="">{{ t('models.allMethods') }}</option>
@@ -102,8 +102,8 @@ function tokenLimit(value: number | undefined): string {
           class="flex flex-wrap items-start justify-between gap-3 border-b border-line bg-raised px-4 py-2"
         >
           <div class="min-w-0">
-            <div class="flex items-center gap-2">
-              <strong class="block text-gray-200">{{ model.name }}</strong>
+            <div class="flex flex-wrap items-center gap-2">
+              <strong class="block min-w-0 break-words text-gray-200">{{ model.name }}</strong>
               <span
                 v-if="model.paid"
                 class="rounded border border-amber-700/60 bg-amber-900/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-300"
@@ -128,7 +128,7 @@ function tokenLimit(value: number | undefined): string {
             </span>
           </div>
         </div>
-        <div class="space-y-3 p-4">
+        <div class="space-y-3 p-4 [overflow-wrap:anywhere]">
           <p v-if="model.description" class="text-xs leading-5 text-gray-500">
             {{ model.description }}
           </p>

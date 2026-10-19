@@ -300,9 +300,9 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
   <section class="mx-auto w-full max-w-4xl flex-1 overflow-auto p-4 md:p-8">
     <div class="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-line pb-2">
       <h2 class="text-2xl font-bold text-white">{{ t('section.accounts.title') }}</h2>
-      <div class="flex flex-wrap justify-end gap-2">
+      <div class="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end">
         <button
-          class="flex items-center gap-2 rounded border border-line bg-raised px-4 py-2 text-sm font-medium text-gray-200 transition hover:bg-line disabled:opacity-50"
+          class="flex items-center justify-center gap-2 rounded border border-line bg-raised px-4 py-2 text-sm font-medium text-gray-200 transition hover:bg-line disabled:opacity-50 sm:justify-start"
           type="button"
           :disabled="pendingAction !== ''"
           :aria-busy="pendingAction === 'pairing'"
@@ -312,7 +312,7 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
           {{ t('accounts.remoteAdd') }}
         </button>
         <button
-          class="flex items-center gap-2 rounded border border-line bg-raised px-4 py-2 text-sm font-medium text-gray-200 transition hover:bg-line disabled:opacity-50"
+          class="flex items-center justify-center gap-2 rounded border border-line bg-raised px-4 py-2 text-sm font-medium text-gray-200 transition hover:bg-line disabled:opacity-50 sm:justify-start"
           type="button"
           :disabled="pendingAction !== ''"
           :aria-busy="pendingAction === 'chrome-discover'"
@@ -322,7 +322,7 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
           {{ t('accounts.importChrome') }}
         </button>
         <button
-          class="flex items-center gap-2 rounded border border-line bg-raised px-4 py-2 text-sm font-medium text-gray-200 transition hover:bg-line disabled:opacity-50"
+          class="flex items-center justify-center gap-2 rounded border border-line bg-raised px-4 py-2 text-sm font-medium text-gray-200 transition hover:bg-line disabled:opacity-50 sm:justify-start"
           type="button"
           :disabled="pendingAction !== ''"
           @click="showCookieImport = true"
@@ -331,7 +331,7 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
           {{ t('accounts.importCookies') }}
         </button>
         <button
-          class="flex items-center gap-2 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
+          class="flex items-center justify-center gap-2 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50 sm:justify-start"
           type="button"
           :disabled="pendingAction !== ''"
           @click="openBrowserLogin"
@@ -385,7 +385,7 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
         </div>
 
         <div
-          class="grid grid-cols-1 gap-2 border-t border-line pt-3 text-xs sm:grid-cols-2 md:grid-cols-4"
+          class="grid grid-cols-1 gap-2 border-t border-line pt-3 text-xs sm:grid-cols-2 lg:grid-cols-4"
         >
           <div>
             <span class="text-gray-500">{{ t('accounts.proxy') }}</span>
@@ -395,15 +395,15 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
           </div>
           <div>
             <span class="text-gray-500">{{ t('accounts.locale') }}</span>
-            <div class="text-gray-300">{{ account.locale }}</div>
+            <div class="break-words text-gray-300">{{ account.locale }}</div>
           </div>
           <div>
             <span class="text-gray-500">{{ t('accounts.timezone') }}</span>
-            <div class="text-gray-300">{{ account.timezone }}</div>
+            <div class="break-words text-gray-300">{{ account.timezone }}</div>
           </div>
           <div>
             <span class="text-gray-500">{{ t('accounts.benefitTier') }}</span>
-            <div class="text-gray-300">{{ account.benefit_tier }}</div>
+            <div class="break-words text-gray-300">{{ account.benefit_tier }}</div>
           </div>
         </div>
 
@@ -411,9 +411,11 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
           {{ account.message }}
         </p>
 
-        <div class="mt-3 flex items-center justify-between gap-3 border-t border-line pt-3">
+        <div
+          class="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3"
+        >
           <span
-            class="text-xs font-medium uppercase"
+            class="shrink-0 text-xs font-medium whitespace-nowrap uppercase"
             :class="{
               'text-green-400': account.state === 'ready',
               'text-blue-400': account.state === 'busy',
@@ -477,7 +479,7 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
     <Teleport to="body">
       <div v-if="showEditor" class="modal-overlay" @click.self="closeEditor">
         <form
-          class="mx-4 w-full max-w-md rounded-lg border border-line bg-panel p-6 shadow-xl"
+          class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
           @submit.prevent="saveAccount"
         >
           <div class="mb-4 flex items-center justify-between">
@@ -531,7 +533,7 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
 
       <div v-if="showBrowserLogin" class="modal-overlay" @click.self="closeBrowserLogin">
         <form
-          class="mx-4 w-full max-w-md rounded-lg border border-line bg-panel p-6 shadow-xl"
+          class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
           @submit.prevent="beginBrowserLogin"
         >
           <div class="mb-4 flex items-center justify-between">
@@ -585,7 +587,7 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
 
       <div v-if="showCookieImport" class="modal-overlay" @click.self="closeCookieImport">
         <form
-          class="mx-4 max-h-[90vh] w-full max-w-lg overflow-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
+          class="mx-4 max-h-[min(90vh,calc(100dvh-2rem))] w-full max-w-lg overflow-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
           role="dialog"
           aria-modal="true"
           aria-labelledby="cookie-import-title"
@@ -684,7 +686,7 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
 
       <div v-if="showChromeImport" class="modal-overlay" @click.self="closeChromeImport">
         <form
-          class="mx-4 w-full max-w-lg rounded-lg border border-line bg-panel p-6 shadow-xl"
+          class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
           @submit.prevent="importChromeAccounts"
         >
           <div class="mb-4 flex items-center justify-between">
@@ -770,7 +772,7 @@ async function runAccountAction(account: Account, action: 'login' | 'verify'): P
       </div>
       <div v-if="pairing" class="modal-overlay" @click.self="pairing = null">
         <div
-          class="mx-4 w-full max-w-lg rounded-lg border border-line bg-panel p-6 shadow-xl"
+          class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
           role="dialog"
           aria-modal="true"
           aria-labelledby="pairing-title"

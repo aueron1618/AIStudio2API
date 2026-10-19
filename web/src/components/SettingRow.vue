@@ -15,9 +15,9 @@ const { t } = useI18n()
 
 <template>
   <div
-    class="flex flex-col gap-3 border-b border-line py-4 last:border-b-0 md:flex-row md:items-start md:justify-between md:gap-10"
+    class="flex min-w-0 flex-col gap-3 border-b border-line py-4 last:border-b-0 xl:flex-row xl:items-start xl:justify-between xl:gap-10"
   >
-    <div class="min-w-0 md:max-w-md">
+    <div class="min-w-0 xl:max-w-md">
       <div class="flex flex-wrap items-center gap-2">
         <span v-if="groupId" :id="`${groupId}-label`" class="text-sm font-medium text-gray-200">{{
           label
@@ -33,7 +33,7 @@ const { t } = useI18n()
       <p v-if="description" class="mt-1 text-xs leading-5 text-gray-500">{{ description }}</p>
       <p class="mt-1 text-[11px] text-gray-600">{{ t(`settings.effect.${effect}`) }}</p>
     </div>
-    <div class="w-full md:w-80 md:shrink-0">
+    <div class="min-w-0 w-full xl:w-80 xl:shrink-0">
       <slot />
     </div>
   </div>

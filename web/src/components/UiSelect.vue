@@ -69,7 +69,7 @@ const selectedKey = computed({
   <SelectRoot v-model="selectedKey" :disabled="disabled">
     <SelectTrigger
       v-bind="$attrs"
-      class="group flex items-center justify-between gap-2 text-left transition-colors hover:border-gray-600 disabled:opacity-50 data-[state=open]:border-blue-500"
+      class="group flex min-w-0 items-center justify-between gap-2 text-left transition-colors hover:border-gray-600 disabled:opacity-50 data-[state=open]:border-blue-500"
     >
       <span class="min-w-0 flex-1 truncate">{{ selectedLabel }}</span>
       <UiIcon
@@ -82,17 +82,20 @@ const selectedKey = computed({
       <SelectContent
         position="popper"
         :side-offset="4"
-        class="ui-select-content z-[70] max-h-[min(280px,var(--reka-select-content-available-height))] min-w-[var(--reka-select-trigger-width)] overflow-hidden rounded-md border border-line bg-panel text-xs shadow-xl shadow-black/40"
+        :collision-padding="8"
+        class="ui-select-content z-[70] max-h-[min(280px,var(--reka-select-content-available-height))] max-w-[var(--reka-select-content-available-width)] min-w-[var(--reka-select-trigger-width)] overflow-hidden rounded-md border border-line bg-panel text-xs shadow-xl shadow-black/40"
       >
         <SelectViewport class="py-1" @pointerup.capture="keepPrimarySelect">
           <SelectItem
             v-for="(option, index) in options"
             :key="`${index}:${option.value}`"
             :value="String(index)"
-            class="flex cursor-pointer items-center justify-between gap-3 px-3 py-1.5 whitespace-nowrap text-gray-300 outline-none select-none data-[highlighted]:bg-raised data-[highlighted]:text-white data-[state=checked]:font-medium data-[state=checked]:text-blue-300"
+            class="flex cursor-pointer items-center justify-between gap-3 px-3 py-1.5 text-gray-300 outline-none select-none data-[highlighted]:bg-raised data-[highlighted]:text-white data-[state=checked]:font-medium data-[state=checked]:text-blue-300"
           >
-            <SelectItemText>{{ option.label }}</SelectItemText>
-            <SelectItemIndicator>
+            <SelectItemText class="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{{
+              option.label
+            }}</SelectItemText>
+            <SelectItemIndicator class="shrink-0">
               <UiIcon name="check" :size="12" class="text-blue-400" />
             </SelectItemIndicator>
           </SelectItem>

@@ -564,7 +564,7 @@ func (d *BuildStreamDecoder) Decode(raw []byte) ([]Event, error) {
 			usage := *d.usage
 			events = append(events, Event{Kind: EventUsage, Usage: &usage})
 		}
-		events = append(events, Event{Kind: EventFinish, FinishReason: buildEnumName(candidate.FinishReason, "FINISH_REASON_"), FinishMessage: candidate.FinishMessage})
+		events = append(events, Event{Kind: EventFinish, FinishReason: buildFinishReason(candidate.FinishReason), FinishMessage: candidate.FinishMessage})
 		d.finished = true
 	}
 	return events, nil
@@ -585,6 +585,20 @@ func buildEnumName(value string, prefix string) string {
 		return "unspecified"
 	}
 	return strings.ToLower(value)
+}
+
+// buildFinishReason 统一两种通道的终态，未知 Build 原因保留 provider_ 标记。
+func buildFinishReason(value string) string {
+	name := buildEnumName(value, "FINISH_REASON_")
+	for code := int64(0); ; code++ {
+		known := decodeFinishReason(code)
+		if known == name {
+			return name
+		}
+		if strings.HasPrefix(known, "provider_") {
+			return "provider_" + name
+		}
+	}
 }
 
 func decodeBuildPart(part buildResponsePart, index int, raw []byte) ([]Event, error) {
@@ -672,21 +686,26 @@ func decodeBuildGrounding(value buildGrounding) *GroundingMetadata {
 
 // DecodeBuildStream 解码 ProxyStreamedCall 响应：field 1 为 [["<JSON>"]...]，其后可带 google.rpc 状态
 func DecodeBuildStream(source io.Reader, decoder *BuildStreamDecoder, emit func(Event) error) error {
-	stream := json.NewDecoder(newSparseJSONReader(source))
+	reader := &streamReadRecorder{source: source}
+	stream := json.NewDecoder(newSparseJSONReader(reader))
 	stream.UseNumber()
+	index := 0
+	fail := func(path string, detail string) error {
+		return reader.failure(buildProxyStreamedMethod, index, &ProtocolEvidenceError{Method: buildProxyStreamedMethod, Path: path, Detail: detail})
+	}
 	if token, err := stream.Token(); err != nil || token != json.Delim('[') {
-		return &ProtocolEvidenceError{Method: buildProxyStreamedMethod, Path: "$", Detail: "根值不是数组"}
+		return fail("$", "根值不是数组")
 	}
 	if !stream.More() {
-		return &ProtocolEvidenceError{Method: buildProxyStreamedMethod, Path: "$", Detail: "根数组缺少响应列表"}
+		return fail("$", "根数组缺少响应列表")
 	}
 	if token, err := stream.Token(); err != nil || token != json.Delim('[') {
-		return &ProtocolEvidenceError{Method: buildProxyStreamedMethod, Path: "$[0]", Detail: "响应列表不是数组"}
+		return fail("$[0]", "响应列表不是数组")
 	}
-	for index := 0; stream.More(); index++ {
+	for ; stream.More(); index++ {
 		var raw json.RawMessage
 		if err := stream.Decode(&raw); err != nil {
-			return &ProtocolEvidenceError{Method: buildProxyStreamedMethod, Path: fmt.Sprintf("$[0][%d]", index), Detail: err.Error()}
+			return fail(fmt.Sprintf("$[0][%d]", index), err.Error())
 		}
 		chunk, err := buildProxyResponseBody(raw, fmt.Sprintf("$[0][%d]", index))
 		if err != nil {
@@ -703,16 +722,22 @@ func DecodeBuildStream(source io.Reader, decoder *BuildStreamDecoder, emit func(
 		}
 	}
 	if token, err := stream.Token(); err != nil || token != json.Delim(']') {
-		return &ProtocolEvidenceError{Method: buildProxyStreamedMethod, Path: "$[0]", Detail: "响应列表没有正常结束"}
+		return fail("$[0]", "响应列表没有正常结束")
 	}
 	for stream.More() {
 		var raw json.RawMessage
 		if err := stream.Decode(&raw); err != nil {
-			return &ProtocolEvidenceError{Method: buildProxyStreamedMethod, Path: "$", Detail: err.Error()}
+			return fail("$", err.Error())
 		}
 		if err := buildTrailerError(raw); err != nil {
 			return err
 		}
+	}
+	if token, err := stream.Token(); err != nil || token != json.Delim(']') {
+		return fail("$", "根数组没有正常结束")
+	}
+	if err := reader.failure(buildProxyStreamedMethod, index, nil); err != nil {
+		return err
 	}
 	return decoder.End()
 }

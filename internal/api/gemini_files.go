@@ -458,7 +458,11 @@ func writeGeminiUploadFailure(w http.ResponseWriter, err error, uploadStatus str
 	if uploadStatus != "" {
 		w.Header().Set("X-Goog-Upload-Status", uploadStatus)
 	}
-	writeGeminiError(w, status, statusName, err.Error())
+	if status == http.StatusRequestEntityTooLarge {
+		writeGeminiError(w, status, statusName, err.Error())
+		return
+	}
+	writeGeminiRequestError(w, err)
 }
 
 // requestOrigin 返回客户端访问本服务使用的协议与主机
@@ -542,7 +546,7 @@ func (s *server) handleGeminiFileList(w http.ResponseWriter, r *http.Request) {
 	files, err := service.ListFiles(r.Context())
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			writeGeminiError(w, statusFromError(err), geminiErrorStatus(err), err.Error())
+			writeGeminiRequestError(w, err)
 		}
 		return
 	}
@@ -577,7 +581,7 @@ func writeGeminiFileError(w http.ResponseWriter, r *http.Request, err error) {
 		writeGeminiFileNotFound(w, r.PathValue("file"))
 		return
 	}
-	writeGeminiError(w, statusFromError(err), geminiErrorStatus(err), err.Error())
+	writeGeminiRequestError(w, err)
 }
 
 // writeGeminiFileNotFound 返回文件不存在的 404

@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS requests (
  model TEXT NOT NULL, account TEXT NOT NULL, channel TEXT NOT NULL, status INTEGER NOT NULL, state TEXT NOT NULL,
  duration_ms INTEGER NOT NULL, first_event_ms INTEGER NOT NULL, queue_ms INTEGER NOT NULL,
  input_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, reply_tokens INTEGER NOT NULL,
- total_tokens INTEGER NOT NULL, tool_calls INTEGER NOT NULL, error TEXT NOT NULL, attempts TEXT NOT NULL);
+ total_tokens INTEGER NOT NULL, tool_calls INTEGER NOT NULL, error TEXT NOT NULL, attempts TEXT NOT NULL,
+ requested_model TEXT NOT NULL DEFAULT '', response_model TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS requests_time ON requests(time);
 CREATE INDEX IF NOT EXISTS requests_model_time ON requests(model, time);
 CREATE INDEX IF NOT EXISTS requests_account_time ON requests(account, time);
@@ -66,6 +67,8 @@ type Row struct {
 	Protocol        string
 	Path            string
 	Model           string
+	RequestedModel  string
+	ResponseModel   string
 	Account         string
 	Channel         string
 	Status          int
@@ -116,6 +119,17 @@ func Open(path string, log Logger) (*Store, error) {
 	db.SetMaxOpenConns(4)
 	if _, err := db.Exec(schema); err != nil {
 		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
+	}
+	for _, column := range []string{"requested_model", "response_model"} {
+		var exists bool
+		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)`, column).Scan(&exists); err != nil {
+			return nil, errors.Join(fmt.Errorf("inspect request column %s: %w", column, err), db.Close())
+		}
+		if !exists {
+			if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
+				return nil, errors.Join(fmt.Errorf("add request column %s: %w", column, err), db.Close())
+			}
+		}
 	}
 	store := &Store{db: db, writes: make(chan write, queueLimit), done: make(chan struct{}), log: log}
 	if err := store.alignDays(); err != nil {
@@ -279,10 +293,14 @@ func (store *Store) write(batch []write) (err error) {
 			if err != nil {
 				return err
 			}
-			result, err := tx.Exec(`INSERT OR IGNORE INTO requests VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			result, err := tx.Exec(`INSERT OR IGNORE INTO requests (
+ id, time, protocol, path, model, account, channel, status, state,
+ duration_ms, first_event_ms, queue_ms, input_tokens, reasoning_tokens, reply_tokens, total_tokens, tool_calls, error, attempts,
+ requested_model, response_model) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				row.ID, row.Time.UnixMilli(), row.Protocol, row.Path, row.Model, row.Account, row.Channel, row.Status, row.State,
 				row.Duration.Milliseconds(), row.FirstEvent.Milliseconds(), row.Queue.Milliseconds(),
-				row.InputTokens, row.ReasoningTokens, row.ReplyTokens, row.TotalTokens, row.ToolCalls, row.Error, string(encoded))
+				row.InputTokens, row.ReasoningTokens, row.ReplyTokens, row.TotalTokens, row.ToolCalls, row.Error, string(encoded),
+				row.RequestedModel, row.ResponseModel)
 			if err != nil {
 				return err
 			}
