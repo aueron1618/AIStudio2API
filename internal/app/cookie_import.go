@@ -11,11 +11,30 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
+	"github.com/Mag1cFall/AIStudio2API/internal/chromeauth"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 )
 
 // ImportCookieAccount 先验证 Cookie 和实际邮箱，再发布账户；失败不留下账户目录。
 func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.CookieImportInput) (api.AdminAccount, error) {
+	if len(input.Cookies) > aistudio.MaxCookieImportBytes {
+		return api.AdminAccount{}, invalidAccount(fmt.Errorf("Cookie 文本不能超过 1 MiB"))
+	}
+	if address := strings.TrimSpace(input.CDP); address != "" {
+		browser, err := chromeauth.ReadCDPBrowser(ctx, address)
+		if err != nil {
+			return api.AdminAccount{}, &adminOperationError{
+				status: http.StatusBadGateway, code: "cdp_unavailable", message: "无法读取浏览器 Cookie，请检查远程调试地址及浏览器状态",
+			}
+		}
+		input.Cookies = browser.Cookies
+		if strings.TrimSpace(input.Locale) == "" {
+			input.Locale = browser.Locale
+		}
+		if strings.TrimSpace(input.Timezone) == "" {
+			input.Timezone = browser.Timezone
+		}
+	}
 	state, err := aistudio.ParseCookieImport(input.Cookies)
 	if err != nil {
 		return api.AdminAccount{}, invalidAccount(err)
@@ -62,6 +81,9 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 				status: http.StatusBadGateway, code: "cookie_import_failed", message: "无法验证 Cookie 或识别邮箱，请检查 Camoufox、代理及 AI Studio 登录状态",
 			}
 		}
+	}
+	if result.CloseError != "" {
+		admin.requests.log("auth", "WARN", "Cookie 导入 | 关闭 Camoufox 失败 | 已验证的认证状态将继续保存")
 	}
 	accountConfig.Label = strings.ToLower(strings.TrimSpace(result.Email))
 	if err := accountConfig.Validate(); err != nil {

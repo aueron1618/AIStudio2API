@@ -2,6 +2,7 @@ package aistudio
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -14,6 +15,14 @@ import (
 const MaxCookieImportBytes = 1 << 20
 
 const maxImportCookies = 1000
+
+// ErrLoginCookieMissing 供浏览器发现入口区分未登录与格式错误。
+var ErrLoginCookieMissing = errors.New("Cookie 缺少登录 Cookie")
+
+// ParseCookieText 是上游 Cookie/CDP 入口，使用与本地无头导入相同的安全约束。
+func ParseCookieText(input string) (StorageState, error) {
+	return ParseCookieImport(input)
+}
 
 // ParseCookieImport 将请求头、Cookie 扩展 JSON 或 Netscape 文本转换为认证状态。
 // 只导入 Google Cookie，不信任上传文件中的邮箱、OAuth 材料或 localStorage。
@@ -90,10 +99,10 @@ func ParseCookieImport(raw string) (StorageState, error) {
 		state.Cookies = append(state.Cookies, cookie)
 	}
 	if len(state.Cookies) == 0 {
-		return StorageState{}, fmt.Errorf("没有可导入的有效 Google Cookie")
+		return StorageState{}, fmt.Errorf("%w: 没有可导入的有效 Google Cookie", ErrLoginCookieMissing)
 	}
 	if _, err := NewSigner().Sign(state); err != nil {
-		return StorageState{}, fmt.Errorf("Cookie 不完整或已过期，需要 SAPISID、__Secure-1PAPISID 和 __Secure-3PAPISID")
+		return StorageState{}, fmt.Errorf("%w: 不完整或已过期，需要 SAPISID、__Secure-1PAPISID 和 __Secure-3PAPISID", ErrLoginCookieMissing)
 	}
 	return state, nil
 }

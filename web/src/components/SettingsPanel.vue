@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { api } from '@/api'
 import { channelLabelKey, useI18n, type TranslationKey } from '@/i18n'
 import type { IconName } from '@/icons'
+import { maskedProxy } from '@/proxy'
 import type { ServiceConfig, UpstreamChannel } from '@/types'
 import { useQueryParam } from '@/url'
 import SettingRow from './SettingRow.vue'
@@ -28,28 +29,41 @@ const adminPassword = ref('')
 const form = reactive<ServiceConfig>({
   auto_start: false,
   request_body_log: false,
+  log_file: true,
+  log_max_total_mb: 500,
   admin_auth_enabled: false,
   admin_username: 'admin',
   admin_password_set: false,
   build_native_nonstream: true,
+  nonstream_keepalive: true,
+  fake_stream: false,
+  youtube_links: false,
   auth_states: 'auth',
   listen_addr: '127.0.0.1:2048',
+  preview_listen_addr: '127.0.0.1:2050',
   proxy_api_key: '',
   active_listen_addr: '127.0.0.1:2048',
+  active_preview_listen_addr: '127.0.0.1:2050',
   active_proxy_api_key: '',
   management_restart_required: false,
   service_restart_required: false,
   proxy: '',
+  active_proxy: '',
+  proxy_pool: [],
   init_timeout: '2m',
-  request_timeout: '5m',
+  request_timeout: '30m',
   warm_worker_limit: 0,
   max_active_workers: 1,
   warm_startup_concurrency: 1,
   per_account_concurrency: 1,
   routing_strategy: 'round-robin',
   upstream_channels: ['playground', 'build'],
+  model_mapping: '',
+  model_channels: '',
   waa_backend: 'go',
   temporary_chat: false,
+  media_output: 'inline',
+  media_base_url: '',
 })
 
 type SectionID = 'service' | 'capacity' | 'upstream' | 'network' | 'security'
@@ -67,7 +81,15 @@ const sections: {
     label: 'settings.section.service',
     description: 'settings.section.serviceHelp',
     icon: 'service',
-    fields: ['auto_start', 'listen_addr', 'proxy_api_key', 'auth_states'],
+    fields: [
+      'auto_start',
+      'listen_addr',
+      'preview_listen_addr',
+      'proxy_api_key',
+      'auth_states',
+      'media_output',
+      'media_base_url',
+    ],
   },
   {
     id: 'capacity',
@@ -89,7 +111,12 @@ const sections: {
     icon: 'channel',
     fields: [
       'upstream_channels',
+      'model_mapping',
+      'model_channels',
       'build_native_nonstream',
+      'nonstream_keepalive',
+      'fake_stream',
+      'youtube_links',
       'waa_backend',
       'temporary_chat',
       'init_timeout',
@@ -108,7 +135,13 @@ const sections: {
     label: 'settings.section.security',
     description: 'settings.section.securityHelp',
     icon: 'security',
-    fields: ['admin_auth_enabled', 'admin_username', 'request_body_log'],
+    fields: [
+      'admin_auth_enabled',
+      'admin_username',
+      'request_body_log',
+      'log_file',
+      'log_max_total_mb',
+    ],
   },
 ]
 const section = useQueryParam<SectionID>(
@@ -227,7 +260,7 @@ async function saveConfig(): Promise<void> {
           v-for="item in sections"
           :key="item.id"
           type="button"
-          class="flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-left text-sm whitespace-nowrap transition-colors"
+          class="flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-left text-sm whitespace-nowrap transition-colors md:whitespace-normal"
           :class="
             section === item.id
               ? 'bg-raised text-white'
@@ -291,9 +324,30 @@ async function saveConfig(): Promise<void> {
               />
               <p
                 v-if="form.listen_addr !== config.active_listen_addr"
-                class="mt-1 text-xs text-gray-500"
+                class="mt-1 text-xs break-all text-gray-500"
               >
                 {{ t('settings.activeValue') }}: {{ config.active_listen_addr }}
+              </p>
+            </SettingRow>
+            <SettingRow
+              :label="t('settings.previewListen')"
+              control-id="setting-preview-listen"
+              :description="t('settings.previewListenHelp')"
+              effect="management"
+              :changed="changedFields.has('preview_listen_addr')"
+            >
+              <input
+                id="setting-preview-listen"
+                v-model.trim="form.preview_listen_addr"
+                :class="inputClass"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <p
+                v-if="form.preview_listen_addr !== config.active_preview_listen_addr"
+                class="mt-1 text-xs break-all text-gray-500"
+              >
+                {{ t('settings.activeValue') }}: {{ config.active_preview_listen_addr }}
               </p>
             </SettingRow>
             <SettingRow
@@ -322,7 +376,7 @@ async function saveConfig(): Promise<void> {
               </div>
               <p
                 v-if="form.proxy_api_key !== config.active_proxy_api_key"
-                class="mt-1 text-xs text-gray-500"
+                class="mt-1 text-xs break-all text-gray-500"
               >
                 {{ t('settings.activeValue') }}:
                 {{ revealKey ? config.active_proxy_api_key || t('common.empty') : '••••••••' }}
@@ -343,6 +397,35 @@ async function saveConfig(): Promise<void> {
                 spellcheck="false"
               />
             </SettingRow>
+            <SettingRow
+              :label="t('settings.mediaOutput')"
+              control-id="setting-media-output"
+              :description="t('settings.mediaOutputHelp')"
+              effect="service"
+              :changed="changedFields.has('media_output')"
+            >
+              <UiSelect id="setting-media-output" v-model="form.media_output" :class="inputClass">
+                <option value="inline">{{ t('settings.mediaOutputInline') }}</option>
+                <option value="url">{{ t('settings.mediaOutputURL') }}</option>
+              </UiSelect>
+            </SettingRow>
+            <SettingRow
+              v-if="form.media_output === 'url'"
+              :label="t('settings.mediaBaseURL')"
+              control-id="setting-media-base-url"
+              :description="t('settings.mediaBaseURLHelp')"
+              effect="service"
+              :changed="changedFields.has('media_base_url')"
+            >
+              <input
+                id="setting-media-base-url"
+                v-model.trim="form.media_base_url"
+                :class="inputClass"
+                placeholder="https://example.com"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </SettingRow>
           </template>
 
           <template v-else-if="section === 'capacity'">
@@ -350,7 +433,7 @@ async function saveConfig(): Promise<void> {
               :label="t('settings.warmWorkerLimit')"
               control-id="setting-warm"
               :description="t('settings.warmWorkerLimitHelp')"
-              effect="service"
+              effect="immediate"
               :changed="changedFields.has('warm_worker_limit')"
             >
               <input
@@ -365,7 +448,7 @@ async function saveConfig(): Promise<void> {
               :label="t('settings.maxActiveWorkers')"
               control-id="setting-max"
               :description="t('settings.maxActiveWorkersHelp')"
-              effect="service"
+              effect="immediate"
               :changed="changedFields.has('max_active_workers')"
             >
               <input
@@ -380,7 +463,7 @@ async function saveConfig(): Promise<void> {
               :label="t('settings.warmStartupConcurrency')"
               control-id="setting-startup"
               :description="t('settings.warmStartupConcurrencyHelp')"
-              effect="service"
+              effect="immediate"
               :changed="changedFields.has('warm_startup_concurrency')"
             >
               <input
@@ -396,7 +479,7 @@ async function saveConfig(): Promise<void> {
               :label="t('settings.perAccountConcurrency')"
               control-id="setting-per-account"
               :description="t('settings.perAccountConcurrencyHelp')"
-              effect="service"
+              effect="immediate"
               :changed="changedFields.has('per_account_concurrency')"
             >
               <input
@@ -422,6 +505,9 @@ async function saveConfig(): Promise<void> {
           </template>
 
           <template v-else-if="section === 'upstream'">
+            <p class="rounded-md border border-line bg-canvas p-3 text-xs leading-5 text-gray-400">
+              {{ t('settings.fixedChannelHelp') }}
+            </p>
             <SettingRow
               :label="t('settings.upstreamChannels')"
               group-id="setting-channels"
@@ -455,6 +541,38 @@ async function saveConfig(): Promise<void> {
               </div>
             </SettingRow>
             <SettingRow
+              :label="t('settings.modelMapping')"
+              control-id="setting-model-mapping"
+              :description="t('settings.modelMappingHelp')"
+              effect="service"
+              :changed="changedFields.has('model_mapping')"
+            >
+              <input
+                id="setting-model-mapping"
+                v-model.trim="form.model_mapping"
+                :class="inputClass"
+                placeholder="claude-haiku-5-5:gemini-3.8-flash"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </SettingRow>
+            <SettingRow
+              :label="t('settings.modelChannels')"
+              control-id="setting-model-channels"
+              :description="t('settings.modelChannelsHelp')"
+              effect="immediate"
+              :changed="changedFields.has('model_channels')"
+            >
+              <input
+                id="setting-model-channels"
+                v-model.trim="form.model_channels"
+                :class="inputClass"
+                placeholder="gemini-4-argon:playground"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </SettingRow>
+            <SettingRow
               :label="t('settings.buildNative')"
               control-id="setting-build-native"
               :description="t('settings.buildNativeHelp')"
@@ -462,6 +580,33 @@ async function saveConfig(): Promise<void> {
               :changed="changedFields.has('build_native_nonstream')"
             >
               <UiSwitch id="setting-build-native" v-model="form.build_native_nonstream" />
+            </SettingRow>
+            <SettingRow
+              :label="t('settings.nonstreamKeepalive')"
+              control-id="setting-nonstream-keepalive"
+              :description="t('settings.nonstreamKeepaliveHelp')"
+              effect="service"
+              :changed="changedFields.has('nonstream_keepalive')"
+            >
+              <UiSwitch id="setting-nonstream-keepalive" v-model="form.nonstream_keepalive" />
+            </SettingRow>
+            <SettingRow
+              :label="t('settings.fakeStream')"
+              control-id="setting-fake-stream"
+              :description="t('settings.fakeStreamHelp')"
+              effect="service"
+              :changed="changedFields.has('fake_stream')"
+            >
+              <UiSwitch id="setting-fake-stream" v-model="form.fake_stream" />
+            </SettingRow>
+            <SettingRow
+              :label="t('settings.youtubeLinks')"
+              control-id="setting-youtube-links"
+              :description="t('settings.youtubeLinksHelp')"
+              effect="service"
+              :changed="changedFields.has('youtube_links')"
+            >
+              <UiSwitch id="setting-youtube-links" v-model="form.youtube_links" />
             </SettingRow>
             <SettingRow
               :label="t('settings.waaBackend')"
@@ -532,6 +677,36 @@ async function saveConfig(): Promise<void> {
                 autocomplete="off"
                 spellcheck="false"
               />
+              <p class="mt-1 text-xs break-all text-gray-500">
+                {{ t('settings.activeProxy') }}:
+                {{ config.active_proxy || t('settings.proxyDirect') }}
+              </p>
+              <div v-if="config.proxy_pool.length > 1" class="mt-2 text-xs">
+                <p class="text-gray-500">{{ t('settings.proxyPool') }}</p>
+                <ul class="mt-1 space-y-1">
+                  <li
+                    v-for="entry in config.proxy_pool"
+                    :key="entry.proxy"
+                    class="flex flex-wrap items-center gap-x-2 gap-y-0.5"
+                    data-proxy-pool-entry
+                  >
+                    <span class="break-all text-gray-300">{{ maskedProxy(entry.proxy) }}</span>
+                    <span
+                      v-tooltip="entry.error || ''"
+                      :class="entry.available ? 'text-green-400' : 'text-red-400'"
+                    >
+                      {{
+                        entry.available
+                          ? t('settings.proxyAvailable')
+                          : t('settings.proxyUnavailable')
+                      }}
+                    </span>
+                    <span class="text-gray-500">
+                      {{ t('settings.proxyAccounts').replace('{count}', String(entry.accounts)) }}
+                    </span>
+                  </li>
+                </ul>
+              </div>
             </SettingRow>
           </template>
 
@@ -586,6 +761,30 @@ async function saveConfig(): Promise<void> {
             >
               <UiSwitch id="setting-body-log" v-model="form.request_body_log" />
             </SettingRow>
+            <SettingRow
+              :label="t('settings.logFile')"
+              control-id="setting-log-file"
+              :description="t('settings.logFileHelp')"
+              effect="immediate"
+              :changed="changedFields.has('log_file')"
+            >
+              <UiSwitch id="setting-log-file" v-model="form.log_file" />
+            </SettingRow>
+            <SettingRow
+              :label="t('settings.logMaxTotal')"
+              control-id="setting-log-max-total"
+              :description="t('settings.logMaxTotalHelp')"
+              effect="immediate"
+              :changed="changedFields.has('log_max_total_mb')"
+            >
+              <input
+                id="setting-log-max-total"
+                v-model.number="form.log_max_total_mb"
+                :class="inputClass"
+                type="number"
+                min="20"
+              />
+            </SettingRow>
           </template>
         </div>
       </div>
@@ -599,7 +798,12 @@ async function saveConfig(): Promise<void> {
         >
           <span class="h-2 w-2 shrink-0 rounded-full bg-amber-400"></span>
           <span class="min-w-0 flex-1 text-sm text-gray-300">
-            {{ t('settings.unsavedCount').replace('{count}', String(changedCount)) }}
+            {{
+              t(changedCount === 1 ? 'settings.unsavedCountOne' : 'settings.unsavedCount').replace(
+                '{count}',
+                String(changedCount),
+              )
+            }}
           </span>
           <button
             type="button"

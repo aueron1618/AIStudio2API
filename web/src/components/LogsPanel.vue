@@ -5,7 +5,9 @@ import type { AdminLog } from '@/types'
 import UiIcon from './UiIcon.vue'
 import UiSelect from './UiSelect.vue'
 import RequestLogCard from './RequestLogCard.vue'
+import StageLogCard from './StageLogCard.vue'
 import { groupLogs } from '@/logs'
+import { useQueryParam, useQueryText } from '@/url'
 
 const props = defineProps<{
   logs: AdminLog[]
@@ -15,15 +17,15 @@ defineEmits<{
   clear: []
 }>()
 
-const { t } = useI18n()
-const level = ref<'ALL' | 'INFO' | 'WARN' | 'ERROR'>('ALL')
-const source = ref('ALL')
-const search = ref('')
+const { t, logText } = useI18n()
+const levels = ['ALL', 'INFO', 'WARN', 'ERROR'] as const
+const level = useQueryParam('level', levels, 'ALL')
+const source = useQueryText('source', 'ALL')
+const search = useQueryText('q')
 const autoScroll = ref(true)
 const output = ref<HTMLElement>()
 const sourceWidth = ref(224)
 const resizingSource = ref(false)
-const levels = ['ALL', 'INFO', 'WARN', 'ERROR'] as const
 const minSourceWidth = 128
 const maxSourceWidth = 512
 
@@ -36,6 +38,7 @@ const sources = computed(() =>
 
 function matchLog(entry: AdminLog, query: string): boolean {
   if (entry.message && entry.message.toLowerCase().includes(query)) return true
+  if (entry.message && logText(entry.message).toLowerCase().includes(query)) return true
   if (entry.source && entry.source.toLowerCase().includes(query)) return true
   if (entry.event && entry.event.toLowerCase().includes(query)) return true
   if (entry.request) {
@@ -51,14 +54,18 @@ function matchLog(entry: AdminLog, query: string): boolean {
 }
 
 const rows = computed(() => groupLogs(props.logs))
+// filteredLogs 按级别、来源与搜索筛选日志行，阶段卡片的任一步骤命中即显示
 const filteredLogs = computed(() => {
   const query = search.value.trim().toLowerCase()
-  return rows.value.filter(
-    ({ entry, events }) =>
-      (level.value === 'ALL' || entry.level.toUpperCase() === level.value) &&
+  return rows.value.filter(({ entry, events, stage }) => {
+    const checked = stage ? events : [entry]
+    return (
+      (level.value === 'ALL' ||
+        checked.some((event) => event.level.toUpperCase() === level.value)) &&
       (source.value === 'ALL' || events.some((event) => event.source === source.value)) &&
-      (query === '' || matchLog(entry, query)),
-  )
+      (query === '' || checked.some((event) => matchLog(event, query)))
+    )
+  })
 })
 
 const displayLimit = ref(200)
@@ -118,6 +125,15 @@ function scrollToBottom(): void {
   void nextTick(() => {
     if (output.value !== undefined) output.value.scrollTop = output.value.scrollHeight
   })
+}
+
+// followScroll 在日志区离开末尾时关闭自动滚动，回到末尾时开启
+function followScroll(): void {
+  if (!output.value) return
+  const element = output.value
+  const distance = element.scrollHeight - element.scrollTop - element.clientHeight
+  if (autoScroll.value && distance > 40) autoScroll.value = false
+  else if (!autoScroll.value && distance <= 10) autoScroll.value = true
 }
 
 // timeFormat 格式化日志行的 24 小时制时间
@@ -247,6 +263,7 @@ watch(autoScroll, () => {
     <div
       ref="output"
       class="min-h-0 flex-1 overflow-auto bg-canvas p-2 font-mono text-[13px] leading-5"
+      @scroll.passive="followScroll"
     >
       <div v-if="filteredLogs.length === 0" class="mt-10 text-center text-gray-600 italic">
         {{ t('logs.waiting') }}
@@ -301,7 +318,8 @@ watch(autoScroll, () => {
           }}</span>
           <div class="log-cell log-message">
             <RequestLogCard v-if="row.entry.request" :row="row" />
-            <span v-else>{{ row.entry.message }}</span>
+            <StageLogCard v-else-if="row.stage" :row="row" />
+            <span v-else>{{ logText(row.entry.message) }}</span>
           </div>
         </div>
       </div>
@@ -348,7 +366,7 @@ watch(autoScroll, () => {
   bottom: 0;
   left: 50%;
   width: 1px;
-  background: #30363d;
+  background: var(--color-line);
   content: '';
   transition: background-color 120ms ease;
 }

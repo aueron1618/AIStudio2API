@@ -3,16 +3,20 @@ package waa
 import (
 	"bytes"
 	"compress/gzip"
+	cryptorand "crypto/rand"
 	_ "embed"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"math/rand/v2"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/Mag1cFall/AIStudio2API/internal/waa/goja"
+	"github.com/Mag1cFall/goja"
 )
 
 //go:embed dom.js
@@ -46,31 +50,38 @@ type Profile struct {
 	Navigator    map[string]any
 	Screen       map[string]any
 	Document     map[string]any
+	Globals      map[string]any
 	LocalStorage map[string]string
 	HasFocus     bool
+	// TrustedTypes 表示页面 CSP 要求脚本注入点使用 Trusted Types
+	TrustedTypes bool
+	// NavigationStart 是页面导航开始的时间，为零时页面时间起点取宿主安装时刻
+	NavigationStart time.Time
 }
+
+// closureListenerMapPattern 匹配 Closure 事件库在页面载入时以随机数命名的监听表全局名
+var closureListenerMapPattern = regexp.MustCompile(`closure_lm_\d+`)
 
 // frameWindowNames 是 iframe 与顶层页面共享取值的 Window 属性
 var frameWindowNames = []string{"outerWidth", "outerHeight", "screenX", "screenY", "screenLeft", "screenTop", "devicePixelRatio", "mozInnerScreenX"}
 
 // hostState 保存同一 agent 内各 Realm 共享的宿主数据
 type hostState struct {
-	registry  *hostRegistry
-	profile   Profile
-	loadImage func(string) bool
-	pending   *sync.WaitGroup
-	schedule  func(time.Duration, func())
-	location  *time.Location
-	zoneName  func(time.Time) string
-	shape     goja.Value
-	order     *globalOrderShape
-	brands    goja.Value
-	storage   *goja.Object
-	topAPI    goja.Value
+	registry    *hostRegistry
+	rejections  *rejectionQueue
+	profile     Profile
+	loadImage   func(string) bool
+	pending     *sync.WaitGroup
+	schedule    func(time.Duration, func())
+	location    *time.Location
+	zoneName    func(time.Time) string
+	shape       goja.Value
+	order       *globalOrderShape
+	closureName string
+	brands      goja.Value
+	storage     *goja.Object
+	topAPI      goja.Value
 }
-
-// topPageAge 是官网页面加载到 BotGuard VM 初始化之间的页面时长
-const topPageAge = 2500 * time.Millisecond
 
 // hostJavaScript 为一个 Realm 安装 Function.prototype.toString、计时器与 Firefox DOM
 const hostJavaScript = `
@@ -99,16 +110,25 @@ const hostJavaScript = `
   globalThis.setInterval = nativeFunction('setInterval', function setInterval(callback, delay, ...args) { return timers.setInterval(callback, delay, ...args); });
   globalThis.clearTimeout = nativeFunction('clearTimeout', function clearTimeout(id) { timers.clear(id); });
   globalThis.clearInterval = nativeFunction('clearInterval', function clearInterval(id) { timers.clear(id); });
+  let domAPI;
   let idleCallbackCount = 0;
+  let idleHandle = 0;
+  const idleCallbacks = new Set();
   globalThis.requestIdleCallback = nativeFunction('requestIdleCallback', function requestIdleCallback(callback, options = {}) {
-    const delay = idleCallbackCount++ % 2 === 0 ? 0 : 4;
-    return globalThis.setTimeout(() => callback({
-      didTimeout: delay >= (options.timeout || Infinity),
-      timeRemaining: () => delay === 0 ? 4 : 0,
-    }), delay);
+    const timeout = options.timeout > 0 ? Math.min(options.timeout, 50) : 0;
+    const requested = input.preciseNow();
+    const timedOut = timeout > 0 && idleCallbackCount++ % 2 === 1;
+    const handle = ++idleHandle;
+    idleCallbacks.add(handle);
+    input.queueTask(timedOut ? timeout : 1, () => {
+      if (!idleCallbacks.delete(handle)) return;
+      const deadline = timedOut ? 0 : timeout > 0 ? requested + timeout : input.preciseNow() + 50;
+      callback(domAPI.idleDeadline(timedOut, () => Math.max(0, Math.min(50, deadline - input.performanceNow()))));
+    });
+    return handle;
   });
-  globalThis.cancelIdleCallback = nativeFunction('cancelIdleCallback', function cancelIdleCallback(id) { timers.clear(id); });
-  return input.installDOM(input.shape, input.profile, {
+  globalThis.cancelIdleCallback = nativeFunction('cancelIdleCallback', function cancelIdleCallback(handle) { idleCallbacks.delete(handle); });
+  domAPI = input.installDOM(input.shape, input.profile, {
     markNative,
     brands: input.brands,
     storage: input.storage,
@@ -117,6 +137,21 @@ const hostJavaScript = `
     trust: input.trust,
     setTimeout: globalThis.setTimeout,
     clearTimeout: globalThis.clearTimeout,
+    queueTask: input.queueTask,
+    incumbent: input.incumbent,
+    kindOf: input.kindOf,
+    transferBuffer: input.transferBuffer,
+    bufferDetached: input.bufferDetached,
+    throwLocation: input.throwLocation,
+    digest: input.digest,
+    encodingName: input.encodingName,
+    decodeText: input.decodeText,
+    parseURL: input.parseURL,
+    updateURL: input.updateURL,
+    randomUUID: input.randomUUID,
+    randomBytes: input.randomBytes,
+    templatedObject: input.templatedObject,
+    setTemplateResolver: input.setTemplateResolver,
     performanceNow: input.performanceNow,
     timeOrigin: input.timeOrigin,
     createIframeWindow: input.createIframeWindow,
@@ -126,16 +161,17 @@ const hostJavaScript = `
     intl: input.intl,
     intlHost: input.intlHost,
   });
+  return domAPI;
 })
 `
 
 // 宿主字节码不含 Realm 状态，首次使用时编译一次；Camoufox 后端不加载这些脚本。
 var domProgram = sync.OnceValue(func() *goja.Program {
-	return goja.MustCompile(hostScriptName, domJavaScript, false)
+	return goja.MustCompileHost(hostScriptName, domJavaScript, false)
 })
 
 var hostProgram = sync.OnceValue(func() *goja.Program {
-	return goja.MustCompile(hostScriptName, hostJavaScript, false)
+	return goja.MustCompileHost(hostScriptName, hostJavaScript, false)
 })
 
 var firefoxOrderShape = sync.OnceValues(func() (*globalOrderShape, error) {
@@ -151,7 +187,14 @@ func (state *hostState) installRealmHost(vm *goja.Runtime, realm string, createI
 	if err := installBinaryEncoding(vm); err != nil {
 		return nil, err
 	}
-	if err := installQueueMicrotask(vm); err != nil {
+	var report goja.Callable
+	reportError := func(err error) {
+		var exception *goja.Exception
+		if report != nil && errors.As(err, &exception) {
+			_, _ = report(goja.Undefined(), exception.Value())
+		}
+	}
+	if err := installQueueMicrotask(vm, reportError); err != nil {
 		return nil, err
 	}
 	installDOM, err := vm.RunProgram(domProgram())
@@ -167,7 +210,8 @@ func (state *hostState) installRealmHost(vm *goja.Runtime, realm string, createI
 		return nil, errors.New("WAA Realm 宿主不是函数")
 	}
 	if state.shape == nil {
-		state.shape, err = firefoxShape(vm)
+		state.closureName = "closure_lm_" + strconv.Itoa(rand.IntN(1000000))
+		state.shape, err = firefoxShape(vm, state.closureName)
 		if err != nil {
 			return nil, fmt.Errorf("解析 Firefox 形状表: %w", err)
 		}
@@ -182,7 +226,7 @@ func (state *hostState) installRealmHost(vm *goja.Runtime, realm string, createI
 		}
 		state.storage = vm.NewObject()
 	}
-	timers := &realmTimers{vm: vm, schedule: state.schedule, active: make(map[int64]bool)}
+	timers := &realmTimers{vm: vm, schedule: state.schedule, active: make(map[int64]bool), registry: state.registry, trustedTypes: state.profile.TrustedTypes, report: reportError}
 	timerObject := vm.NewObject()
 	_ = timerObject.Set("setTimeout", func(call goja.FunctionCall) goja.Value { return timers.start(call, false) })
 	_ = timerObject.Set("setInterval", func(call goja.FunctionCall) goja.Value { return timers.start(call, true) })
@@ -233,12 +277,94 @@ func (state *hostState) installRealmHost(vm *goja.Runtime, realm string, createI
 		vm.SetTimeZoneName(state.zoneName)
 	}
 	realmStarted := time.Now()
-	if realm == "top" {
-		realmStarted = realmStarted.Add(-topPageAge)
+	if realm == "top" && !state.profile.NavigationStart.IsZero() {
+		realmStarted = state.profile.NavigationStart
 	}
 	_ = input.Set("timeOrigin", float64(realmStarted.UnixMilli()))
 	_ = input.Set("performanceNow", func() float64 {
 		return math.Floor(float64(time.Since(realmStarted)) / float64(time.Millisecond))
+	})
+	_ = input.Set("preciseNow", func() float64 {
+		return float64(time.Since(realmStarted).Microseconds()) / 1000
+	})
+	_ = input.Set("queueTask", func(delay float64, callback goja.Callable) {
+		state.schedule(time.Duration(max(delay, 0)*float64(time.Millisecond)), func() {
+			_, err := callback(goja.Undefined())
+			reportError(err)
+		})
+	})
+	_ = input.Set("incumbent", func() goja.Value {
+		return vm.IncumbentGlobal(func(name string) bool { return strings.HasPrefix(name, hostScriptName) })
+	})
+	_ = input.Set("kindOf", func(call goja.FunctionCall) goja.Value {
+		if object, ok := call.Argument(0).(*goja.Object); ok {
+			return vm.ToValue(object.InternalKind())
+		}
+		return vm.ToValue("")
+	})
+	_ = input.Set("transferBuffer", func(call goja.FunctionCall) goja.Value {
+		return transferArrayBuffer(vm, call.Argument(0), call.Argument(1))
+	})
+	_ = input.Set("bufferDetached", func(call goja.FunctionCall) goja.Value {
+		buffer, ok := call.Argument(0).Export().(goja.ArrayBuffer)
+		if !ok {
+			panic(vm.NewTypeError("get detached method called on incompatible " + incompatibleName(call.Argument(0))))
+		}
+		return vm.ToValue(buffer.Detached())
+	})
+	_ = input.Set("throwLocation", func() []any {
+		file, line, column := vm.LastThrowPosition()
+		return []any{file, line, column}
+	})
+	_ = input.Set("digest", func(name string, data goja.ArrayBuffer) goja.Value {
+		return vm.ToValue(vm.NewArrayBuffer(digestBytes(name, data.Bytes())))
+	})
+	_ = input.Set("encodingName", encodingName)
+	_ = input.Set("templatedObject", func(id string, keys []string, proto *goja.Object) *goja.Object {
+		return vm.NewTemplatedObject(interfaceTemplate(id, keys), proto)
+	})
+	_ = input.Set("setTemplateResolver", func(resolve goja.Callable) {
+		vm.SetTemplateResolver(func(id string, index int) goja.TemplateProperty {
+			result, err := resolve(goja.Undefined(), vm.ToValue(id), vm.ToValue(index))
+			if err != nil {
+				panic(err)
+			}
+			item := result.ToObject(vm)
+			property := goja.TemplateProperty{
+				Accessor: item.Get("0").ToBoolean(), Value: item.Get("1"),
+				Writable: item.Get("4").ToBoolean(), Enumerable: item.Get("5").ToBoolean(), Configurable: item.Get("6").ToBoolean(),
+			}
+			property.Getter, _ = item.Get("2").(*goja.Object)
+			property.Setter, _ = item.Get("3").(*goja.Object)
+			return property
+		})
+	})
+	_ = input.Set("parseURL", func(call goja.FunctionCall) goja.Value {
+		record := parseURL(call.Argument(0).String(), call.Argument(1))
+		if record == nil {
+			return goja.Null()
+		}
+		return vm.ToValue(record)
+	})
+	_ = input.Set("updateURL", func(href, field, value string) goja.Value {
+		record := updateURL(href, field, value)
+		if record == nil {
+			return goja.Null()
+		}
+		return vm.ToValue(record)
+	})
+	_ = input.Set("randomUUID", randomUUID)
+	_ = input.Set("randomBytes", func(size int) goja.ArrayBuffer {
+		data := make([]byte, size)
+		_, _ = cryptorand.Read(data)
+		return vm.NewArrayBuffer(data)
+	})
+	_ = input.Set("decodeText", func(name string, data goja.ArrayBuffer, fatal bool) string {
+		text, err := decodeText(name, data.Bytes(), fatal)
+		if err != nil {
+			panic(vm.NewTypeError("TextDecoder.decode: Decoding failed."))
+		}
+		return text
 	})
 	if state.topAPI != nil {
 		_ = input.Set("topRealm", state.topAPI)
@@ -269,10 +395,13 @@ func (state *hostState) installRealmHost(vm *goja.Runtime, realm string, createI
 	if err != nil {
 		return nil, fmt.Errorf("安装 WAA %s 宿主: %w", realm, err)
 	}
+	report, _ = goja.AssertFunction(api.ToObject(vm).Get("reportException"))
+	notify, _ := goja.AssertFunction(api.ToObject(vm).Get("reportRejection"))
+	vm.SetPromiseRejectionTracker(state.rejections.tracker(vm, notify))
 	if realm == "top" {
-		order = newTopGlobalOrder(state.order)
+		order = newTopGlobalOrder(state.order, state.closureName)
 	} else {
-		order = newFrameGlobalOrder(state.order)
+		order = newFrameGlobalOrder(state.order, state.closureName)
 	}
 	vm.SetGlobalObserver(order)
 	return api, nil
@@ -296,17 +425,29 @@ func (state *hostState) realmProfile(realm string) map[string]any {
 		if len(profile.Document) > 0 {
 			values["document"] = profile.Document
 		}
+		if width, ok := profile.Window["innerWidth"]; ok {
+			values["visualViewport"] = map[string]any{"width": width, "height": profile.Window["innerHeight"]}
+		}
 	} else {
 		for _, name := range frameWindowNames {
 			if value, ok := profile.Window[name]; ok {
 				window[name] = value
 			}
 		}
-		if cookie, ok := profile.Document["cookie"]; ok {
-			values["document"] = map[string]any{"cookie": cookie}
+		document := map[string]any{}
+		for _, name := range []string{"cookie", "lastModified"} {
+			if value, ok := profile.Document[name]; ok {
+				document[name] = value
+			}
+		}
+		if len(document) > 0 {
+			values["document"] = document
 		}
 	}
 	result := map[string]any{"hasFocus": profile.HasFocus, "window": window, "values": values}
+	if realm == "top" && len(profile.Globals) > 0 {
+		result["globals"] = profile.Globals
+	}
 	if len(profile.LocalStorage) > 0 {
 		localStorage := make(map[string]any, len(profile.LocalStorage))
 		for key, value := range profile.LocalStorage {

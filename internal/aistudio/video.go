@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"sort"
@@ -41,7 +42,7 @@ func (err *videoNotFinishedError) ErrorCode() string {
 	return "video_not_ready"
 }
 
-// VideoImage 表示 Veo 起始帧
+// VideoImage 表示 Veo 帧图片
 type VideoImage struct {
 	InlineData *Blob
 	File       *FileRef
@@ -55,8 +56,13 @@ type VideoRequest struct {
 	DurationSeconds   int
 	Resolution        string
 	AccountID         string
+	NegativePrompt    string
 	StartImage        *VideoImage
+	LastImage         *VideoImage
+	ReferenceImages   []*VideoImage
 	RecoverWAARuntime func(context.Context, string, error) (bool, error)
+	// TaskContext 返回后台视频任务的上下文：生成服务停止时取消，期限从任务开始计算
+	TaskContext func() (context.Context, context.CancelFunc, error)
 }
 
 // VideoOperation 表示 Veo 私有长任务状态
@@ -71,6 +77,14 @@ type VideoOperation struct {
 	accessCheckedAt time.Time
 	// Missing 为上游已找不到该任务时的上游错误说明
 	Missing string
+	// Failure 为 Omni 视频任务生成失败的错误
+	Failure error
+}
+
+// IsVideoModel 表示模型能完成视频长任务：目录提供 predictLongRunning，或经 generateContent 输出视频（如 Omni）
+func IsVideoModel(model Model) bool {
+	return hasMethod(model, "predictLongRunning") ||
+		hasMethod(model, "generateContent") && len(model.CapabilityOptions["video_output_resolutions"]) > 0
 }
 
 // ModelAccessCheckedAt 返回上游接受视频任务的资格时间
@@ -78,10 +92,10 @@ func (operation VideoOperation) ModelAccessCheckedAt() time.Time {
 	return operation.accessCheckedAt
 }
 
-// EncodeGenerateVideoRequest 编码当前网页 GenerateVideo 数组协议
+// EncodeGenerateVideoRequest 编码当前网页 GenerateVideo 数组协议，提示词为空时提示词位与官网一样为 null
 func EncodeGenerateVideoRequest(request VideoRequest) ([]byte, error) {
-	if strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.Prompt) == "" {
-		return nil, fmt.Errorf("GenerateVideo 需要模型和提示词")
+	if strings.TrimSpace(request.Model) == "" {
+		return nil, fmt.Errorf("GenerateVideo 需要模型")
 	}
 	request = normalizeVideoRequest(request)
 	config := []any{
@@ -90,9 +104,18 @@ func EncodeGenerateVideoRequest(request VideoRequest) ([]byte, error) {
 		[]any{strconv.Itoa(request.DurationSeconds)},
 		request.Resolution,
 	}
-	wire := make([]any, 8)
+	if request.LastImage != nil {
+		inline, file, err := encodeVideoImage(request.LastImage)
+		if err != nil {
+			return nil, err
+		}
+		config = append(config, inline, file)
+	}
+	wire := make([]any, 8, 9)
 	wire[0] = wireModelName(request.Model)
-	wire[1] = request.Prompt
+	if strings.TrimSpace(request.Prompt) != "" {
+		wire[1] = request.Prompt
+	}
 	wire[2] = config
 	if request.StartImage != nil {
 		inline, file, err := encodeVideoImage(request.StartImage)
@@ -102,6 +125,24 @@ func EncodeGenerateVideoRequest(request VideoRequest) ([]byte, error) {
 		wire[3] = inline
 		wire[4] = file
 	}
+	if request.NegativePrompt != "" {
+		wire[5] = request.NegativePrompt
+	}
+	if len(request.ReferenceImages) > 0 {
+		references := make([]any, 0, len(request.ReferenceImages))
+		for _, image := range request.ReferenceImages {
+			inline, file, err := encodeVideoImage(image)
+			if err != nil {
+				return nil, err
+			}
+			if file != nil {
+				references = append(references, []any{nil, file})
+			} else {
+				references = append(references, []any{inline})
+			}
+		}
+		wire = append(wire, references)
+	}
 	return json.Marshal(wire)
 }
 
@@ -110,16 +151,16 @@ func encodeVideoImage(image *VideoImage) (any, any, error) {
 		return nil, nil, nil
 	}
 	if (image.InlineData == nil) == (image.File == nil) {
-		return nil, nil, fmt.Errorf("Veo 起始帧必须且只能设置 inline data 或 Drive file")
+		return nil, nil, fmt.Errorf("Veo 帧图片必须且只能设置 inline data 或 Drive file")
 	}
 	if image.InlineData != nil {
 		if !strings.HasPrefix(strings.ToLower(image.InlineData.MIME), "image/") || len(image.InlineData.Data) == 0 {
-			return nil, nil, fmt.Errorf("Veo inline 起始帧需要图片 MIME 和数据")
+			return nil, nil, fmt.Errorf("Veo inline 帧图片需要图片 MIME 和数据")
 		}
 		return []any{image.InlineData.MIME, base64.StdEncoding.EncodeToString(image.InlineData.Data)}, nil, nil
 	}
 	if strings.TrimSpace(image.File.ID) == "" {
-		return nil, nil, fmt.Errorf("Veo Drive 起始帧缺少文件 ID")
+		return nil, nil, fmt.Errorf("Veo Drive 帧图片缺少文件 ID")
 	}
 	return nil, []any{image.File.ID}, nil
 }
@@ -262,13 +303,12 @@ func (c *Client) GetGenerateVideoOperation(ctx context.Context, accountID string
 func (s *PooledService) GenerateVideo(ctx context.Context, request VideoRequest) (VideoOperation, error) {
 	request = normalizeVideoRequest(request)
 	modelID := strings.TrimPrefix(strings.TrimSpace(request.Model), "models/")
-	resourceID := ""
-	if request.StartImage != nil && request.StartImage.File != nil {
-		resourceID = strings.TrimSpace(request.StartImage.File.ID)
+	if model, ok := s.pool.generatedVideoModel(modelID); ok {
+		return s.generateOmniVideo(ctx, request, model)
 	}
 	requestedAccountID := strings.TrimSpace(request.AccountID)
 	selection := AccountSelection{
-		ModelID: modelID, Method: "predictLongRunning", AccountID: requestedAccountID, ResourceID: resourceID,
+		ModelID: modelID, Method: "predictLongRunning", AccountID: requestedAccountID, ResourceID: videoImageResourceID(request),
 	}
 	maxAttempts := accountAttemptLimit(s.pool, selection.AccountID != "" || selection.ResourceID != "")
 	recoveryAccountID := ""
@@ -340,8 +380,40 @@ func (s *PooledService) GenerateVideo(ctx context.Context, request VideoRequest)
 	return operation, generateErr
 }
 
-// GetGenerateVideoOperation 使用 operation 创建账户轮询并绑定结果文件
+// videoImageResourceID 返回视频请求中第一张以文件引用给出的图片 ID，任务在该文件所属账户上运行
+func videoImageResourceID(request VideoRequest) string {
+	for _, image := range append([]*VideoImage{request.StartImage, request.LastImage}, request.ReferenceImages...) {
+		if image != nil && image.File != nil {
+			return strings.TrimSpace(image.File.ID)
+		}
+	}
+	return ""
+}
+
+// downloadFileBlob 读取已绑定文件的完整内容
+func (s *PooledService) downloadFileBlob(ctx context.Context, fileID string) (*Blob, error) {
+	stream, err := s.DownloadFile(ctx, fileID)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Body.Close()
+	data, err := io.ReadAll(stream.Body)
+	if err != nil {
+		return nil, err
+	}
+	return &Blob{MIME: stream.MIME, Data: data}, nil
+}
+
+// resourceAccountID 返回资源绑定的账户
+func (p *AccountPool) resourceAccountID(resourceID string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.resources[strings.TrimSpace(resourceID)]
+}
+
+// GetGenerateVideoOperation 使用 operation 创建账户轮询，首次完成时把临时结果文件复制为账户 Drive 中的视频并绑定，此后直接返回该视频；临时文件暂不可复制时报告未完成；Omni 任务按本进程的生成状态返回
 func (s *PooledService) GetGenerateVideoOperation(ctx context.Context, operationID string) (VideoOperation, error) {
+	omniState, omniTracked := s.omniVideos.Load(strings.TrimSpace(operationID))
 	lease, owned, err := resolveAccountLease(ctx, s.pool, AccountSelection{ResourceID: strings.TrimSpace(operationID)})
 	if err != nil {
 		return VideoOperation{}, err
@@ -353,6 +425,31 @@ func (s *PooledService) GetGenerateVideoOperation(ctx context.Context, operation
 			bindingErr = errors.Join(bindingErr, lease.Release())
 		}
 		return VideoOperation{}, bindingErr
+	}
+	if binding.Video.File != "" {
+		operation := VideoOperation{ID: operationID, Done: true, File: &FileRef{ID: binding.Video.File, MIME: "video/mp4"}}
+		applyVideoOperationBinding(&operation, binding)
+		if owned {
+			if err := lease.Release(); err != nil {
+				return VideoOperation{}, err
+			}
+		}
+		return operation, nil
+	}
+	if strings.HasPrefix(operationID, omniVideoPrefix) {
+		operation := VideoOperation{ID: operationID}
+		if !omniTracked {
+			operation.Done, operation.Missing = true, "服务重启前任务没有生成完成"
+		} else if failure, _ := omniState.(error); failure != nil {
+			operation.Done, operation.Failure = true, failure
+		}
+		applyVideoOperationBinding(&operation, binding)
+		if owned {
+			if err := lease.Release(); err != nil {
+				return VideoOperation{}, err
+			}
+		}
+		return operation, nil
 	}
 	operation, pollErr := s.client.GetGenerateVideoOperation(ContextWithAccountLease(ctx, lease), accountID, operationID)
 	var rpcError *RPCError
@@ -368,7 +465,15 @@ func (s *PooledService) GetGenerateVideoOperation(ctx context.Context, operation
 			),
 		)
 		if pollErr == nil && operation.Done && operation.File != nil {
-			pollErr = lease.BindResource(operation.File.ID, "video-file")
+			var fileID string
+			fileID, pollErr = s.client.saveVideoResult(ContextWithAccountLease(ctx, lease), lease.Account(), operation.File.ID, time.Now())
+			if videoResultNotReady(pollErr) {
+				slog.Warn("视频结果临时文件暂不可复制，下次轮询重新获取", "operation", operationID, "file", operation.File.ID, "error", pollErr)
+				operation.Done, operation.File, pollErr = false, nil, nil
+			} else if pollErr == nil {
+				operation.File.ID = fileID
+				pollErr = lease.BindVideoResult(ctx, operationID, fileID)
+			}
 		}
 	} else if DefinitiveAuthenticationFailure(pollErr) {
 		pollErr = errors.Join(pollErr, lease.MarkAuthenticationRequired(pollErr.Error()))
@@ -377,6 +482,39 @@ func (s *PooledService) GetGenerateVideoOperation(ctx context.Context, operation
 		pollErr = errors.Join(pollErr, lease.Release())
 	}
 	return operation, pollErr
+}
+
+// videoResultNotReady 判断刚完成任务的临时结果文件在 Drive 复制时返回 400 或 404
+func videoResultNotReady(err error) bool {
+	var rpcError *RPCError
+	return errors.As(err, &rpcError) && rpcError.Method == "DriveCopy" &&
+		(rpcError.StatusCode == http.StatusBadRequest || rpcError.StatusCode == http.StatusNotFound)
+}
+
+// saveVideoResult 按官网视频页把任务的临时结果文件复制为以账户本地时间命名的视频并返回副本 ID
+func (c *Client) saveVideoResult(ctx context.Context, account *Account, fileID string, now time.Time) (string, error) {
+	name, err := videoResultName(account, now)
+	if err != nil {
+		return "", err
+	}
+	token, err := c.GenerateAccessToken(ctx, account.ID)
+	if err != nil {
+		return "", err
+	}
+	drive, ok := c.transport.(DriveTransport)
+	if !ok {
+		return "", fmt.Errorf("AI Studio transport 不支持 Drive")
+	}
+	return drive.CopyDrive(ctx, account.ID, token, fileID, name)
+}
+
+// videoResultName 与官网视频页一致，返回以账户本地时间命名的视频文件名
+func videoResultName(account *Account, now time.Time) (string, error) {
+	location, err := time.LoadLocation(account.Config.Timezone)
+	if err != nil {
+		return "", err
+	}
+	return "Video " + now.In(location).Format("January 02, 2006 - 3:04PM") + ".mp4", nil
 }
 
 // ListVideos 返回全部视频任务的持久元数据
@@ -425,6 +563,7 @@ func (s *PooledService) DeleteVideo(ctx context.Context, operationID string) err
 			return err
 		}
 	}
+	s.omniVideos.Delete(operationID)
 	return s.pool.unbindResourceContext(ctx, operationID)
 }
 
@@ -441,6 +580,8 @@ func videoOutputSize(request VideoRequest) string {
 	width := "1280"
 	height := "720"
 	switch strings.ToLower(request.Resolution) {
+	case "360p":
+		width, height = "640", "360"
 	case "1080p":
 		width, height = "1920", "1080"
 	case "4k":
@@ -452,13 +593,22 @@ func videoOutputSize(request VideoRequest) string {
 	return width + "x" + height
 }
 
-// fitVideoOptions 将时长、宽高比与分辨率换成模型选项中最接近的取值
+// fitVideoOptions 将时长、宽高比与分辨率换成模型选项中最接近的取值，时长限制在模型时长范围内
 func fitVideoOptions(request VideoRequest, model Model) (VideoRequest, error) {
 	if request.DurationSeconds < 0 {
 		return request, fmt.Errorf("视频时长不能为负数")
 	}
 	if options := model.CapabilityOptions["video_durations_seconds"]; len(options) > 0 {
 		request.DurationSeconds, _ = strconv.Atoi(NearestOption(float64(request.DurationSeconds), options, videoDurationSeconds))
+	}
+	for _, bound := range model.CapabilityOptions["video_duration_range"] {
+		name, value, _ := strings.Cut(bound, "=")
+		seconds, _ := strconv.Atoi(value)
+		if name == "min" {
+			request.DurationSeconds = max(request.DurationSeconds, seconds)
+		} else if name == "max" {
+			request.DurationSeconds = min(request.DurationSeconds, seconds)
+		}
 	}
 	if options := model.CapabilityOptions["video_aspect_ratios"]; len(options) > 0 {
 		ratio, ok := AspectRatioLog(request.AspectRatio)

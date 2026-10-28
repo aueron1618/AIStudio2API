@@ -7,12 +7,12 @@
   --color-overlay: #1c2128;
   --color-line: #30363d;
   --color-line-strong: #484f58;
-  --color-fg: #c9d1d9;
+  --color-fg: #e6edf3;
   --color-gray-200: #e5e7eb;
-  --color-gray-300: #d1d5db;
-  --color-gray-400: #9ca3af;
-  --color-gray-500: #6b7280;
-  --color-gray-600: #4b5563;
+  --color-gray-300: #d1d9e0;
+  --color-gray-400: #b1bac4;
+  --color-gray-500: #9198a1;
+  --color-gray-600: #7d8590;
   --color-gray-700: #374151;
   --color-blue-300: #93c5fd;
   --color-blue-400: #60a5fa;
@@ -22,14 +22,19 @@
   --color-green-300: #86efac;
   --color-green-400: #4ade80;
   --color-green-500: #22c55e;
-  --color-green-600: #16a34a;
+  --color-green-600: #1a7f37;
   --color-yellow-400: #facc15;
   --color-yellow-500: #eab308;
+  --color-yellow-600: #9a6700;
   --color-red-300: #fca5a5;
   --color-red-400: #f87171;
   --color-red-500: #ef4444;
   --color-red-600: #dc2626;
   --color-red-900: #7f1d1d;
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: calc(1.125 / 0.8125);
+  --text-sm: 0.9375rem;
+  --text-sm--line-height: calc(1.375 / 0.9375);
   --radius-xs: 1px;
   --radius-sm: 2px;
   --radius-md: 3px;
@@ -42,13 +47,88 @@
 
 :root {
   color-scheme: dark;
+  --font-cjk: 'Microsoft YaHei UI', 'PingFang SC', 'Noto Sans SC';
   font-family:
-    ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
-    'Noto Color Emoji';
+    'Inter Variable', var(--font-cjk), ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji',
+    'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+  font-weight: 450;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   background: var(--color-canvas);
   color: var(--color-fg);
+}
+
+:root:lang(zh-TW) {
+  --font-cjk: 'Microsoft JhengHei UI', 'PingFang TC', 'Noto Sans TC';
+}
+
+:root:lang(ja) {
+  --font-cjk: 'Yu Gothic UI', 'Hiragino Sans', 'Noto Sans JP';
+}
+
+:root:lang(ko) {
+  --font-cjk: 'Malgun Gothic', 'Apple SD Gothic Neo', 'Noto Sans KR';
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --color-canvas: #f6f8fa;
+  --color-panel: #ffffff;
+  --color-raised: #eef1f5;
+  --color-overlay: #ffffff;
+  --color-line: #d0d7de;
+  --color-line-strong: #afb8c1;
+  --color-fg: #1f2328;
+  --color-white: #1f2328;
+  --color-gray-100: #111827;
+  --color-gray-200: #1f2328;
+  --color-gray-300: #333b45;
+  --color-gray-400: #57606a;
+  --color-gray-500: #59636e;
+  --color-gray-600: #636c76;
+  --color-gray-700: #d0d7de;
+  --color-gray-900: #ffffff;
+  --color-blue-100: #1e40af;
+  --color-blue-200: #1d4ed8;
+  --color-blue-300: #1d4ed8;
+  --color-blue-400: #2563eb;
+  --color-blue-900: #3b82f6;
+  --color-green-300: #15803d;
+  --color-green-400: #1a7f37;
+  --color-green-900: #22c55e;
+  --color-yellow-100: #854d0e;
+  --color-yellow-300: #a16207;
+  --color-yellow-400: #b45309;
+  --color-amber-200: #92400e;
+  --color-amber-300: #b45309;
+  --color-amber-700: #d97706;
+  --color-amber-900: #f59e0b;
+  --color-red-100: #991b1b;
+  --color-red-200: #b91c1c;
+  --color-red-300: #dc2626;
+  --color-red-400: #dc2626;
+  --color-red-900: #ef4444;
+  --color-cyan-300: #0e7490;
+  --color-cyan-400: #0891b2;
+}
+
+:root[data-theme='light']
+  :is(
+    .bg-blue-600,
+    .bg-green-600,
+    .bg-red-600,
+    .bg-yellow-600,
+    [data-highlighted].data-\[highlighted\]\:bg-blue-600
+  ) {
+  color: #ffffff;
+}
+
+:root[data-theme='light'] [data-state='checked'].data-\[state\=checked\]\:bg-white {
+  background-color: #ffffff;
+}
+
+:root[data-theme='light'] .shadow-black\/30 {
+  --tw-shadow-color: rgb(15 23 42 / 8%);
 }
 
 * {
@@ -73,8 +153,8 @@ body {
   overflow: hidden;
   background-color: var(--color-canvas);
   color: var(--color-fg);
-  font-size: 0.875rem;
-  line-height: 1.25rem;
+  font-size: 0.9375rem;
+  line-height: 1.375rem;
 }
 
 button,
@@ -137,6 +217,26 @@ pre,
   background-color: rgb(0 0 0 / 70%);
 }
 
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+:root[data-theme='dark']::view-transition-old(root) {
+  z-index: 1;
+}
+
+:root[data-theme-switching] *:not(.theme-icon),
+:root[data-theme-switching] *::before,
+:root[data-theme-switching] *::after {
+  transition: none !important;
+}
+
+:root[data-theme='light'] .modal-overlay {
+  background-color: rgb(15 23 42 / 40%);
+}
+
 .notice-enter-active,
 .notice-leave-active {
   transition:
@@ -194,8 +294,8 @@ pre,
     border-bottom: 2px solid #fff;
     border-left: 2px solid #fff;
     content: '';
-    transform: translateY(-1px) rotate(-45deg) scale(0);
-    transition: transform 120ms ease;
+    opacity: 0;
+    transform: translateY(-1px) rotate(-45deg);
   }
 
   input[type='checkbox']:checked {
@@ -204,7 +304,7 @@ pre,
   }
 
   input[type='checkbox']:checked::after {
-    transform: translateY(-1px) rotate(-45deg) scale(1);
+    opacity: 1;
   }
 
   input[type='checkbox']:focus-visible {
@@ -264,7 +364,7 @@ button[aria-busy='true']::before {
 @keyframes dialog-in {
   from {
     opacity: 0;
-    transform: translateY(6px) scale(0.98);
+    transform: translateY(6px);
   }
 }
 
@@ -294,8 +394,8 @@ button[aria-busy='true']::before {
   background: var(--color-overlay);
   box-shadow: 0 4px 12px rgb(0 0 0 / 40%);
   color: var(--color-fg);
-  font-size: 0.75rem;
-  line-height: 1rem;
+  font-size: 0.8125rem;
+  line-height: 1.125rem;
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease;
@@ -304,6 +404,10 @@ button[aria-busy='true']::before {
 
 .ui-tooltip.visible {
   opacity: 1;
+}
+
+:root[data-theme='light'] .ui-tooltip {
+  box-shadow: 0 4px 12px rgb(15 23 42 / 12%);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -324,7 +428,7 @@ button[aria-busy='true']::before {
 .markdown :is(h1, h2, h3, h4) {
   margin-top: 1.25rem;
   font-weight: 600;
-  color: #f3f4f6;
+  color: var(--color-gray-200);
 }
 
 .markdown h1 {
@@ -361,15 +465,15 @@ button[aria-busy='true']::before {
 
 .markdown strong {
   font-weight: 600;
-  color: #f9fafb;
+  color: var(--color-white);
 }
 
 .markdown code {
   padding: 0.125rem 0.375rem;
   border-radius: var(--radius-md);
-  background: rgb(255 255 255 / 7%);
+  background: color-mix(in oklab, var(--color-fg) 8%, transparent);
   font-family: var(--font-mono);
-  font-size: 0.85em;
+  font-size: 0.9em;
 }
 
 .markdown pre {

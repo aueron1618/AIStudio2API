@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +23,10 @@ type PooledService struct {
 	client *Client
 	// BuildNativeNonstream 让非流式请求优先使用具备资格的 Build 通道
 	BuildNativeNonstream bool
+	// YouTubeLinks 把 user 文本中的 YouTube 链接作为视频外部媒体发送
+	YouTubeLinks bool
+	// omniVideos 记录本进程中尚无结果文件的 Omni 视频任务：值为 nil 时仍在生成，为 error 时生成失败
+	omniVideos sync.Map
 }
 
 // PoolRequestContextProvider 从租约账户读取协议上下文
@@ -66,6 +72,7 @@ var _ Service = (*PooledService)(nil)
 var _ RequestContextProvider = (*PoolRequestContextProvider)(nil)
 var _ ProtectedTransport = (*WorkerProtectedTransport)(nil)
 var _ VideoProtectedTransport = (*WorkerProtectedTransport)(nil)
+var _ TitleProtectedTransport = (*WorkerProtectedTransport)(nil)
 
 // NewPooledService 创建多账户协议服务
 func NewPooledService(pool *AccountPool, client *Client) (*PooledService, error) {
@@ -102,22 +109,25 @@ func NewWorkerProtectedTransport(options WorkerProtectedTransportOptions) (*Work
 	}, nil
 }
 
-// DoProtected 写入 fresh proof 后通过 Camoufox 发送 GenerateContent 或 Build 代理请求
+// DoProtected 写入 fresh proof 后通过 Camoufox 发送 GenerateContent、Build 代理或写代码助手请求，写入页面输入框的提示词为最后一个轮次的文本
 func (t *WorkerProtectedTransport) DoProtected(ctx context.Context, request GenerateRequest, rpc RPCRequest) (*RPCResponse, error) {
-	var prompt, page string
+	var prompt string
 	var err error
 	proofField := 5
-	if rpc.Method == buildProxyStreamedMethod || rpc.Method == buildProxyUnaryMethod {
+	switch rpc.Method {
+	case buildProxyStreamedMethod, buildProxyUnaryMethod:
 		prompt, err = buildBindingPrompt(rpc.Body)
-		page = contentsText(request.Contents)
 		proofField = buildProofField
-	} else {
+	case assistantOfflineMethod:
 		prompt, err = bindingPrompt(request)
-		page = prompt
+		proofField = assistantProofField
+	default:
+		prompt, err = bindingPrompt(request)
 	}
 	if err != nil {
 		return nil, err
 	}
+	page := contentsText(request.Contents[max(len(request.Contents)-1, 0):])
 	modelID := strings.TrimPrefix(strings.TrimSpace(request.Model), "models/")
 	return t.doBrowserPrepared(ctx, prompt, page, proofField, AccountSelection{
 		ModelID: modelID, Method: "generateContent", AccountID: strings.TrimSpace(request.AccountID),
@@ -151,7 +161,7 @@ func (t *WorkerProtectedTransport) doBrowserPrepared(
 	}
 	reportRequestPhase(ctx, RequestPhaseSendingUpstream)
 	response, err := worker.SendProtected(ctx, ProtectedRequest{
-		URL: rpc.URL, Headers: headers, Body: rpc.Body,
+		URL: rpc.URL, Headers: headers, Body: rpc.Body, PagePrompt: page,
 	})
 	if err != nil {
 		return nil, err
@@ -211,32 +221,17 @@ func (t *WorkerProtectedTransport) prepareProtectedRequest(
 	return lease, worker, rpc, nil
 }
 
-// DoProtectedVideo 写入 Veo fresh proof 后发送请求
+// DoProtectedVideo 写入 Veo fresh proof 后经 Worker 页面发送请求，页面输入框的提示词为视频提示词
 func (t *WorkerProtectedTransport) DoProtectedVideo(ctx context.Context, request VideoRequest, rpc RPCRequest) (*RPCResponse, error) {
 	modelID := strings.TrimPrefix(strings.TrimSpace(request.Model), "models/")
-	return t.doPrepared(ctx, request.Prompt, 8, AccountSelection{
+	return t.doBrowserPrepared(ctx, request.Prompt, request.Prompt, 8, AccountSelection{
 		ModelID: modelID, Method: "predictLongRunning", AccountID: strings.TrimSpace(request.AccountID),
 	}, rpc)
 }
 
-func (t *WorkerProtectedTransport) doPrepared(
-	ctx context.Context,
-	prompt string,
-	proofField int,
-	selection AccountSelection,
-	rpc RPCRequest,
-) (*RPCResponse, error) {
-	_, _, rpc, err := t.prepareProtectedRequest(ctx, prompt, prompt, proofField, selection, rpc)
-	if err != nil {
-		return nil, err
-	}
-	reportRequestPhase(ctx, RequestPhaseSendingUpstream)
-	response, err := t.transport.Do(ctx, rpc)
-	if err != nil {
-		return nil, err
-	}
-	reportRequestPhase(ctx, RequestPhaseStreaming)
-	return response, nil
+// DoProtectedTitle 写入 GenerateTitle fresh proof 后经 Worker 页面发送请求，binding 为提示词与回答以空格连接，页面输入框为空
+func (t *WorkerProtectedTransport) DoProtectedTitle(ctx context.Context, request TitleRequest, rpc RPCRequest) (*RPCResponse, error) {
+	return t.doBrowserPrepared(ctx, request.Prompt+" "+request.Answer, "", 3, AccountSelection{ModelID: request.Model}, rpc)
 }
 
 func bindingPrompt(request GenerateRequest) (string, error) {
@@ -245,7 +240,6 @@ func bindingPrompt(request GenerateRequest) (string, error) {
 	}
 	values := make([]string, 0)
 	for _, content := range request.Contents {
-		content = attachYouTubeMedia(content)
 		for _, part := range content.Parts {
 			switch {
 			case part.Text != "":
@@ -262,7 +256,7 @@ func bindingPrompt(request GenerateRequest) (string, error) {
 	return strings.Join(values, " "), nil
 }
 
-// contentsText 返回各 Part 的文本以空格连接，作为 Build 请求写入页面的提示词
+// contentsText 返回各 Part 的文本以空格连接，作为写入页面输入框的提示词
 func contentsText(contents []Content) string {
 	values := make([]string, 0)
 	for _, content := range contents {
@@ -328,7 +322,10 @@ func (s *PooledService) Models(ctx context.Context) ([]Model, error) {
 		return nil, ErrNoEligibleAccount
 	}
 	models = mergeModels(models, s.CachedModels())
-	return FilterModelsByChannel(s.pool.EligibleModels(models), ChannelFromContext(ctx)), nil
+	if channel := ChannelFromContext(ctx); channel != "" {
+		return FilterModelsByChannel(s.pool.EligibleModels(models), channel), nil
+	}
+	return s.pool.PublicModels(models), nil
 }
 
 // RefreshAccountModels 刷新指定账户的权益与模型目录
@@ -348,6 +345,46 @@ func (s *PooledService) RefreshAccountModels(ctx context.Context, accountID stri
 		return models, fmt.Errorf("释放账户 %s 的模型目录租约: %w", accountID, releaseErr)
 	}
 	return models, nil
+}
+
+// AccountRefresh 为一次账户状态刷新前后的权益与模型数，ModelsChanged 表示该账户的目录条目有变化
+type AccountRefresh struct {
+	PreviousTier   BenefitTier
+	Tier           BenefitTier
+	PreviousModels int
+	Models         int
+	ModelsChanged  bool
+	Skipped        bool
+}
+
+// RefreshAccountState 读取账户权益与模型目录，登录失效时标记账户需要登录；wait 为 true 时等待独占租约，任何状态的账户都会刷新，否则只用就绪账户的空闲槽位，没有时跳过
+func (s *PooledService) RefreshAccountState(ctx context.Context, accountID string, wait bool) (AccountRefresh, error) {
+	accountID = strings.TrimSpace(accountID)
+	var lease *AccountLease
+	var err error
+	if wait {
+		lease, err = s.pool.AcquireAccount(ctx, accountID)
+	} else {
+		lease, _, err = s.pool.TryAcquireFor(ctx, AccountSelection{AccountID: accountID})
+	}
+	if lease == nil {
+		return AccountRefresh{Skipped: err == nil}, err
+	}
+	account := lease.Account()
+	s.pool.mu.Lock()
+	refresh := AccountRefresh{PreviousTier: account.BenefitTier, PreviousModels: len(account.Models)}
+	previous := slices.Clone(account.Models)
+	s.pool.mu.Unlock()
+	models, err := s.modelsForLease(ContextWithAccountLease(ctx, lease), lease)
+	if err != nil {
+		return refresh, errors.Join(err, lease.Release())
+	}
+	s.pool.mu.Lock()
+	refresh.Tier = account.BenefitTier
+	refresh.ModelsChanged = !reflect.DeepEqual(previous, account.Models)
+	s.pool.mu.Unlock()
+	refresh.Models = len(models)
+	return refresh, lease.Release()
 }
 
 // CachedModels 返回启用账户最近同步目录的并集
@@ -478,19 +515,16 @@ func (s *PooledService) markRetryableFailure(lease *AccountLease, modelAccessSco
 
 func (s *PooledService) modelsForLease(ctx context.Context, lease *AccountLease) ([]Model, error) {
 	account := lease.Account()
+	if err := s.client.EnsureTermsAccepted(ContextWithAccountLease(ctx, lease), account.ID); err != nil {
+		return nil, s.catalogFailure(lease, err)
+	}
 	tier, err := s.client.BenefitTierForAccount(ContextWithAccountLease(ctx, lease), account.ID)
 	if err != nil {
-		if DefinitiveAuthenticationFailure(err) {
-			err = errors.Join(err, lease.MarkAuthenticationRequired(err.Error()))
-		}
-		return nil, err
+		return nil, s.catalogFailure(lease, err)
 	}
 	models, err := s.client.ModelsForAccount(ContextWithAccountLease(ctx, lease), account.ID)
 	if err != nil {
-		if DefinitiveAuthenticationFailure(err) {
-			err = errors.Join(err, lease.MarkAuthenticationRequired(err.Error()))
-		}
-		return nil, err
+		return nil, s.catalogFailure(lease, err)
 	}
 	if err := errors.Join(
 		lease.MarkAuthenticationValid(),
@@ -515,6 +549,15 @@ func (s *PooledService) modelsForLease(ctx context.Context, lease *AccountLease)
 	return models, nil
 }
 
+// catalogFailure 把认证失效的账户标为需要登录，其余失败记为该账户最近一次目录读取错误
+func (s *PooledService) catalogFailure(lease *AccountLease, err error) error {
+	if DefinitiveAuthenticationFailure(err) {
+		return errors.Join(err, lease.MarkAuthenticationRequired(err.Error()))
+	}
+	s.pool.recordCatalogFailure(lease.Account().ID, err)
+	return err
+}
+
 // CountTokens 使用支持目标模型的独占账户计数
 func (s *PooledService) CountTokens(ctx context.Context, request TokenCountRequest) (TokenCount, error) {
 	modelID := strings.TrimPrefix(strings.TrimSpace(request.Model), "models/")
@@ -522,6 +565,9 @@ func (s *PooledService) CountTokens(ctx context.Context, request TokenCountReque
 		return TokenCount{}, fmt.Errorf("%w: CountTokens model 不能为空", ErrInvalidArgument)
 	}
 	request.System, request.Contents = normalizeTurns(request.System, request.Contents)
+	if s.YouTubeLinks {
+		request.Contents = attachYouTubeLinks(request.Contents)
+	}
 	if len(request.Contents) == 0 {
 		return TokenCount{}, fmt.Errorf("%w: 请求没有系统提示或对话内容", ErrInvalidArgument)
 	}
@@ -594,6 +640,9 @@ func (s *PooledService) Generate(ctx context.Context, request GenerateRequest) (
 		return nil, fmt.Errorf("%w: GenerateContent model 不能为空", ErrInvalidArgument)
 	}
 	request.System, request.Contents = normalizeTurns(request.System, request.Contents)
+	if s.YouTubeLinks {
+		request.Contents = attachYouTubeLinks(request.Contents)
+	}
 	if len(request.Contents) == 0 {
 		return nil, fmt.Errorf("%w: 请求没有系统提示或对话内容", ErrInvalidArgument)
 	}
@@ -786,24 +835,45 @@ func mergeModels(base []Model, additions []Model) []Model {
 			current.CapabilityOptions = make(map[string][]string, len(model.CapabilityOptions))
 		}
 		for name, values := range model.CapabilityOptions {
-			current.CapabilityOptions[name] = unionStrings(current.CapabilityOptions[name], values)
+			current.CapabilityOptions[name] = unionOrdered(current.CapabilityOptions[name], values)
+		}
+		if len(current.VoiceDetails) == 0 {
+			current.VoiceDetails = model.VoiceDetails
+		}
+		if len(current.Languages) == 0 {
+			current.Languages = model.Languages
 		}
 		current.AccessModes = unionInt64(current.AccessModes, model.AccessModes)
 		current.Paid = current.Paid || model.Paid
 		merged[model.ID] = current
 	}
 	result := make([]Model, 0, len(merged))
-	for _, model := range merged {
+	for _, id := range upstreamModelOrder(base, additions) {
+		model := merged[id]
 		model.Methods = unionStrings(nil, model.Methods)
-		for name, values := range model.CapabilityOptions {
-			model.CapabilityOptions[name] = unionStrings(nil, values)
-		}
 		result = append(result, model)
 	}
-	sort.Slice(result, func(left int, right int) bool {
-		return result[left].ID < result[right].ID
-	})
 	return result
+}
+
+// upstreamModelOrder 按各目录的上游顺序合并模型 ID，只出现在后一个目录的模型排在它在该目录中的前一个模型之后，没有前一个已知模型时排在该目录首个已知模型之前，该目录没有已知模型时排在末尾
+func upstreamModelOrder(lists ...[]Model) []string {
+	var order []string
+	for _, models := range lists {
+		previous := len(order) - 1
+		if index := slices.IndexFunc(models, func(model Model) bool { return slices.Contains(order, model.ID) }); index >= 0 {
+			previous = slices.Index(order, models[index].ID) - 1
+		}
+		for _, model := range models {
+			if index := slices.Index(order, model.ID); index >= 0 {
+				previous = index
+				continue
+			}
+			previous++
+			order = slices.Insert(order, previous, model.ID)
+		}
+	}
+	return order
 }
 
 func unionInt64(left []int64, right []int64) []int64 {
@@ -819,6 +889,17 @@ func unionInt64(left []int64, right []int64) []int64 {
 		result = append(result, value)
 	}
 	sort.Slice(result, func(left int, right int) bool { return result[left] < result[right] })
+	return result
+}
+
+// unionOrdered 按首次出现的顺序合并两组取值并去重
+func unionOrdered(left []string, right []string) []string {
+	result := slices.Clone(left)
+	for _, value := range right {
+		if !slices.Contains(result, value) {
+			result = append(result, value)
+		}
+	}
 	return result
 }
 

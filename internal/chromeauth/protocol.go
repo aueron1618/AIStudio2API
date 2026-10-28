@@ -19,6 +19,9 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	http "github.com/bogdanfinn/fhttp"
@@ -38,8 +41,10 @@ func multiloginStatusError(phase string, statusCode int, status string) error {
 	return err
 }
 
+// multiloginURL 是 OAuthMultilogin 的地址
+var multiloginURL = "https://accounts.google.com/oauth/multilogin?source=ChromiumAccountReconcilorDice&reuseCookies=0"
+
 const (
-	multiloginURL     = "https://accounts.google.com/oauth/multilogin?source=ChromiumAccountReconcilorDice&reuseCookies=0"
 	oauthClientID     = "77185425430.apps.googleusercontent.com"
 	assertionAudience = "https://accounts.google.com/accountmanager"
 	assertionSentinel = "DBSC_CHALLENGE_IF_REQUIRED"
@@ -74,7 +79,118 @@ type deviceBindingKey interface {
 	Close()
 }
 
-func fetchGoogleCookies(ctx context.Context, gaiaID string, token string, wrappedKey []byte, proxyURL string) ([]multiloginCookie, error) {
+// multiloginHeaderOrder 是 Chrome GaiaAuthFetcher 发出 OAuthMultilogin 的请求头顺序
+var multiloginHeaderOrder = []string{"content-length", "authorization", "content-type", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "user-agent", "accept-encoding", "accept-language", "priority"}
+
+// chromeIdentity 是本机 Chrome profile 发出 Gaia 请求时的 User-Agent 与 Accept-Language
+type chromeIdentity struct {
+	userAgent      string
+	acceptLanguage string
+}
+
+// readChromeIdentity 按 User Data 的 Last Version 与 profile 的语言设置生成 Chrome 的 User-Agent 与 Accept-Language
+func readChromeIdentity(chromeRoot string, profile string) (chromeIdentity, error) {
+	version, err := os.ReadFile(filepath.Join(chromeRoot, "Last Version"))
+	if err != nil {
+		return chromeIdentity{}, fmt.Errorf("读取 Chrome 版本: %w", err)
+	}
+	major, _, _ := strings.Cut(strings.TrimSpace(string(version)), ".")
+	return chromeIdentity{
+		userAgent:      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + major + ".0.0.0 Safari/537.36",
+		acceptLanguage: acceptLanguageHeader(profileLanguages(chromeRoot, profile)),
+	}, nil
+}
+
+// profileLanguages 返回 profile 的 intl.accept_languages，等于默认值未写入时返回 intl.selected_languages
+func profileLanguages(chromeRoot string, profile string) string {
+	data, err := os.ReadFile(filepath.Join(chromeRoot, profile, "Preferences"))
+	if err != nil {
+		return ""
+	}
+	var preferences struct {
+		Intl struct {
+			AcceptLanguages   string `json:"accept_languages"`
+			SelectedLanguages string `json:"selected_languages"`
+		} `json:"intl"`
+	}
+	if json.Unmarshal(data, &preferences) != nil {
+		return ""
+	}
+	if strings.TrimSpace(preferences.Intl.AcceptLanguages) != "" {
+		return preferences.Intl.AcceptLanguages
+	}
+	return preferences.Intl.SelectedLanguages
+}
+
+// acceptLanguageHeader 按 Chromium HttpUtil 的 ExpandLanguageList 与 GenerateAcceptLanguageHeader 把语言设置展开为 Accept-Language
+func acceptLanguageHeader(languages string) string {
+	items := strings.Split(languages, ",")
+	primary := func(language string) string {
+		base, _, _ := strings.Cut(language, "-")
+		return strings.TrimSpace(base)
+	}
+	var expanded []string
+	add := func(language string) {
+		if !slices.Contains(expanded, language) {
+			expanded = append(expanded, language)
+		}
+	}
+	for index, item := range items {
+		language := strings.TrimSpace(item)
+		add(language)
+		base := primary(language)
+		if base == "x" || base == "i" {
+			continue
+		}
+		if index+1 == len(items) || primary(items[index+1]) != base {
+			add(base)
+		}
+	}
+	var header strings.Builder
+	quality := 10
+	for index, language := range expanded {
+		if index == 0 {
+			header.WriteString(language)
+		} else {
+			fmt.Fprintf(&header, ",%s;q=0.%d", language, quality)
+		}
+		if quality > 1 {
+			quality--
+		}
+	}
+	return header.String()
+}
+
+// fetchGoogleCookies 用 refresh token 经 OAuthMultilogin 取得 Google Cookie，有设备绑定密钥时走 DBSC 挑战与 HPKE 解密，没有时一次 MultiBearer 请求取得明文 Cookie
+func fetchGoogleCookies(ctx context.Context, identity chromeIdentity, gaiaID string, token string, wrappedKey []byte, proxyURL string) ([]multiloginCookie, error) {
+	client, err := newOAuthClient(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	defer client.CloseIdleConnections()
+	if len(wrappedKey) == 0 {
+		return fetchBearerCookies(ctx, client, identity, gaiaID, token)
+	}
+	return fetchBoundCookies(ctx, client, identity, gaiaID, token, wrappedKey)
+}
+
+// fetchBearerCookies 为没有设备绑定的 token 请求一次 OAuthMultilogin，返回明文 Cookie
+func fetchBearerCookies(ctx context.Context, client tls_client.HttpClient, identity chromeIdentity, gaiaID string, token string) ([]multiloginCookie, error) {
+	status, response, err := requestMultilogin(ctx, client, identity, gaiaID, token, "")
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK || response.Status != "OK" {
+		return nil, multiloginStatusError("bearer", status, response.Status)
+	}
+	if err := checkMultiloginCookies(response.Cookies); err != nil {
+		return nil, err
+	}
+	return response.Cookies, nil
+}
+
+// fetchBoundCookies 为设备绑定的 token 取得 DBSC challenge、以设备密钥签发 assertion，再解密服务端返回的 Cookie
+func fetchBoundCookies(ctx context.Context, client tls_client.HttpClient, identity chromeIdentity, gaiaID string, token string, wrappedKey []byte) ([]multiloginCookie, error) {
 	bindingKey, err := openDeviceBindingKey(wrappedKey)
 	if err != nil {
 		return nil, err
@@ -84,13 +200,8 @@ func fetchGoogleCookies(ctx context.Context, gaiaID string, token string, wrappe
 	if err != nil {
 		return nil, err
 	}
-	client, err := newOAuthClient(proxyURL)
-	if err != nil {
-		return nil, err
-	}
-	defer client.CloseIdleConnections()
 
-	firstStatus, first, err := requestMultilogin(ctx, client, gaiaID, token, assertionSentinel)
+	firstStatus, first, err := requestMultilogin(ctx, client, identity, gaiaID, token, assertionSentinel)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +218,7 @@ func fetchGoogleCookies(ctx context.Context, gaiaID string, token string, wrappe
 	if err != nil {
 		return nil, err
 	}
-	secondStatus, second, err := requestMultilogin(ctx, client, gaiaID, token, assertion)
+	secondStatus, second, err := requestMultilogin(ctx, client, identity, gaiaID, token, assertion)
 	if err != nil {
 		return nil, err
 	}
@@ -117,31 +228,38 @@ func fetchGoogleCookies(ctx context.Context, gaiaID string, token string, wrappe
 	if len(second.Directed) == 0 || bytes.Equal(second.Directed, []byte("null")) {
 		return nil, fmt.Errorf("OAuthMultilogin 响应缺少 token_binding_directed_response")
 	}
-	if len(second.Cookies) == 0 {
-		return nil, fmt.Errorf("OAuthMultilogin 响应缺少 Cookie")
+	if err := checkMultiloginCookies(second.Cookies); err != nil {
+		return nil, err
 	}
-
-	names := make(map[string]struct{}, len(second.Cookies))
 	for index := range second.Cookies {
-		cookie := &second.Cookies[index]
-		if cookie.Name == "" || cookie.Value == "" {
-			return nil, fmt.Errorf("OAuthMultilogin Cookie 格式异常")
-		}
-		cookie.Value, err = hpkeOpen(ephemeralPrivateKey, cookie.Value)
-		if err != nil {
+		if second.Cookies[index].Value, err = hpkeOpen(ephemeralPrivateKey, second.Cookies[index].Value); err != nil {
 			return nil, err
 		}
+	}
+	return second.Cookies, nil
+}
+
+// checkMultiloginCookies 核对 OAuthMultilogin 返回的 Cookie 带有名称、值、域，并包含 SAPISID 与 __Secure-1PSID
+func checkMultiloginCookies(cookies []multiloginCookie) error {
+	if len(cookies) == 0 {
+		return fmt.Errorf("OAuthMultilogin 响应缺少 Cookie")
+	}
+	names := make(map[string]struct{}, len(cookies))
+	for _, cookie := range cookies {
+		if cookie.Name == "" || cookie.Value == "" {
+			return fmt.Errorf("OAuthMultilogin Cookie 格式异常")
+		}
 		if cookie.Domain == "" && (cookie.Host == "" || strings.HasPrefix(cookie.Host, ".")) {
-			return nil, fmt.Errorf("OAuthMultilogin Cookie 域格式异常")
+			return fmt.Errorf("OAuthMultilogin Cookie 域格式异常")
 		}
 		names[cookie.Name] = struct{}{}
 	}
 	for _, required := range []string{"SAPISID", "__Secure-1PSID"} {
 		if _, ok := names[required]; !ok {
-			return nil, fmt.Errorf("OAuthMultilogin 缺少核心 Cookie: %s", required)
+			return fmt.Errorf("OAuthMultilogin 缺少核心 Cookie: %s", required)
 		}
 	}
-	return second.Cookies, nil
+	return nil
 }
 
 func newOAuthClient(proxyURL string) (tls_client.HttpClient, error) {
@@ -161,15 +279,26 @@ func newOAuthClient(proxyURL string) (tls_client.HttpClient, error) {
 	return client, nil
 }
 
-func requestMultilogin(ctx context.Context, client tls_client.HttpClient, gaiaID string, token string, assertion string) (int, multiloginResponse, error) {
-	authorization := encodeMultiOAuthHeader(gaiaID, token, assertion)
+// requestMultilogin 按 Chrome 的请求头发送一次 OAuthMultilogin：带 assertion 时用 MultiOAuth 头，没有设备绑定的 token 用 MultiBearer 头
+func requestMultilogin(ctx context.Context, client tls_client.HttpClient, identity chromeIdentity, gaiaID string, token string, assertion string) (int, multiloginResponse, error) {
+	authorization := "MultiBearer " + token + ":" + gaiaID
+	if assertion != "" {
+		authorization = "MultiOAuth " + encodeMultiOAuthHeader(gaiaID, token, assertion)
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, multiloginURL, strings.NewReader(" "))
 	if err != nil {
 		return 0, multiloginResponse{}, fmt.Errorf("创建 OAuthMultilogin 请求: %w", err)
 	}
-	request.Header.Set("Authorization", "MultiOAuth "+authorization)
+	request.Header.Set("Authorization", authorization)
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Set("User-Agent", userAgent)
+	request.Header.Set("Sec-Fetch-Site", "none")
+	request.Header.Set("Sec-Fetch-Mode", "no-cors")
+	request.Header.Set("Sec-Fetch-Dest", "empty")
+	request.Header.Set("User-Agent", identity.userAgent)
+	request.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	request.Header.Set("Accept-Language", identity.acceptLanguage)
+	request.Header.Set("Priority", "u=4, i")
+	request.Header[http.HeaderOrderKey] = multiloginHeaderOrder
 	response, err := client.Do(request)
 	if err != nil {
 		return 0, multiloginResponse{}, fmt.Errorf("OAuthMultilogin 请求失败: %w", err)

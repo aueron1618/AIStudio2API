@@ -1,6 +1,7 @@
 package aistudio
 
 import (
+	"io"
 	"net/http"
 	"reflect"
 	"testing"
@@ -69,5 +70,41 @@ func TestGoRuntimeCloseReleasesIdleConnections(t *testing.T) {
 	}
 	if !runtime.closed || runtime.interpreter != "" || runtime.refreshTimer != nil || transport.closed != 1 {
 		t.Fatal("closed runtime retained resources")
+	}
+}
+
+type imageProbeBody struct {
+	remaining, read, maxRead int
+	closed                   bool
+}
+
+func (body *imageProbeBody) Read(buffer []byte) (int, error) {
+	body.maxRead = max(body.maxRead, len(buffer))
+	if body.remaining == 0 {
+		return 0, io.EOF
+	}
+	size := min(len(buffer), body.remaining)
+	clear(buffer[:size])
+	body.remaining -= size
+	body.read += size
+	return size, nil
+}
+
+func (body *imageProbeBody) Close() error { body.closed = true; return nil }
+
+type imageProbeTransport struct{ body *imageProbeBody }
+
+func (transport imageProbeTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"image/png"}}, Body: transport.body, Request: request}, nil
+}
+
+func TestGoRuntimeImageProbeDiscardsStreamingBody(t *testing.T) {
+	body := &imageProbeBody{remaining: 8 << 20}
+	runtime := &goWAARuntime{client: &http.Client{Transport: imageProbeTransport{body: body}}}
+	if !runtime.loadImage("https://aistudio.google.com/image.png") {
+		t.Fatal("nonempty image was rejected")
+	}
+	if !body.closed || body.read != 4<<20 || body.maxRead > 32<<10 {
+		t.Fatalf("image probe buffered or exceeded limit: closed=%v read=%d maxRead=%d", body.closed, body.read, body.maxRead)
 	}
 }

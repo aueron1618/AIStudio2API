@@ -7,7 +7,7 @@ import (
 	"sync"
 	"weak"
 
-	"github.com/Mag1cFall/AIStudio2API/internal/waa/goja"
+	"github.com/Mag1cFall/goja"
 )
 
 // 形状表只供宿主读取。共享紧凑的 Go 数据，不在每个账户中 JSON.parse 出
@@ -24,7 +24,7 @@ var shapeCache struct {
 	data weak.Pointer[shapeData]
 }
 
-func firefoxShape(vm *goja.Runtime) (goja.Value, error) {
+func firefoxShape(vm *goja.Runtime, closureName string) (goja.Value, error) {
 	shapeCache.Lock()
 	defer shapeCache.Unlock()
 	data := shapeCache.data.Value()
@@ -40,7 +40,8 @@ func firefoxShape(vm *goja.Runtime) (goja.Value, error) {
 		data = &shapeData{value: value}
 		shapeCache.data = weak.Make(data)
 	}
-	return wrapShapeValue(vm, data, data.value), nil
+	view := &shapeView{vm: vm, data: data, closureName: closureName}
+	return view.wrap(data.value), nil
 }
 
 // 保留 JSON 对象的原始键顺序，Object.assign/entries 的结果不能因 Go map 而变化。
@@ -88,38 +89,71 @@ func readShapeValue(decoder *json.Decoder) (any, error) {
 	}
 }
 
-func wrapShapeValue(vm *goja.Runtime, owner *shapeData, value any) goja.Value {
+// 随机监听表名属于 runtime 视图，不能写回弱缓存中的共享数据。
+type shapeView struct {
+	vm          *goja.Runtime
+	data        *shapeData
+	closureName string
+}
+
+func replaceClosureListenerMap(value, name string) string {
+	if name == "" || !strings.Contains(value, "closure_lm_") {
+		return value
+	}
+	return closureListenerMapPattern.ReplaceAllLiteralString(value, name)
+}
+
+func (view *shapeView) wrap(value any) goja.Value {
 	switch value := value.(type) {
 	case *shapeFields:
-		return vm.NewDynamicObject(&shapeObject{vm: vm, owner: owner, fields: value})
+		return view.vm.NewDynamicObject(&shapeObject{view: view, fields: value})
 	case []any:
-		return vm.NewDynamicArray(&shapeArray{vm: vm, owner: owner, values: value})
+		return view.vm.NewDynamicArray(&shapeArray{view: view, values: value})
+	case string:
+		return view.vm.ToValue(replaceClosureListenerMap(value, view.closureName))
 	default:
-		return vm.ToValue(value)
+		return view.vm.ToValue(value)
 	}
 }
 
 type shapeObject struct {
-	vm     *goja.Runtime
-	owner  *shapeData
+	view   *shapeView
 	fields *shapeFields
 }
 
-func (object *shapeObject) Get(key string) goja.Value {
+func (object *shapeObject) lookup(key string) (any, bool) {
+	if object.view.closureName != "" && strings.Contains(key, "closure_lm_") {
+		for _, original := range object.fields.keys {
+			if replaceClosureListenerMap(original, object.view.closureName) == key {
+				return object.fields.values[original], true
+			}
+		}
+		return nil, false
+	}
 	value, ok := object.fields.values[key]
+	return value, ok
+}
+
+func (object *shapeObject) Get(key string) goja.Value {
+	value, ok := object.lookup(key)
 	if !ok {
 		return nil
 	}
-	return wrapShapeValue(object.vm, object.owner, value)
+	return object.view.wrap(value)
 }
-func (object *shapeObject) Has(key string) bool    { _, ok := object.fields.values[key]; return ok }
-func (object *shapeObject) Keys() []string         { return append([]string(nil), object.fields.keys...) }
+func (object *shapeObject) Keys() []string {
+	keys := make([]string, len(object.fields.keys))
+	for index, key := range object.fields.keys {
+		keys[index] = replaceClosureListenerMap(key, object.view.closureName)
+	}
+	return keys
+}
+func (object *shapeObject) Has(key string) bool    { _, ok := object.lookup(key); return ok }
 func (*shapeObject) Set(string, goja.Value) bool   { return false }
 func (object *shapeObject) Delete(key string) bool { return !object.Has(key) }
 
 type shapeArray struct {
-	vm     *goja.Runtime
-	owner  *shapeData
+	view   *shapeView
 	values []any
 }
 
@@ -128,7 +162,7 @@ func (array *shapeArray) Get(index int) goja.Value {
 	if index < 0 || index >= len(array.values) {
 		return goja.Undefined()
 	}
-	return wrapShapeValue(array.vm, array.owner, array.values[index])
+	return array.view.wrap(array.values[index])
 }
 func (*shapeArray) Set(int, goja.Value) bool { return false }
 func (*shapeArray) SetLen(int) bool          { return false }

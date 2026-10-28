@@ -1,6 +1,7 @@
 package aistudio
 
 import (
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -15,6 +16,8 @@ const (
 	ChannelPlayground Channel = "playground"
 	// ChannelBuild 表示官网 Build 应用代理的 Gemini API 调用
 	ChannelBuild Channel = "build"
+	// ChannelAssistant 表示官网 Build 写代码助手，只服务 -build 模型
+	ChannelAssistant Channel = "assistant"
 )
 
 // ChannelCooldownScope 返回通道在作用域上的冷却键，Build 使用 build:<作用域>
@@ -40,6 +43,14 @@ func (p *AccountPool) SetUpstreamChannels(channels []Channel) {
 	p.notifyLocked()
 }
 
+// SetModelChannels 设置模型限定使用的上游通道，键为模型 ID
+func (p *AccountPool) SetModelChannels(channels map[string]Channel) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.modelChannels = maps.Clone(channels)
+	p.notifyLocked()
+}
+
 // SetBuildCatalog 保存账户 Build 代理返回的 Gemini API 模型目录
 func (p *AccountPool) SetBuildCatalog(accountID string, models []Model) error {
 	p.mu.Lock()
@@ -60,6 +71,13 @@ func (p *AccountPool) BuildEnabled() bool {
 	return p.channelEnabledLocked(ChannelBuild)
 }
 
+// PlaygroundEnabled 返回 Playground 通道是否启用
+func (p *AccountPool) PlaygroundEnabled() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.channelEnabledLocked(ChannelPlayground)
+}
+
 // Channel 返回租约本次使用的上游通道
 func (l *AccountLease) Channel() Channel {
 	if l == nil || l.channel == "" {
@@ -74,6 +92,9 @@ func (l *AccountLease) CooldownScope(scope string) string {
 }
 
 func (p *AccountPool) channelEnabledLocked(channel Channel) bool {
+	if channel == ChannelAssistant {
+		channel = ChannelBuild
+	}
 	if len(p.channels) == 0 {
 		return channel == ChannelPlayground
 	}
@@ -103,10 +124,19 @@ func buildMethodSelection(selection AccountSelection) bool {
 		strings.TrimSpace(selection.Capability) == "" && !selection.PlaygroundOnly
 }
 
-// selectionChannelsLocked 返回选择可使用的通道顺序，优先通道排在首位；embedding 只使用 Build，实时方法依次尝试 Playground 与 Build，其余非生成请求只使用 Playground RPC
+// selectionChannelsLocked 返回选择可使用的通道顺序，优先通道排在首位，限定通道的模型只使用该通道；-build 模型只使用写代码助手，embedding 只使用 Build，实时方法依次尝试 Playground 与 Build，其余非生成请求只使用 Playground RPC
 func (p *AccountPool) selectionChannelsLocked(selection AccountSelection) []Channel {
+	limited, restricted := p.modelChannels[strings.TrimPrefix(strings.TrimSpace(selection.ModelID), "models/")]
+	if p.assistantModelLocked(selection.ModelID) {
+		if !p.channelEnabledLocked(ChannelBuild) ||
+			selection.Channel != "" && selection.Channel != ChannelBuild && selection.Channel != ChannelAssistant ||
+			restricted && limited != ChannelBuild && limited != ChannelAssistant {
+			return nil
+		}
+		return []Channel{ChannelAssistant}
+	}
 	if selection.Channel != "" {
-		if !p.channelEnabledLocked(selection.Channel) || selection.Channel == ChannelBuild &&
+		if !p.channelEnabledLocked(selection.Channel) || restricted && limited != selection.Channel || selection.Channel == ChannelBuild &&
 			!generationChannelSelection(selection) && !buildMethodSelection(selection) {
 			return nil
 		}
@@ -122,6 +152,12 @@ func (p *AccountPool) selectionChannelsLocked(selection AccountSelection) []Chan
 		return []Channel{ChannelPlayground}
 	}
 	channels := p.enabledChannelsLocked()
+	if restricted {
+		if slices.Contains(channels, limited) {
+			return []Channel{limited}
+		}
+		return nil
+	}
 	if selection.PreferredChannel == "" || !slices.Contains(channels, selection.PreferredChannel) {
 		return channels
 	}
@@ -161,7 +197,9 @@ func (p *AccountPool) channelSupportsLocked(account *Account, channel Channel, s
 			return p.channelEnabledLocked(ChannelBuild) && p.buildSupportsMethodLocked(account, selection.ModelID, selection.Method)
 		}
 		return generationChannelSelection(selection) && p.channelEnabledLocked(ChannelBuild) &&
-			p.buildSupportsModelLocked(account, selection.ModelID)
+			p.buildSupportsModelLocked(account, selection.ModelID, selection.anyTier)
+	case ChannelAssistant:
+		return accountSupportsSelection(account, selection)
 	default:
 		return false
 	}
@@ -177,23 +215,23 @@ func (p *AccountPool) accountSupportsAnyChannelLocked(account *Account, selectio
 	return false
 }
 
-// accountChannelCooldownLocked 返回账户全部支持通道都冷却时的最早恢复时间
-func (p *AccountPool) accountChannelCooldownLocked(account *Account, selection AccountSelection, now time.Time) (time.Time, bool) {
+// accountChannelCooldownLocked 返回账户全部支持通道都冷却时最早恢复的冷却
+func (p *AccountPool) accountChannelCooldownLocked(account *Account, selection AccountSelection, now time.Time) (CooldownState, bool) {
 	scope := selectionAccessScope(selection)
-	var earliest time.Time
+	var earliest CooldownState
 	for _, channel := range p.selectionChannelsLocked(selection) {
 		if !p.channelSupportsLocked(account, channel, selection) {
 			continue
 		}
 		cooldown, active := accountCooldown(account, ChannelCooldownScope(channel, scope), now)
 		if !active {
-			return time.Time{}, false
+			return CooldownState{}, false
 		}
-		if earliest.IsZero() || cooldown.Until.Before(earliest) {
-			earliest = cooldown.Until
+		if earliest.Until.IsZero() || cooldown.Until.Before(earliest.Until) {
+			earliest = cooldown
 		}
 	}
-	return earliest, !earliest.IsZero()
+	return earliest, !earliest.Until.IsZero()
 }
 
 // channelCandidatesLocked 按账户 ID 与通道顺序展开候选，轮询策略从上次选中组合之后开始
@@ -229,8 +267,33 @@ func (p *AccountPool) channelCandidatesLocked(indices []int, selection AccountSe
 	return append(candidates[start:], candidates[:start]...)
 }
 
-// buildSupportsModelLocked 判断账户 Build 目录可经生成请求调用模型
-func (p *AccountPool) buildSupportsModelLocked(account *Account, modelID string) bool {
+// AssistantModel 判断模型是否为经 Build 写代码助手生成的 -build 模型
+func (p *AccountPool) AssistantModel(modelID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.assistantModelLocked(modelID)
+}
+
+func (p *AccountPool) assistantModelLocked(modelID string) bool {
+	modelID = strings.TrimPrefix(strings.TrimSpace(modelID), "models/")
+	if modelID == "" {
+		return false
+	}
+	for _, account := range p.accounts {
+		if account == nil {
+			continue
+		}
+		for _, model := range account.Models {
+			if model.ID == modelID {
+				return model.Capabilities["assistant_route"]
+			}
+		}
+	}
+	return false
+}
+
+// buildSupportsModelLocked 判断账户 Build 目录可经生成请求调用模型，anyTier 为 true 时不检查账户权益
+func (p *AccountPool) buildSupportsModelLocked(account *Account, modelID string, anyTier bool) bool {
 	modelID = strings.TrimPrefix(strings.TrimSpace(modelID), "models/")
 	found := false
 	for _, model := range account.buildModels {
@@ -248,7 +311,7 @@ func (p *AccountPool) buildSupportsModelLocked(account *Account, modelID string)
 		}
 		for _, model := range candidate.Models {
 			if modelMatchesID(model, modelID) {
-				return !buildExcludedPlaygroundModel(model) && modelAllowedByTier(model, account.BenefitTier)
+				return !buildExcludedPlaygroundModel(model) && (anyTier || modelAllowedByTier(model, account.BenefitTier))
 			}
 		}
 	}
@@ -313,7 +376,7 @@ func (p *AccountPool) buildOnlyModelsLocked() []Model {
 			listed := cloneAccountModels([]Model{model})[0]
 			if !hasMethod(model, "generateContent") {
 				listed.Methods = buildPublicMethods(model)
-			} else if !p.buildSupportsModelLocked(account, model.ID) {
+			} else if !p.buildSupportsModelLocked(account, model.ID, false) {
 				continue
 			}
 			if len(listed.Methods) == 0 {
@@ -350,6 +413,32 @@ func (p *AccountPool) BidiMethod(modelID string) string {
 	return "bidiGenerateContent"
 }
 
+// OutputContinuationRounds 返回请求按官网自动续写需要的轮数，未指定输出上限时按目录默认上限计算，不需要续写时为 1；多轮请求只能经 Playground 生成
+func (p *AccountPool) OutputContinuationRounds(modelID string, maxOutputTokens *int64) int {
+	if maxOutputTokens != nil && *maxOutputTokens <= continuationRoundTokens {
+		return 1
+	}
+	modelID = strings.TrimPrefix(strings.TrimSpace(modelID), "models/")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, account := range p.accounts {
+		if account == nil {
+			continue
+		}
+		for _, model := range account.Models {
+			if modelMatchesID(model, modelID) && model.Capabilities["output_continuation"] {
+				requested := model.OutputTokenLimit
+				if maxOutputTokens != nil {
+					requested = *maxOutputTokens
+				}
+				total := min(requested, max(model.InputTokenLimit, continuationRoundTokens))
+				return max(1, int((total+continuationRoundTokens-1)/continuationRoundTokens))
+			}
+		}
+	}
+	return 1
+}
+
 func (p *AccountPool) hasBuildModelLocked(modelID string, method string) bool {
 	if !p.channelEnabledLocked(ChannelBuild) {
 		return false
@@ -362,7 +451,7 @@ func (p *AccountPool) hasBuildModelLocked(modelID string, method string) bool {
 			if model.ID != modelID || method != "" && !hasMethod(model, method) {
 				continue
 			}
-			if hasMethod(model, "generateContent") && p.buildSupportsModelLocked(account, modelID) {
+			if hasMethod(model, "generateContent") && p.buildSupportsModelLocked(account, modelID, false) {
 				return true
 			}
 			for _, served := range buildMethods {
@@ -375,9 +464,9 @@ func (p *AccountPool) hasBuildModelLocked(modelID string, method string) bool {
 	return false
 }
 
-// modelChannelsLocked 返回至少一个启用账户可以调用模型的通道
-func (p *AccountPool) modelChannelsLocked(model Model) []string {
-	selection := AccountSelection{ModelID: model.ID}
+// modelChannelsLocked 返回至少一个启用账户可以调用模型的通道，anyTier 为 true 时不检查账户权益
+func (p *AccountPool) modelChannelsLocked(model Model, anyTier bool) []string {
+	selection := AccountSelection{ModelID: model.ID, anyTier: anyTier}
 	if hasMethod(model, "generateContent") {
 		selection.Method = "generateContent"
 	} else if index := slices.IndexFunc(buildMethods, func(method string) bool { return hasMethod(model, method) }); index >= 0 {

@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"strconv"
+	"strings"
 	"testing"
 
-	"github.com/Mag1cFall/AIStudio2API/internal/waa/goja"
+	"github.com/Mag1cFall/goja"
 )
 
 func TestHeadlessMemoryPreferences(t *testing.T) {
@@ -37,17 +39,27 @@ func TestHeadlessMemoryPreferences(t *testing.T) {
 
 func TestDecodeProtectedData(t *testing.T) {
 	chunks := []string{"", "YQ==", "YmM=", "ZGVm"}
-	data, err := decodeProtectedData(chunks)
-	if err != nil || string(data) != "abcdef" {
-		t.Fatalf("decoded = %q, %v", data, err)
+	var output []byte
+	for _, chunk := range chunks {
+		data, err := decodeProtectedData(chunk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output = append(output, data...)
 	}
-	for _, invalid := range [][]string{{"YQ==", "!"}, {"!"}, {"YQ"}, {"YQ="}} {
+	if string(output) != "abcdef" {
+		t.Fatalf("decoded = %q", output)
+	}
+	for _, invalid := range []string{"YQ==!", "!", "YQ", "YQ=", base64.StdEncoding.EncodeToString(make([]byte, protectedChunkBytes+1))} {
 		if data, err := decodeProtectedData(invalid); err == nil || data != nil {
 			t.Fatalf("invalid base64 %q must not return partial data", invalid)
 		}
 	}
-	if data, err := decodeProtectedData(nil); err != nil || data != nil {
+	if data, err := decodeProtectedData(""); err != nil || data != nil {
 		t.Fatal("empty chunks must not allocate a buffer")
+	}
+	if data, err := decodeProtectedData(base64.StdEncoding.EncodeToString(make([]byte, protectedChunkBytes))); err != nil || len(data) != protectedChunkBytes {
+		t.Fatal("64 KiB boundary must be accepted")
 	}
 }
 
@@ -68,9 +80,9 @@ func TestProtectedBodyReleasesBuffer(t *testing.T) {
 	}
 }
 
-// mockProtectedFetch executes the actual browser script with a deterministic stream.
-// No browser, credentials, network or wall-clock timers are needed.
-func mockProtectedFetch(t *testing.T) *goja.Runtime {
+// mockProtectedXHR executes the production scripts with explicit XHR progress.
+// The encoder implements the standard encodeInto contract, including byte limits.
+func mockProtectedXHR(t *testing.T) *goja.Runtime {
 	t.Helper()
 	vm := goja.New()
 	if err := vm.Set("btoa", func(value string) string {
@@ -83,24 +95,50 @@ func mockProtectedFetch(t *testing.T) *goja.Runtime {
 		t.Fatal(err)
 	}
 	runProtectedJS(t, vm, `
-var window = globalThis;
-var timers = [], reads = 0, released = false;
-var AbortController = class {
-  constructor() { this.signal = {aborted: false}; }
-  abort() { this.signal.aborted = true; }
+var page = {}, xhr, request, messages = [], sendError = false;
+var TextEncoder = class {
+  encodeInto(text, target) {
+    let read = 0, written = 0;
+    for (const character of text) {
+      let code = character.codePointAt(0);
+      if (code >= 0xd800 && code <= 0xdfff) code = 0xfffd;
+      const bytes = code < 0x80 ? [code] : code < 0x800 ? [0xc0 | code >> 6, 0x80 | code & 63] :
+        code < 0x10000 ? [0xe0 | code >> 12, 0x80 | code >> 6 & 63, 0x80 | code & 63] :
+        [0xf0 | code >> 18, 0x80 | code >> 12 & 63, 0x80 | code >> 6 & 63, 0x80 | code & 63];
+      if (written + bytes.length > target.length) break;
+      target.set(bytes, written);
+      read += character.length;
+      written += bytes.length;
+    }
+    return {read, written};
+  }
 };
-var DOMException = Error;
-var setTimeout = callback => timers.push(callback);
-var input = new Uint8Array(9 * 65536 + 17);
-for (let i = 0; i < input.length; i++) input[i] = i % 256;
-var fetch = async () => ({status: 200, headers: new Map(), body: {
-  getReader: () => ({
-    read: async () => reads++ === 0 ? {value: input, done: false} : {done: true},
-    releaseLock: () => { released = true; }
-  })
-}});
+var XMLHttpRequest = class {
+  constructor() { xhr = this; this.readyState = 0; this.responseText = ''; this.status = 200; this.headers = []; }
+  open(method, url) { this.method = method; this.url = url; this.readyState = 1; }
+  setRequestHeader(name, value) { this.headers.push([name, value]); }
+  getAllResponseHeaders() { return 'Content-Type: application/json+protobuf\r\nX-Test: yes\r\n'; }
+  send(body) {
+    if (sendError) throw new Error('send failed');
+    this.body = body;
+    this.readyState = 2;
+  }
+  abort() {
+    this.aborted = true;
+    if (this.readyState > 0 && this.readyState < 4) this.onabort?.();
+    this.readyState = 0;
+    this.responseText = '';
+  }
+};
+var advance = (text, done) => {
+  xhr.responseText += text;
+  xhr.readyState = done ? 4 : 3;
+  xhr.onprogress?.();
+  if (done) xhr.onload?.();
+};
 `)
-	runProtectedJS(t, vm, "("+protectedFetch+")('test', 'https://example.test', '{}', '')")
+	runProtectedJS(t, vm, "("+protectedSend+")(page, 'test', 'https://example.test', '[[\"Content-Type\",\"application/json\"]]', 'body', value => messages.push(value))")
+	runProtectedJS(t, vm, `request = page.requests.get('test')`)
 	return vm
 }
 
@@ -113,56 +151,115 @@ func runProtectedJS(t *testing.T, vm *goja.Runtime, source string) goja.Value {
 	return value
 }
 
-func TestProtectedFetchBoundsLargeChunks(t *testing.T) {
-	vm := mockProtectedFetch(t)
-	if n := runProtectedJS(t, vm, `window.__aistudioProtectedRequests.get('test').chunks.length`).ToInteger(); n != 8 {
-		t.Fatalf("backpressure queue = %d, want 8", n)
-	}
-	if reads := vm.Get("reads").ToInteger(); reads != 1 {
-		t.Fatalf("read ahead despite backpressure: %d", reads)
-	}
-	var output []byte
-	for range 10 {
-		raw := runProtectedJS(t, vm, `JSON.stringify(window.__aistudioProtectedRequests.get('test').chunks.splice(0))`).String()
-		var chunks []string
-		if err := json.Unmarshal([]byte(raw), &chunks); err != nil {
-			t.Fatal(err)
-		}
-		if len(chunks) > 8 {
-			t.Fatal("too many queued chunks")
-		}
-		for _, chunk := range chunks {
-			data, err := base64.StdEncoding.DecodeString(chunk)
-			if err != nil || len(data) > 65536 {
-				t.Fatalf("unbounded or invalid chunk: %d, %v", len(data), err)
+func TestProtectedXHRBoundsLargeChunks(t *testing.T) {
+	for name, input := range map[string]string{
+		"ascii": strings.Repeat("a", 9*protectedChunkBytes+17),
+		"utf8":  strings.Repeat("a\u4e2d\U00020000", 9*protectedChunkBytes/8+17),
+	} {
+		t.Run(name, func(t *testing.T) {
+			vm := mockProtectedXHR(t)
+			if err := vm.Set("input", input); err != nil {
+				t.Fatal(err)
 			}
-			output = append(output, data...)
-		}
-		if runProtectedJS(t, vm, `window.__aistudioProtectedRequests.get('test').done`).ToBoolean() {
-			break
-		}
-		runProtectedJS(t, vm, `timers.splice(0).forEach(callback => callback())`)
-	}
-	want := make([]byte, 9*65536+17)
-	for i := range want {
-		want[i] = byte(i)
-	}
-	if !bytes.Equal(output, want) || !vm.Get("released").ToBoolean() {
-		t.Fatalf("stream truncated/corrupted or reader retained: %d bytes", len(output))
+			runProtectedJS(t, vm, `advance(input, true)`)
+			if n := runProtectedJS(t, vm, `messages.filter(value => !value.startsWith('{')).length`).ToInteger(); n != 8 {
+				t.Fatalf("backpressure queue = %d, want 8", n)
+			}
+			if !runProtectedJS(t, vm, `request.credit === 0 && xhr.withCredentials && xhr.method === 'POST' && xhr.body === 'body'`).ToBoolean() {
+				t.Fatal("request lost XHR semantics or flow control")
+			}
+			var output []byte
+			done := false
+			for range 10 {
+				raw := runProtectedJS(t, vm, `JSON.stringify(messages.splice(0))`).String()
+				var messages []string
+				if err := json.Unmarshal([]byte(raw), &messages); err != nil {
+					t.Fatal(err)
+				}
+				chunks := 0
+				for _, message := range messages {
+					if strings.HasPrefix(message, "{") {
+						var control protectedMessage
+						if err := json.Unmarshal([]byte(message), &control); err != nil || control.Error != "" {
+							t.Fatalf("control = %s, error = %v", message, err)
+						}
+						done = done || control.Done
+						continue
+					}
+					chunks++
+					data, err := base64.StdEncoding.DecodeString(message)
+					if err != nil || len(data) > protectedChunkBytes {
+						t.Fatalf("unbounded or invalid chunk: %d, %v", len(data), err)
+					}
+					output = append(output, data...)
+				}
+				if chunks > 8 {
+					t.Fatal("too many queued chunks")
+				}
+				if done {
+					break
+				}
+				runProtectedJS(t, vm, "("+protectedGrant+")(page, 'test', '"+strconv.Itoa(chunks)+"')")
+			}
+			if !done || !bytes.Equal(output, []byte(input)) {
+				t.Fatalf("stream truncated or corrupted: %d of %d bytes", len(output), len(input))
+			}
+			if !runProtectedJS(t, vm, `page.requests.size === 0 && request.xhr === null && xhr.responseText === '' && xhr.onprogress === null`).ToBoolean() {
+				t.Fatal("completed stream retained XHR data or callbacks")
+			}
+		})
 	}
 }
 
-func TestProtectedFetchAbortWhileBackpressured(t *testing.T) {
-	vm := mockProtectedFetch(t)
-	runProtectedJS(t, vm, `
-var state = window.__aistudioProtectedRequests.get('test');
-state.controller.abort();
-state.chunks.length = 0;
-window.__aistudioProtectedRequests.delete('test');
-timers.splice(0).forEach(callback => callback());
-`)
-	if !runProtectedJS(t, vm, `state.done && state.error !== "" && state.chunks.length === 0 && released`).ToBoolean() {
-		t.Fatal("aborted stream retained data or kept producing")
+func TestProtectedXHRAbortWhileBackpressured(t *testing.T) {
+	for _, loaded := range []bool{false, true} {
+		t.Run(strconv.FormatBool(loaded), func(t *testing.T) {
+			vm := mockProtectedXHR(t)
+			runProtectedJS(t, vm, `advance('x'.repeat(9 * 65536), `+strconv.FormatBool(loaded)+`)`)
+			runProtectedJS(t, vm, `messages.length = 0`)
+			runProtectedJS(t, vm, "("+protectedCancel+")(page, 'test')")
+			if !runProtectedJS(t, vm, `page.requests.size === 0 && request.xhr === null && request.resume === null && xhr.responseText === '' && messages.length === 1 && JSON.parse(messages[0]).error.includes('AbortError')`).ToBoolean() {
+				t.Fatal("aborted XHR retained data or kept producing")
+			}
+			runProtectedJS(t, vm, "("+protectedGrant+")(page, 'test', '8')")
+			if runProtectedJS(t, vm, `messages.length`).ToInteger() != 1 {
+				t.Fatal("grant revived an aborted XHR")
+			}
+		})
+	}
+}
+
+func TestProtectedXHRNetworkErrorWhileBackpressured(t *testing.T) {
+	vm := mockProtectedXHR(t)
+	runProtectedJS(t, vm, `advance('x'.repeat(9 * 65536), false)`)
+	if runProtectedJS(t, vm, `request.credit`).ToInteger() != 0 {
+		t.Fatal("test requires an XHR suspended on credit")
+	}
+	runProtectedJS(t, vm, `messages.length = 0; xhr.onerror()`)
+	if !runProtectedJS(t, vm, `page.requests.size === 0 && xhr.responseText === '' && messages.length === 1 && JSON.parse(messages[0]).error.includes('NetworkError')`).ToBoolean() {
+		t.Fatal("network failure left a suspended XHR")
+	}
+}
+
+func TestProtectedXHRPreservesSplitSurrogate(t *testing.T) {
+	vm := mockProtectedXHR(t)
+	runProtectedJS(t, vm, `advance('a\ud840', false)`)
+	runProtectedJS(t, vm, `advance('\udc00b', true)`)
+	raw := runProtectedJS(t, vm, `JSON.stringify(messages.filter(value => !value.startsWith('{')))`).String()
+	var chunks []string
+	if err := json.Unmarshal([]byte(raw), &chunks); err != nil {
+		t.Fatal(err)
+	}
+	var output []byte
+	for _, chunk := range chunks {
+		data, err := decodeProtectedData(chunk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output = append(output, data...)
+	}
+	if string(output) != "a\U00020000b" {
+		t.Fatalf("split surrogate was corrupted: %q", output)
 	}
 }
 
@@ -184,12 +281,14 @@ func BenchmarkDecodeProtectedData(b *testing.B) {
 			}
 		}
 	})
-	b.Run("preallocated", func(b *testing.B) {
+	b.Run("streamed-blocks", func(b *testing.B) {
 		b.SetBytes(8 * 65536)
 		b.ReportAllocs()
 		for b.Loop() {
-			if _, err := decodeProtectedData(chunks); err != nil {
-				b.Fatal(err)
+			for _, chunk := range chunks {
+				if _, err := decodeProtectedData(chunk); err != nil {
+					b.Fatal(err)
+				}
 			}
 		}
 	})

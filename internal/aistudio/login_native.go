@@ -20,6 +20,7 @@ type NativeLoginDriver struct {
 }
 
 var _ IsolatedLoginDriver = (*NativeLoginDriver)(nil)
+var _ CookieLoginDriver = (*NativeLoginDriver)(nil)
 
 // NewNativeLoginDriver 创建纯 Go Camoufox 登录驱动
 func NewNativeLoginDriver(camoufoxPath string, timeout time.Duration) (*NativeLoginDriver, error) {
@@ -44,7 +45,7 @@ func NewNativeLoginDriver(camoufoxPath string, timeout time.Duration) (*NativeLo
 	return &NativeLoginDriver{camoufox: absolute, timeout: timeout}, nil
 }
 
-// Login 启动可见隔离 Camoufox 并导出认证状态
+// Login 启动隔离 Camoufox 供用户登录并导出认证状态
 func (driver *NativeLoginDriver) Login(ctx context.Context, request IsolatedLoginRequest) (IsolatedLoginResult, error) {
 	if driver == nil {
 		return IsolatedLoginResult{}, errors.New("纯 Go Camoufox 登录驱动未初始化")
@@ -64,6 +65,7 @@ func (driver *NativeLoginDriver) ImportCookies(ctx context.Context, request Isol
 	if err := state.Validate(); err != nil {
 		return IsolatedLoginResult{}, err
 	}
+	state = StorageState{Cookies: state.Cookies}
 	encoded, err := json.Marshal(state)
 	if err != nil {
 		return IsolatedLoginResult{}, fmt.Errorf("编码 Cookie 导入状态: %w", err)
@@ -89,30 +91,8 @@ func decodeNativeLoginResult(result camoufoxnative.LoginResult, source string) (
 		return IsolatedLoginResult{}, err
 	}
 	return IsolatedLoginResult{
-		StorageState: state, Email: result.Email, VerifiedAt: result.VerifiedAt, DriveError: result.DriveError,
-	}, nil
-}
-
-// Verify 使用无头隔离 Camoufox 验证已有认证状态
-func (driver *NativeLoginDriver) Verify(ctx context.Context, request IsolatedLoginRequest, state StorageState) (LoginVerification, error) {
-	if driver == nil {
-		return LoginVerification{}, errors.New("纯 Go Camoufox 登录驱动未初始化")
-	}
-	if err := state.Validate(); err != nil {
-		return LoginVerification{}, err
-	}
-	encoded, err := json.Marshal(state)
-	if err != nil {
-		return LoginVerification{}, fmt.Errorf("编码隔离验证状态: %w", err)
-	}
-	verification, err := camoufoxnative.Verify(ctx, driver.options(request), encoded)
-	if err != nil {
-		return LoginVerification{}, err
-	}
-	return LoginVerification{
-		Authenticated: verification.Authenticated,
-		VerifiedAt:    verification.VerifiedAt,
-		Reason:        verification.Reason,
+		StorageState: state, Email: result.Email, VerifiedAt: result.VerifiedAt,
+		DriveError: result.DriveError, CloseError: result.CloseError,
 	}, nil
 }
 
@@ -124,5 +104,6 @@ func (driver *NativeLoginDriver) options(request IsolatedLoginRequest) camoufoxn
 		Timezone:       request.Timezone,
 		Proxy:          request.Proxy,
 		Timeout:        driver.timeout,
+		View:           request.View,
 	}
 }

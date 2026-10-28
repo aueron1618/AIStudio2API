@@ -20,19 +20,27 @@ func ImportCookies(ctx context.Context, options LoginOptions, storageStateJSON [
 	if json.Unmarshal(storageStateJSON, &state) != nil || len(state.Cookies) == 0 {
 		return LoginResult{}, errors.New("Cookie 导入状态无效")
 	}
+	state.Origins = nil
+	options.headless, options.View = true, nil
 	importCtx, cancel := context.WithTimeout(ctx, options.Timeout)
 	defer cancel()
-	session, err := startLoginSession(importCtx, options, true, state)
+	session, err := startLoginSession(importCtx, options, state)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	defer func() { err = errors.Join(err, session.Close()) }()
-	pageURL, authenticated, _, err := session.waitVerification(importCtx)
+	defer func() { err = result.recordClose(err, session.Close()) }()
+	if err := session.client.waitFor(importCtx, session.contextID, workerPageReadyExpression, options.Timeout); err != nil {
+		return LoginResult{}, fmt.Errorf("等待 Cookie 登录验证: %w", err)
+	}
+	pageURL, err := session.client.evaluateString(importCtx, session.contextID, "location.href")
 	if err != nil {
 		return LoginResult{}, err
 	}
-	if !authenticated {
+	if isGoogleLoginURL(pageURL) {
 		return LoginResult{}, ErrAuthenticationRequired
+	}
+	if !strings.HasPrefix(pageURL, aiStudioOrigin+"/") {
+		return LoginResult{}, errors.New("Cookie 验证未进入 AI Studio")
 	}
 	email, err := session.client.evaluateString(importCtx, session.contextID, loginEmailExpression)
 	if err != nil {

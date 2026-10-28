@@ -45,7 +45,7 @@ function toggle(value: string, checked: boolean): void {
       {{ label }}
       <span
         v-if="selected.length > 0"
-        class="rounded bg-blue-600/30 px-1 text-[10px] text-blue-100 tabular-nums"
+        class="rounded bg-blue-600/30 px-1 text-xs text-blue-100 tabular-nums"
         >{{ selected.length }}</span
       >
       <UiIcon name="chevronDown" :size="12" class="text-gray-500" />
@@ -55,7 +55,7 @@ function toggle(value: string, checked: boolean): void {
         align="start"
         :side-offset="6"
         :collision-padding="12"
-        class="ui-popover z-[60] flex max-h-[var(--reka-popover-content-available-height)] w-72 max-w-[var(--reka-popover-content-available-width)] flex-col overflow-y-auto rounded-lg border border-line bg-panel p-2 shadow-xl shadow-black/40"
+        class="ui-popover z-[60] flex max-h-[var(--reka-popover-content-available-height)] w-80 max-w-[var(--reka-popover-content-available-width)] flex-col overflow-y-auto rounded-lg border border-line bg-panel p-2 shadow-xl shadow-black/40"
       >
         <label class="relative mb-2 block shrink-0">
           <span class="sr-only">{{ t('usage.filterSearch') }}</span>
@@ -88,7 +88,9 @@ function toggle(value: string, checked: boolean): void {
               :checked="selected.includes(value)"
               @change="toggle(value, ($event.target as HTMLInputElement).checked)"
             />
-            <span class="min-w-0 flex-1 truncate">{{ format(value) }}</span>
+            <span v-tooltip.overflow="format(value)" class="min-w-0 flex-1 truncate">{{
+              format(value)
+            }}</span>
           </label>
         </fieldset>
         <div v-if="selected.length > 0" class="mt-2 shrink-0 border-t border-line pt-2">

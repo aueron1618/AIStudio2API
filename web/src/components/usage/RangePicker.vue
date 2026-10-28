@@ -74,9 +74,11 @@ function applyCustom(): void {
     >
       <UiIcon name="calendar" :size="14" class="text-gray-400" />
       <span class="font-medium whitespace-nowrap">{{ t(`usage.range.${range}`) }}</span>
-      <span class="hidden truncate text-xs text-gray-500 tabular-nums sm:inline">{{
-        summary
-      }}</span>
+      <span
+        v-tooltip.overflow="summary"
+        class="hidden truncate text-xs text-gray-500 tabular-nums sm:inline"
+        >{{ summary }}</span
+      >
       <UiIcon name="chevronDown" :size="12" class="text-gray-500" />
     </PopoverTrigger>
     <PopoverPortal>
@@ -95,7 +97,7 @@ function applyCustom(): void {
               ]"
               :key="group.label"
             >
-              <h4 class="mb-1.5 text-[11px] font-medium tracking-wide text-gray-500 uppercase">
+              <h4 class="mb-1.5 text-xs font-medium tracking-wide text-gray-500 uppercase">
                 {{ t(group.label) }}
               </h4>
               <div class="grid grid-cols-2 gap-1">
@@ -121,7 +123,7 @@ function applyCustom(): void {
             class="min-w-0 space-y-2 border-line sm:border-l sm:pl-4"
             @submit.prevent="applyCustom"
           >
-            <h4 class="mb-1.5 text-[11px] font-medium tracking-wide text-gray-500 uppercase">
+            <h4 class="mb-1.5 text-xs font-medium tracking-wide text-gray-500 uppercase">
               {{ t('usage.rangeCustom') }}
             </h4>
             <label class="block text-xs text-gray-400">
@@ -130,7 +132,7 @@ function applyCustom(): void {
                 v-model="customFrom"
                 type="datetime-local"
                 :max="localInput(now)"
-                class="mt-1 w-full min-w-0 rounded-md border border-line bg-canvas px-2 py-1.5 text-sm text-white [color-scheme:dark] focus:border-blue-500 focus:outline-none"
+                class="mt-1 w-full min-w-0 rounded-md border border-line bg-canvas px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none"
               />
             </label>
             <label class="block text-xs text-gray-400">
@@ -138,7 +140,7 @@ function applyCustom(): void {
               <input
                 v-model="customTo"
                 type="datetime-local"
-                class="mt-1 w-full min-w-0 rounded-md border border-line bg-canvas px-2 py-1.5 text-sm text-white [color-scheme:dark] focus:border-blue-500 focus:outline-none"
+                class="mt-1 w-full min-w-0 rounded-md border border-line bg-canvas px-2 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none"
               />
             </label>
             <p v-if="customError" class="text-xs text-red-400" role="alert">{{ customError }}</p>

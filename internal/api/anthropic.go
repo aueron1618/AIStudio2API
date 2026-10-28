@@ -26,10 +26,24 @@ type anthropicRequest struct {
 	Thinking      *struct {
 		Type         string `json:"type"`
 		BudgetTokens *int64 `json:"budget_tokens"`
+		Display      string `json:"display"`
 	} `json:"thinking"`
 	OutputConfig *struct {
-		Effort string `json:"effort"`
+		Effort string                 `json:"effort"`
+		Format *anthropicOutputFormat `json:"format"`
 	} `json:"output_config"`
+	OutputFormat *anthropicOutputFormat `json:"output_format"`
+}
+
+// anthropicOutputFormat 为 output_config.format 与 beta output_format 的结构化输出格式
+type anthropicOutputFormat struct {
+	Type   string          `json:"type"`
+	Schema json.RawMessage `json:"schema"`
+}
+
+// thinkingOmitted 判断请求是否要求思考块不带正文
+func (request anthropicRequest) thinkingOmitted() bool {
+	return request.Thinking != nil && request.Thinking.Display == "omitted"
 }
 
 type anthropicMessage struct {
@@ -69,7 +83,7 @@ type anthropicContentBlock struct {
 	Text      string          `json:"text,omitempty"`
 	Thinking  *string         `json:"thinking,omitempty"`
 	Data      string          `json:"data,omitempty"`
-	Signature string          `json:"signature,omitempty"`
+	Signature *string         `json:"signature,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
@@ -94,11 +108,19 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	generateRequest, err := request.toGenerateRequest(messageID)
+	if err == nil {
+		err = inlineRemoteMedia(r.Context(), generateRequest.Contents)
+	}
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	generateRequest.Unary = !request.Stream
+	generateRequest.Unary = !request.Stream || s.responseModes().FakeStream
+	if !request.Stream {
+		var stopKeepalive func()
+		w, stopKeepalive = s.nonstreamKeepalive(w, r)
+		defer stopKeepalive()
+	}
 	events, err := s.service.Generate(r.Context(), generateRequest)
 	if err == nil && request.Stream {
 		events, err = awaitStreamStart(r.Context(), events)
@@ -116,7 +138,8 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writer := &anthropicStreamWriter{
 			w: w, id: messageID, model: request.Model,
 			inputTokens: aistudio.EstimatedInputTokens(generateRequest),
-			searchKey:   s.config.APIKey,
+			searchKey:   s.config.APIKey, omitted: request.thinkingOmitted(),
+			media: s.mediaOutputFor(r),
 		}
 		if err := writer.start(); err != nil {
 			return
@@ -131,7 +154,12 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, buildAnthropicResponse(messageID, request.Model, result, s.config.APIKey))
+	media := s.mediaOutputFor(r)
+	if err := media.saveEvents(result.events); err != nil {
+		writeAnthropicRequestError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, buildAnthropicResponse(messageID, request.Model, result, s.config.APIKey, request.thinkingOmitted(), media))
 }
 
 func (s *server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
@@ -150,6 +178,9 @@ func (s *server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	generateRequest, err := request.toGenerateRequest(newID("count"))
+	if err == nil {
+		err = inlineRemoteMedia(r.Context(), generateRequest.Contents)
+	}
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -185,6 +216,7 @@ func (request anthropicRequest) toGenerateRequest(id string) (aistudio.GenerateR
 		return aistudio.GenerateRequest{}, err
 	}
 	contents := make([]aistudio.Content, 0, len(request.Messages))
+	var reminders []aistudio.Part
 	for _, message := range request.Messages {
 		if message.Role == "system" {
 			text, err := anthropicSystemText(message.Content)
@@ -192,7 +224,7 @@ func (request anthropicRequest) toGenerateRequest(id string) (aistudio.GenerateR
 				return aistudio.GenerateRequest{}, fmt.Errorf("system message: %w", err)
 			}
 			if strings.TrimSpace(text) != "" {
-				contents = append(contents, aistudio.Content{Role: aistudio.RoleUser, Parts: []aistudio.Part{{Text: "<system-reminder>\n" + text + "\n</system-reminder>"}}})
+				reminders = addSystemReminder(contents, reminders, text)
 			}
 			continue
 		}
@@ -207,7 +239,10 @@ func (request anthropicRequest) toGenerateRequest(id string) (aistudio.GenerateR
 		if len(parts) == 0 {
 			continue
 		}
-		contents = append(contents, aistudio.Content{Role: role, Parts: parts})
+		contents, reminders = appendWithReminders(contents, aistudio.Content{Role: role, Parts: parts}, reminders)
+	}
+	if len(reminders) > 0 {
+		contents = append(contents, aistudio.Content{Role: aistudio.RoleUser, Parts: reminders})
 	}
 	tools, err := mapAnthropicTools(request.Tools, request.ToolChoice)
 	if err != nil {
@@ -229,8 +264,18 @@ func (request anthropicRequest) toGenerateRequest(id string) (aistudio.GenerateR
 	if request.Thinking != nil && request.Thinking.Type == "disabled" {
 		config.ReasoningEffort = "none"
 	}
+	format := request.OutputFormat
 	if request.OutputConfig != nil {
 		config.ReasoningEffort = request.OutputConfig.Effort
+		if request.OutputConfig.Format != nil {
+			format = request.OutputConfig.Format
+		}
+	}
+	if format != nil {
+		if format.Type != "json_schema" {
+			return aistudio.GenerateRequest{}, fmt.Errorf("unsupported output format type %q", format.Type)
+		}
+		config.ResponseMIMEType, config.ResponseSchema = "application/json", format.Schema
 	}
 	return aistudio.GenerateRequest{
 		ID: id, Model: request.Model, System: system, Contents: contents, Config: config, Tools: tools,
@@ -360,17 +405,10 @@ func anthropicParts(raw json.RawMessage) ([]aistudio.Part, error) {
 				if media, ok := aistudio.ExternalMediaForURL(source.URL); ok {
 					parts = append(parts, aistudio.Part{ExternalMedia: media})
 				} else {
-					mime := source.MediaType
-					if mime == "" && block.Type == "image" {
-						mime = "image/*"
-					}
-					if mime == "" {
-						mime = "application/pdf"
-					}
 					if strings.TrimSpace(source.URL) == "" {
 						return nil, fmt.Errorf("%s source URL is required", block.Type)
 					}
-					parts = append(parts, aistudio.Part{ExternalMedia: &aistudio.ExternalMedia{MIME: mime, URL: source.URL}})
+					parts = append(parts, aistudio.Part{File: &aistudio.FileRef{ID: strings.TrimSpace(source.URL), MIME: source.MediaType}})
 				}
 			case "text":
 				if source.Data != "" {
@@ -398,25 +436,14 @@ func anthropicParts(raw json.RawMessage) ([]aistudio.Part, error) {
 			pendingSignature = ""
 		case "tool_result":
 			flushPendingSignature()
-			content := block.Content
-			if block.IsError {
-				if len(content) == 0 {
-					content = json.RawMessage("null")
-				}
-				if !json.Valid(content) {
-					return nil, fmt.Errorf("tool_result: function result must be JSON")
-				}
-				content = json.RawMessage(`{"error":` + strings.TrimSpace(string(content)) + `}`)
-			} else {
-				var err error
-				content, err = normalizeFunctionResultContent(content)
-				if err != nil {
-					return nil, fmt.Errorf("tool_result: %w", err)
-				}
+			content, media, err := functionResultParts(block.Content, block.IsError, anthropicParts)
+			if err != nil {
+				return nil, fmt.Errorf("tool_result: %w", err)
 			}
 			parts = append(parts, aistudio.Part{FunctionResult: &aistudio.FunctionResult{
 				ID: block.ToolUseID, Content: content,
 			}})
+			parts = append(parts, media...)
 		case "search_result":
 			flushPendingSignature()
 			var source string
@@ -629,7 +656,8 @@ func anthropicToolChoice(raw json.RawMessage) (aistudio.ToolConfig, error) {
 	return config, nil
 }
 
-func buildAnthropicResponse(id string, model string, result generationResult, searchKey string) map[string]any {
+// buildAnthropicResponse 构造非流式 Message，omitted 时思考块不带正文
+func buildAnthropicResponse(id string, model string, result generationResult, searchKey string, omitted bool, media mediaOutput) map[string]any {
 	stopReason, stopSequence := anthropicStop(result.finishReason, len(result.toolCalls) > 0, result.stopSequence)
 	searchBlocks, searchCount := anthropicSearchBlocks(result.events, searchKey)
 	if searchCount > 0 {
@@ -640,7 +668,7 @@ func buildAnthropicResponse(id string, model string, result generationResult, se
 		"type":          "message",
 		"role":          "assistant",
 		"model":         model,
-		"content":       append(anthropicBlocks(result), searchBlocks...),
+		"content":       append(anthropicBlocks(result, omitted, media), searchBlocks...),
 		"stop_reason":   stopReason,
 		"stop_sequence": stopSequence,
 	}
@@ -664,7 +692,8 @@ func buildAnthropicResponse(id string, model string, result generationResult, se
 	return response
 }
 
-func anthropicBlocks(result generationResult) []anthropicContentBlock {
+// anthropicBlocks 把生成事件合并为 Message 内容块，思考块总带 signature，omitted 时不带思考正文
+func anthropicBlocks(result generationResult, omitted bool, media mediaOutput) []anthropicContentBlock {
 	blocks := make([]anthropicContentBlock, 0)
 	for _, event := range result.events {
 		switch event.Kind {
@@ -675,14 +704,18 @@ func anthropicBlocks(result generationResult) []anthropicContentBlock {
 				blocks = append(blocks, anthropicContentBlock{Type: "text", Text: event.Text})
 			}
 		case aistudio.EventReasoning:
+			text := event.Text
+			if omitted {
+				text = ""
+			}
 			if len(blocks) > 0 && blocks[len(blocks)-1].Type == "thinking" {
-				*blocks[len(blocks)-1].Thinking += event.Text
+				*blocks[len(blocks)-1].Thinking += text
 				if event.ThoughtSignature != "" {
-					blocks[len(blocks)-1].Signature = event.ThoughtSignature
+					*blocks[len(blocks)-1].Signature = event.ThoughtSignature
 				}
 			} else {
-				thinking := event.Text
-				blocks = append(blocks, anthropicContentBlock{Type: "thinking", Thinking: &thinking, Signature: event.ThoughtSignature})
+				signature := event.ThoughtSignature
+				blocks = append(blocks, anthropicContentBlock{Type: "thinking", Thinking: &text, Signature: &signature})
 			}
 		case aistudio.EventThoughtSignature:
 			if event.ThoughtSignature == "" {
@@ -693,7 +726,7 @@ func anthropicBlocks(result generationResult) []anthropicContentBlock {
 			if event.ToolCall != nil {
 				if event.ToolCall.ThoughtSignature != "" {
 					if len(blocks) > 0 && blocks[len(blocks)-1].Type == "thinking" {
-						blocks[len(blocks)-1].Signature = event.ToolCall.ThoughtSignature
+						*blocks[len(blocks)-1].Signature = event.ToolCall.ThoughtSignature
 					} else {
 						blocks = append(blocks, anthropicContentBlock{
 							Type: "redacted_thinking", Data: event.ToolCall.ThoughtSignature,
@@ -706,7 +739,7 @@ func anthropicBlocks(result generationResult) []anthropicContentBlock {
 			}
 		case aistudio.EventMedia:
 			if event.Media != nil {
-				blocks = append(blocks, anthropicContentBlock{Type: "text", Text: renderMediaMarkdown(*event.Media)})
+				blocks = append(blocks, anthropicContentBlock{Type: "text", Text: media.markdown(*event.Media)})
 			}
 		case aistudio.EventExecutableCode, aistudio.EventCodeExecutionResult:
 			rendered := renderCodeExecution(event)
@@ -755,8 +788,10 @@ func anthropicStop(reason string, hasTools bool, stopSequence string) (string, *
 
 func anthropicUsage(usage *aistudio.Usage) map[string]any {
 	return map[string]any{
-		"input_tokens":  inputTokens(usage),
-		"output_tokens": outputTokens(usage),
+		"input_tokens":                inputTokens(usage) - usage.CachedTokens,
+		"cache_creation_input_tokens": 0,
+		"cache_read_input_tokens":     usage.CachedTokens,
+		"output_tokens":               outputTokens(usage),
 	}
 }
 
@@ -809,10 +844,14 @@ type anthropicStreamWriter struct {
 	currentBlock      string
 	thinkingSignature string
 	searchKey         string
+	omitted           bool
+	media             mediaOutput
 }
 
 func (s *server) streamAnthropic(r *http.Request, writer *anthropicStreamWriter, events <-chan aistudio.Event) {
-	result, err := consumeStreamEvents(r.Context(), events, writer.live, func() error { return writeSSEHeartbeat(writer.w) })
+	result, err := consumeStreamEvents(r.Context(), events, writer.live, func() error {
+		return writer.emit("ping", map[string]string{"type": "ping"})
+	})
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
 			_ = writer.error(err)
@@ -832,7 +871,9 @@ func (writer *anthropicStreamWriter) start() error {
 		"message": map[string]any{
 			"id": writer.id, "type": "message", "role": "assistant", "model": writer.model,
 			"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
-			"usage": map[string]int64{"input_tokens": writer.inputTokens, "output_tokens": 0},
+			"usage": map[string]int64{
+				"input_tokens": writer.inputTokens, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0,
+			},
 		},
 	})
 }
@@ -853,6 +894,9 @@ func (writer *anthropicStreamWriter) live(event aistudio.Event) error {
 		}
 		if event.ThoughtSignature != "" {
 			writer.thinkingSignature = event.ThoughtSignature
+		}
+		if writer.omitted {
+			return nil
 		}
 		return writer.emit("content_block_delta", map[string]any{
 			"type": "content_block_delta", "index": writer.blockIndex,
@@ -896,6 +940,9 @@ func (writer *anthropicStreamWriter) live(event aistudio.Event) error {
 		if event.Media == nil {
 			return nil
 		}
+		if err := writer.media.save(*event.Media); err != nil {
+			return err
+		}
 		if err := writer.closeBlock(); err != nil {
 			return err
 		}
@@ -904,7 +951,7 @@ func (writer *anthropicStreamWriter) live(event aistudio.Event) error {
 		}
 		return writer.emit("content_block_delta", map[string]any{
 			"type": "content_block_delta", "index": writer.blockIndex,
-			"delta": map[string]any{"type": "text_delta", "text": renderMediaMarkdown(*event.Media)},
+			"delta": map[string]any{"type": "text_delta", "text": writer.media.markdown(*event.Media)},
 		})
 	case aistudio.EventExecutableCode, aistudio.EventCodeExecutionResult:
 		rendered := renderCodeExecution(event)
@@ -932,6 +979,7 @@ func (writer *anthropicStreamWriter) ensureBlock(blockType string) error {
 	block := map[string]any{"type": blockType}
 	if blockType == "thinking" {
 		block["thinking"] = ""
+		block["signature"] = ""
 	} else {
 		block["text"] = ""
 	}
@@ -1022,8 +1070,7 @@ func (writer *anthropicStreamWriter) finish(result generationResult) error {
 	}
 	usage := map[string]any{"output_tokens": 0}
 	if result.usage != nil {
-		usage["input_tokens"] = inputTokens(result.usage)
-		usage["output_tokens"] = outputTokens(result.usage)
+		usage = anthropicUsage(result.usage)
 	}
 	if searchCount > 0 {
 		usage["server_tool_use"] = map[string]int{"web_search_requests": searchCount, "web_fetch_requests": 0}
@@ -1048,6 +1095,6 @@ func (writer *anthropicStreamWriter) finish(result generationResult) error {
 func (writer *anthropicStreamWriter) error(err error) error {
 	return writer.emit("error", map[string]any{
 		"type":  "error",
-		"error": map[string]string{"type": anthropicErrorType(err), "message": err.Error()},
+		"error": map[string]string{"type": anthropicErrorType(err), "message": publicErrorMessage(statusFromError(err), anthropicErrorMessage(err))},
 	})
 }

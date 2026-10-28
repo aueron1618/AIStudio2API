@@ -166,7 +166,7 @@ func writeBiDiTestMessage(t *testing.T, peer *websocket.Conn, message map[string
 	}
 }
 
-func TestBiDiCommandCancellationKeepsConnectionSerial(t *testing.T) {
+func TestBiDiCommandCancellationKeepsResponsesIsolated(t *testing.T) {
 	for _, test := range []struct {
 		name          string
 		timeout       bool
@@ -192,14 +192,22 @@ func TestBiDiCommandCancellationKeepsConnectionSerial(t *testing.T) {
 					cancel()
 				}
 				requireBiDiTestResult(t, firstDone, ctx.Err())
-				if len(client.commandLock) != 1 {
-					t.Fatal("cancellation released the lock before consuming the response")
+				client.mu.Lock()
+				pending := len(client.pending)
+				client.mu.Unlock()
+				if pending != 0 {
+					t.Fatal("cancellation retained its response channel")
 				}
 
 				waitingCtx, cancelWaiting := context.WithTimeout(t.Context(), time.Second)
 				defer cancelWaiting()
 				waitingDone := startBiDiTestCommand(client, waitingCtx, "test.canceled-waiter")
-				requireNoBiDiTestCommand(t, commands)
+				waiting := requireBiDiTestCommand(t, commands)
+				nextDone := startBiDiTestCommand(client, t.Context(), "test.next")
+				next := requireBiDiTestCommand(t, commands)
+				if waiting.ID != first.ID+1 || next.ID != waiting.ID+1 || next.Method != "test.next" {
+					t.Fatalf("commands were not independently dispatched: %+v, %+v", waiting, next)
+				}
 				if test.timeout {
 					<-waitingCtx.Done()
 				} else {
@@ -207,7 +215,6 @@ func TestBiDiCommandCancellationKeepsConnectionSerial(t *testing.T) {
 				}
 				requireBiDiTestResult(t, waitingDone, waitingCtx.Err())
 
-				nextDone := startBiDiTestCommand(client, t.Context(), "test.next")
 				requireNoBiDiTestCommand(t, commands)
 				writeBiDiTestMessage(t, peer, map[string]any{
 					"type": "event", "method": "network.responseCompleted",
@@ -220,8 +227,8 @@ func TestBiDiCommandCancellationKeepsConnectionSerial(t *testing.T) {
 					},
 				})
 				requireNoBiDiTestCommand(t, commands)
-				if client.accessTokenStatus != http.StatusOK {
-					t.Fatal("canceled exchange stopped observing network events")
+				if client.accessTokenStatus.Load() != http.StatusOK {
+					t.Fatal("canceled command stopped observing network events")
 				}
 				writeBiDiTestMessage(t, peer, map[string]any{
 					"type": "success", "id": first.ID + 100, "result": map[string]any{"value": "unrelated"},
@@ -233,18 +240,20 @@ func TestBiDiCommandCancellationKeepsConnectionSerial(t *testing.T) {
 					response = map[string]any{"type": "error", "id": first.ID, "error": "unknown error", "message": "late failure"}
 				}
 				writeBiDiTestMessage(t, peer, response)
-				next := requireBiDiTestCommand(t, commands)
-				if next.ID != first.ID+1 || next.Method != "test.next" {
-					t.Fatalf("canceled waiter was sent or command IDs changed: %+v", next)
-				}
+				writeBiDiTestMessage(t, peer, map[string]any{
+					"type": "success", "id": waiting.ID, "result": map[string]any{"value": "canceled"},
+				})
 				writeBiDiTestMessage(t, peer, map[string]any{
 					"type": "success", "id": next.ID, "result": map[string]any{"value": "next"},
 				})
 				if result := requireBiDiTestResult(t, nextDone, nil); result["value"] != "next" {
 					t.Fatalf("reused connection returned the wrong response: %v", result)
 				}
-				if len(client.commandLock) != 0 {
-					t.Fatal("completed exchange retained the command lock")
+				client.mu.Lock()
+				pending = len(client.pending)
+				client.mu.Unlock()
+				if pending != 0 {
+					t.Fatal("completed commands retained response channels")
 				}
 				requireNoBiDiTestCommand(t, commands)
 			})
@@ -260,8 +269,8 @@ func TestBiDiCommandAlreadyCanceledDoesNotSend(t *testing.T) {
 		if result, err := client.command(ctx, "test.canceled", nil); !errors.Is(err, context.Canceled) || result != nil {
 			t.Fatalf("already canceled command = %v, %v", result, err)
 		}
-		if len(client.commandLock) != 0 || client.nextID != 0 {
-			t.Fatal("already canceled command retained the lock or allocated an ID")
+		if len(client.pending) != 0 || client.nextID != 0 {
+			t.Fatal("already canceled command retained a response channel or allocated an ID")
 		}
 		requireNoBiDiTestCommand(t, commands)
 		done := startBiDiTestCommand(client, t.Context(), "test.next")
@@ -271,5 +280,71 @@ func TestBiDiCommandAlreadyCanceledDoesNotSend(t *testing.T) {
 		}
 		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": command.ID, "result": map[string]any{}})
 		requireBiDiTestResult(t, done, nil)
+	})
+}
+
+func TestBiDiCommandsReceiveOutOfOrderResponses(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, peer, commands := newBiDiTestClient(t)
+		firstDone := startBiDiTestCommand(client, t.Context(), "test.first")
+		first := requireBiDiTestCommand(t, commands)
+		secondDone := startBiDiTestCommand(client, t.Context(), "test.second")
+		second := requireBiDiTestCommand(t, commands)
+		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": second.ID, "result": map[string]any{"value": "second"}})
+		if result := requireBiDiTestResult(t, secondDone, nil); result["value"] != "second" {
+			t.Fatal("second command received the wrong response")
+		}
+		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": first.ID, "result": map[string]any{"value": "first"}})
+		if result := requireBiDiTestResult(t, firstDone, nil); result["value"] != "first" {
+			t.Fatal("first command received the wrong response")
+		}
+	})
+}
+
+type observedContext struct {
+	context.Context
+	checked chan struct{}
+	once    sync.Once
+}
+
+func (ctx *observedContext) Err() error {
+	err := ctx.Context.Err()
+	ctx.once.Do(func() { close(ctx.checked) })
+	return err
+}
+
+func TestBiDiCancelWhileWaitingToWrite(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, _, commands := newBiDiTestClient(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		observed := &observedContext{Context: ctx, checked: make(chan struct{})}
+		client.writeLock.Lock()
+		done := startBiDiTestCommand(client, observed, "test.waiting")
+		<-observed.checked
+		cancel()
+		response := <-done
+		client.writeLock.Unlock()
+		if !errors.Is(response.err, context.Canceled) {
+			t.Fatalf("waiting write error = %v", response.err)
+		}
+		requireNoBiDiTestCommand(t, commands)
+	})
+}
+
+func TestBiDiCommandTimeoutDoesNotPoisonConnection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, peer, commands := newBiDiTestClient(t)
+		done := startBiDiTestCommand(client, t.Context(), "test.timeout")
+		command := requireBiDiTestCommand(t, commands)
+		time.Sleep(bidiCommandTimeout)
+		requireBiDiTestResult(t, done, context.DeadlineExceeded)
+		nextDone := startBiDiTestCommand(client, t.Context(), "test.next")
+		next := requireBiDiTestCommand(t, commands)
+		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": command.ID, "result": map[string]any{"value": "late"}})
+		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": next.ID, "result": map[string]any{"value": "next"}})
+		if result := requireBiDiTestResult(t, nextDone, nil); result["value"] != "next" {
+			t.Fatal("timeout poisoned the next command")
+		}
 	})
 }

@@ -2,6 +2,8 @@
 
 管理页面与控制台使用同一组结构化事件。页面按请求汇总展示，控制台向标准错误输出逐行 JSON。日志来源使用 `service`、`request` 或实际执行账户的 Google 邮箱。
 
+`LOG_FILE=true` 时控制台的 JSON 行同时写入 `runtime/logs/aistudio2api.log`。单个文件 10 MB 轮转，轮转文件名带本地时间，目录总量超过 `LOG_MAX_TOTAL_MB` 时删除最旧的文件。两项在管理端设置页保存后立即生效。
+
 管理 API 通过 `GET /api/events` 推送历史快照和后续增量。账户创建等尚未绑定正式账户的认证操作使用 `auth` 来源。
 
 ## 日志结构
@@ -26,7 +28,9 @@
 
 `INFO` 记录状态推进和完成结果，`WARN` 记录等待、切换与客户端取消，`ERROR` 记录失败结果。管理页面支持按级别、来源和消息文本筛选，日志正文可以选择和横向滚动。
 
-请求错误保存在 `request.error` 并直接展示在请求行下方。运行事件的错误详情保留在 `message` 中。
+形如 `阶段名 | i/N | 详情` 的运行事件在页面上按来源与阶段名合并为一张卡片，显示阶段名、当前进度 `i/N` 与最新一步的详情。同一来源随后的结束消息并入同一卡片并显示结束状态：`协议运行时就绪`、`生成服务就绪`、`WAA Worker 就绪` 与阶段名加 `完成` 为已完成，阶段名加 `失败` 为失败，阶段名加 `已取消` 为已取消。同一来源再次从 `1/N` 开始时另起一张卡片。卡片位于首条消息的时间位置，展开详情可查看每一步的时间与内容；级别、来源和文本筛选在任一步命中时显示该卡片。
+
+请求错误保存在 `request.error` 并展示在请求行下方。未授权（401）行不展示模型、账户、正文或原始路径，避免把请求中的凭据当成诊断文本。运行事件的错误详情保留在 `message` 中。
 
 ## 启动过程
 
@@ -58,7 +62,23 @@ INFO  service              WAA Worker 预热完成 | Worker=5/5 | 耗时=34.903s
 目录为空、单账户同步失败或单账户同步成功但仍为空的账户进入 pending ID 集合。初次 `fan-out`（同时向全部符合条件的账户发出 `ListModels`）结束后，处于 `RUNNING` 的生成服务使用单个 30 秒 ticker（定时器）对全部 pending ID 再次并发执行 `ListModels`；非空成功立即更新账户、模型和 Worker 选择，失败与空结果继续保留：
 
 ```text
-INFO  service  模型目录重试完成 | 同步=2 | 非空=2 | 待重试账户=0
+INFO  account@example.com  模型目录已更新 | 模型=39
+```
+
+同一循环每 10 分钟对全部 `enabled`、`ready` 或 `busy` 账户并发读取权益与 `ListModels` 目录，并发槽位已满的账户跳过本轮；订阅模型遇到额度错误时同样刷新该账户。权益或模型数变化时更新账户调度与公开目录，读取失败时记录原因，登录失效的账户转为需要登录：
+
+```text
+INFO  account@example.com  账户状态已更新 | 权益=Free→Ultra | 模型=46→47
+WARN  account@example.com  账户状态刷新失败 | 错误=...
+```
+
+在线更新经两步写入同一张卡片，完成后管理进程重新启动：
+
+```text
+INFO  service  在线更新 | 1/2 | 下载发行包 | 版本=v0.2.14
+INFO  service  在线更新 | 2/2 | 替换可执行文件 | 版本=v0.2.14
+INFO  service  在线更新完成 | 版本=v0.2.14
+ERROR service  在线更新失败 | 错误=...
 ```
 
 取消与失败日志：
@@ -129,7 +149,7 @@ ERROR  account@example.com  WAA Worker 停止失败 | PID=18240 | 耗时=10.002s
 
 ## API 请求
 
-请求事件通过 `request.id` 关联。页面将开始、进展和结束合并为一行，展示最新账户、HTTP 状态、模型、耗时和输出统计。展开详情可查看接口、输入用量、原始终止原因、完整事件时间线与 JSON。
+请求事件通过 `request.id` 关联。页面将开始、进展和结束合并为一行，展示最新账户、HTTP 状态、模型、耗时和输出统计。详情展开后才渲染接口、用量、终止原因和完整时间线；原始 JSON 需要进一步展开，折叠时释放格式化视图。
 
 ```text
 22:11:47  200  gemini-3.8-flash  4.76 s  工具调用 1
@@ -146,6 +166,7 @@ ERROR  account@example.com  WAA Worker 停止失败 | PID=18240 | 耗时=10.002s
 | 平均速度 | 输出合计除以请求总耗时，单位为 tokens/s，包含准备与等待时间 |
 | 工具调用 | 本次模型输出的函数调用事件数 |
 | 输入用量 | `request.usage.input_tokens`，包含输入消息与工具声明 |
+| 缓存命中 | `request.usage.cached_tokens`，输入用量中命中上游隐式缓存的部分，为 0 时不显示 |
 | 总用量 | `request.usage.total_tokens`，包含输入和输出 |
 
 用量在生成服务返回 usage 后展示；用量未知时省略 `request.usage`。平均速度衡量端到端吞吐，网络缓冲或集中到达的响应也使用同一计算区间。
@@ -155,7 +176,7 @@ ERROR  account@example.com  WAA Worker 停止失败 | PID=18240 | 耗时=10.002s
 控制台每行是一条独立 JSON 事件，请求数据与中文摘要分离：
 
 ```json
-{"time":"2026-09-06T14:11:47Z","level":"INFO","msg":"工具调用完成","event":"request.finished","source":"account@example.com","request":{"id":"chatcmpl_example","state":"tool_calls","model":"gemini-3.8-flash","status":200,"duration_ms":4758,"tool_calls":1,"finish_reason":"stop","usage":{"input_tokens":100,"reasoning_tokens":32,"reply_tokens":38,"output_tokens":70,"total_tokens":170,"average_tokens_per_second":14.712064}}}
+{"time":"2026-09-06T14:11:47Z","level":"INFO","msg":"工具调用完成","event":"request.finished","source":"account@example.com","request":{"id":"chatcmpl_example","state":"tool_calls","model":"gemini-3.8-flash","status":200,"duration_ms":4758,"tool_calls":1,"finish_reason":"stop","usage":{"input_tokens":100,"cached_tokens":0,"reasoning_tokens":32,"reply_tokens":38,"output_tokens":70,"total_tokens":170,"average_tokens_per_second":14.712064}}}
 ```
 
 采样参数保存在 `request.parameters`。`first_event_ms`、`queue_ms`、`proof_ms` 和 `upstream_bytes` 作为 JSON 诊断字段保留：`queue_ms` 是请求进入服务到取得最终执行账户的时间，`proof_ms` 是等待并生成 WAA proof 的累计时间。页面支持按级别、账户以及模型、请求 ID、状态码搜索。
@@ -176,7 +197,7 @@ ERROR  account@example.com  WAA Worker 停止失败 | PID=18240 | 耗时=10.002s
 | `上游首事件到达` | 首事件等待后解出第一个语义事件 | `等待`、`事件`、`模型` |
 | `事件流停顿` | 已有语义事件，连续 15 秒没有下一事件 | `最近事件`、`推理`、`正文`、`网络字节`、`最近网络` |
 | `事件流恢复` | 停顿后解出下一语义事件 | `停顿`、`当前事件` |
-| `账号切换` | 当前账户在首个上游语义事件前失败 | 当前账户来源、模型和下一行原始原因 |
+| `账号切换` | 当前账户在首个上游语义事件前失败，或非流式请求的上游流中途中断 | 当前账户来源、模型和下一行原始原因 |
 
 `网络字节` 是当前账户尝试累计读取的上游响应体字节数，`最近网络` 是最近一次读取距日志时刻的时间。`网络字节=0` 表示响应体尚未产生数据；数值增长且 `最近网络` 较短，表示网络仍有数据进入、解码器尚未形成新的语义事件。
 
@@ -231,7 +252,6 @@ WARN  account@example.com  账号切换 | 模型=gemini-3.7-flash
 | --- | --- |
 | `账户添加 | 1/2`、`2/2`、`账户添加完成` | 隔离登录、保存认证状态、同步模型目录 |
 | `账户登录 | 1/2`、`2/2`、`账户登录完成` | 更新当前账户认证材料与 Worker 实例 |
-| `账户验证`、`账户验证完成` | 验证 AI Studio、权益与实时目录 |
 | `账户配置已更新`、`账户已删除` | 账户配置与运行对象已更新 |
 | `账户模型目录同步完成` | 新目录已写入当前模型目录和账户调度状态 |
 | `账户模型目录等待重试` | 当前同步失败，运行期重试继续处理 |
@@ -250,7 +270,7 @@ WARN  account@example.com  账号切换 | 模型=gemini-3.7-flash
 
 ## 用量账本
 
-`runtime/requests.db` 是本地 SQLite 账本。`/v1` 与 `/v1beta` 通过 API key 校验的每个 POST 请求完成后写入一行：请求 ID、完成时间、协议、路径、模型、账户、通道、HTTP 状态、`request.state`、耗时、首个上游事件、排队时间、token 用量、工具调用数、错误摘要，以及最终结果之前未成功的上游尝试。同一事务按 UTC 小时与服务器本地日累加汇总与耗时分布：完整落在范围与单个分桶内的本地日读取日汇总，其余整小时读取小时汇总，范围边缘与跨分桶的部分读取原始记录。服务器时区变化后，下次启动时从小时汇总与原始记录重建本地日汇总。写入由后台协程批量提交，不阻塞响应：等待写入的记录超过 4096 条时丢弃新记录，写入恢复后输出丢弃数。记录与汇总按服务器本地日整日保留 90 天。管理页的用量看板通过 `GET /api/usage` 与 `GET /api/usage/records` 查询。
+`runtime/requests.db` 是本地 SQLite 账本。`/v1` 与 `/v1beta` 通过 API key 校验的每个 POST 请求完成后写入一行：请求 ID、完成时间、协议、路径、模型、账户、通道、HTTP 状态、`request.state`、耗时、首个上游事件、排队时间、token 用量（含缓存命中数）、工具调用数、错误摘要，以及最终结果之前未成功的上游尝试。同一事务按 UTC 小时与服务器本地日累加汇总与耗时分布：完整落在范围与单个分桶内的本地日读取日汇总，其余整小时读取小时汇总，范围边缘与跨分桶的部分读取原始记录。服务器时区变化后，下次启动时从小时汇总与原始记录重建本地日汇总。写入由后台协程批量提交，不阻塞响应：等待写入的记录超过 4096 条时丢弃新记录，写入恢复后输出丢弃数。记录与汇总按服务器本地日整日保留 90 天。管理页的用量看板通过 `GET /api/usage` 与 `GET /api/usage/records` 查询。看板的估算费用按 Gemini API 与 Vertex AI 公布的当前文本单价从原始记录逐条计算，缓存命中的输入按缓存单价计算。
 
 ```text
 INFO  service  请求账本已按服务器时区重建本地日汇总 | 天数=<COUNT>
@@ -259,7 +279,9 @@ ERROR service  请求账本写入失败 | 记录=<COUNT> | 错误=<ERROR>
 ERROR service  请求账本清理失败 | 错误=<ERROR>
 ```
 
-`REQUEST_BODY_LOG=true` 时，账本同时保存通过 API key 校验的 POST 请求与响应的原始正文，各截断到 64 KiB 并记录原始字节数，只保留最近 1000 条；流式响应保存 SSE 原文。正文包含提示词与模型输出，以明文保存在本机。请求日志展开后或用量页的请求详情中按请求 ID 查看正文。
+固定 Build 入口 `/build/v1` 使用同一账本。`requested_model` 保留客户端请求名，`response_model` 记录实际响应名；旧 `model` 字段与已有数据库仍可读取。用量表、详情和 CSV 保留这两种模型，便于追踪别名/映射。鉴权失败可计为失败请求，但不从未校验的请求体、查询串或 URL 提取模型/账户/正文，路径只保留脱敏路由模板。
+
+`REQUEST_BODY_LOG=false` 为默认值。开启后，账本保存通过 API key 校验的 POST 请求与响应正文，各截断到 64 KiB 并记录原始字节数，只保留最近 1000 条；流式响应保存 SSE 原文。正文包含提示词与模型输出，以明文保存在本机。日志正文展开或用量详情中点击“按需加载正文”后才读取，单个正文展开后才格式化；关闭、取消或切换记录时取消未完成的读取。
 
 ## 管理事件流
 

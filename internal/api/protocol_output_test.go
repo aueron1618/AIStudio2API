@@ -166,7 +166,8 @@ func TestExplicitThinkingOutput(t *testing.T) {
 					usage = `"output_tokens":5`
 				case "responses":
 					path = "/v1/responses"
-					body = `{"model":"test","input":"hi","tools":[{"type":"function","name":"lookup"}]` + tc.config + fmt.Sprintf(`,"stream":%t}`, stream)
+					// Responses returns replayable signatures through its standard opt-in field.
+					body = `{"model":"test","input":"hi","include":["reasoning.encrypted_content"],"tools":[{"type":"function","name":"lookup"}]` + tc.config + fmt.Sprintf(`,"stream":%t}`, stream)
 					usage = `"reasoning_tokens":3`
 				}
 				response, raw := protocolTestRequest(t, newProtocolTestServer(t, client), http.MethodPost, path, body, nil)
@@ -305,17 +306,17 @@ func TestProtocolFinishReasons(t *testing.T) {
 					if hasTools && anthropic == "end_turn" {
 						anthropic = "tool_use"
 					}
-					if got := chatCompletionChoice(0, result, nil)["finish_reason"]; got != chat {
+					if got := chatCompletionChoice(0, result, nil, mediaOutput{})["finish_reason"]; got != chat {
 						t.Errorf("chat=%v want=%s", got, chat)
 					}
-					message := buildAnthropicResponse("test", "test", result, "")
+					message := buildAnthropicResponse("test", "test", result, "", false, mediaOutput{})
 					if message["stop_reason"] != anthropic {
 						t.Errorf("anthropic=%v want=%s", message["stop_reason"], anthropic)
 					}
 					if reason == "stop_sequence" && *message["stop_sequence"].(*string) != "END" {
 						t.Error("stop sequence was lost")
 					}
-					response, err := buildResponsesObject("test", 0, responsesRequest{}, result)
+					response, err := buildResponsesObject("test", 0, responsesRequest{}, result, nil)
 					if err != nil {
 						t.Fatal(err)
 					}

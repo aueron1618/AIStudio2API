@@ -5,7 +5,7 @@ import (
 	"sync"
 	"weak"
 
-	"github.com/Mag1cFall/AIStudio2API/internal/waa/goja"
+	"github.com/Mag1cFall/goja"
 )
 
 // objectStrings 为宿主对象保存不可枚举的标记，不延长对象或其 Realm 的生命周期。

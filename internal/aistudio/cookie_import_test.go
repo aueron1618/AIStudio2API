@@ -2,11 +2,14 @@ package aistudio
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 )
 
 const importTestHeader = "SAPISID=test-secret==; __Secure-1PAPISID=one; __Secure-3PAPISID=three"
@@ -19,7 +22,7 @@ func TestParseCookieImportFormats(t *testing.T) {
 		"prefixed":      "\ufeffCookie: " + importTestHeader,
 		"multiline":     strings.ReplaceAll(importTestHeader, "; ", "\r\n"),
 		"array":         jsonCookies,
-		"storage-state": `{"cookies":` + jsonCookies + `,"origins":[{"origin":"https://evil.example","localStorage":[]}],"aistudio2api":{"source":{"email":"forged@example.com"}}}`,
+		"storage-state": `{"cookies":` + jsonCookies + `,"origins":[{"origin":"https://aistudio.google.com","localStorage":[{"name":"identity","value":"forged"}]}],"aistudio2api":{"source":{"email":"forged@example.com"},"oauth":{"refresh_token":"untrusted"}}}`,
 		"netscape":      netscape,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -32,6 +35,15 @@ func TestParseCookieImportFormats(t *testing.T) {
 			}
 			if _, exists, _ := state.AuthExtension(); exists {
 				t.Fatal("trusted uploaded identity")
+			}
+			upstream, err := ParseCookieText(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			localJSON, _ := json.Marshal(state)
+			upstreamJSON, _ := json.Marshal(upstream)
+			if string(localJSON) != string(upstreamJSON) {
+				t.Fatal("upstream and local Cookie entries use different security rules")
 			}
 			if value, ok := state.CookieValue("SAPISID", aiStudioOrigin, time.Now()); !ok || value != "test-secret==" {
 				t.Fatal("lost cookie value")
@@ -122,6 +134,9 @@ func TestCookieImportRejectsInvalidInputWithoutSecrets(t *testing.T) {
 			if strings.Contains(err.Error(), "test-secret") {
 				t.Fatal("error leaks cookie data")
 			}
+			if _, err := ParseCookieText(raw); err == nil || strings.Contains(err.Error(), "test-secret") {
+				t.Fatal("upstream Cookie parser bypassed validation or leaked a secret")
+			}
 		})
 	}
 	var cookies strings.Builder
@@ -131,5 +146,34 @@ func TestCookieImportRejectsInvalidInputWithoutSecrets(t *testing.T) {
 	}
 	if _, err := ParseCookieImport(cookies.String()); err == nil {
 		t.Fatal("accepted too many cookies")
+	}
+}
+
+func TestCookieTextMissingLoginSentinel(t *testing.T) {
+	for _, raw := range []string{"[]", "SID=only", `[{"name":"SAPISID","value":"old","expires":1,"session":true}]`} {
+		if _, err := ParseCookieText(raw); !errors.Is(err, ErrLoginCookieMissing) {
+			t.Fatalf("browser discovery cannot identify signed-out state: %v", err)
+		}
+	}
+}
+
+func TestDecodeCookieLoginResultPreservesCleanupWarning(t *testing.T) {
+	state, err := ParseCookieImport(importTestHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := decodeNativeLoginResult(camoufoxnative.LoginResult{
+		StorageStateJSON: raw, Email: "real@example.com", CloseError: "cleanup warning", VerifiedAt: time.Now(),
+	}, "cookie")
+	if err != nil || result.CloseError != "cleanup warning" || result.Email != "real@example.com" {
+		t.Fatalf("successful cookie export was discarded: %+v, %v", result, err)
+	}
+	extension, exists, err := result.StorageState.AuthExtension()
+	if err != nil || !exists || extension.Source.Browser != "cookie" || extension.Source.Email != result.Email || extension.OAuth != nil {
+		t.Fatal("decoded Cookie result has the wrong identity or OAuth material")
 	}
 }
