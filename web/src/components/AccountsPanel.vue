@@ -38,8 +38,6 @@ const emit = defineEmits<{
 }>()
 
 const { t, locale, errorText } = useI18n()
-const defaultAccountLocale = navigator.language || 'en-US'
-const defaultAccountTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 const showEditor = ref(false)
 const showBrowserLogin = ref(false)
 const showChromeImport = ref(false)
@@ -80,15 +78,15 @@ function toggleAllChromeProfiles(): void {
 }
 const accountEnvironment = reactive({
   proxy: '',
-  locale: defaultAccountLocale,
-  timezone: defaultAccountTimezone,
+  locale: '',
+  timezone: '',
 })
 const draft = reactive<AccountDraft>({
   label: '',
   enabled: true,
   proxy: '',
-  locale: defaultAccountLocale,
-  timezone: defaultAccountTimezone,
+  locale: '',
+  timezone: '',
 })
 
 const stateKeys: Record<AccountState, TranslationKey> = {

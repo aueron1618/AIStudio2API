@@ -64,6 +64,9 @@ import {
   Lock,
   Expand,
   Shrink,
+  Menu,
+  PanelLeftOpen,
+  PanelLeftClose,
 } from '@lucide/vue'
 
 // icons 将界面语义名映射到 Lucide 图标
@@ -134,6 +137,9 @@ export const icons = {
   lock: Lock,
   zoomActual: Expand,
   zoomFit: Shrink,
+  menu: Menu,
+  sidebarOpen: PanelLeftOpen,
+  sidebarClose: PanelLeftClose,
 } as const
 
 // IconName 是界面可用的图标语义名
