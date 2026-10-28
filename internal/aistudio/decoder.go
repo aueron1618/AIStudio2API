@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -46,17 +47,22 @@ func (e *PromptFeedbackError) Unwrap() error {
 	return ErrInvalidArgument
 }
 
-// StreamInterruptedError 表示读取上游生成流时连接在流结束前中断。
+// errMissingFinishFrame 表示上游生成流在完成帧之前正常结束
+var errMissingFinishFrame = errors.New("流结束前没有完成帧")
+
+// StreamInterruptedError 表示上游生成流在完成帧之前中断或结束
 type StreamInterruptedError struct {
 	Method string
 	Frames int
 	Err    error
 }
 
+// Error 返回中断前已接收的帧数与读取错误
 func (e *StreamInterruptedError) Error() string {
 	return fmt.Sprintf("AI Studio %s 上游流中断（已接收 %d 帧）: %v", e.Method, e.Frames, e.Err)
 }
 
+// Unwrap 返回读取错误
 func (e *StreamInterruptedError) Unwrap() error {
 	return e.Err
 }
@@ -75,6 +81,7 @@ func (reader *streamReadRecorder) Read(buffer []byte) (int, error) {
 	return count, err
 }
 
+// failure 在读取出错时返回流中断错误，否则返回解码错误
 func (reader *streamReadRecorder) failure(method string, frames int, decodeErr error) error {
 	if reader.err == nil {
 		return decodeErr

@@ -15,7 +15,7 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/chromeauth"
 )
 
-type chromeCookieRefreshFunc func(context.Context, aistudio.ChromeOAuthMaterial, string) ([]aistudio.StateCookie, error)
+type chromeCookieRefreshFunc func(context.Context, aistudio.AuthSource, aistudio.ChromeOAuthMaterial, string) ([]aistudio.StateCookie, error)
 
 // authRuntimeRefresher 使用账户保存的 Chrome OAuth 材料原地续签
 type authRuntimeRefresher struct {
@@ -136,6 +136,30 @@ func (transport *authRetryTransport) DeleteDrive(
 		return fmt.Errorf("transport 不支持 Drive 删除")
 	}
 	return drive.DeleteDrive(ctx, accountID, token, fileID)
+}
+
+// CopyDrive 将 Drive 复制委托给同一认证传输
+func (transport *authRetryTransport) CopyDrive(
+	ctx context.Context,
+	accountID string,
+	token string,
+	fileID string,
+	name string,
+) (string, error) {
+	drive, ok := transport.transport.(aistudio.DriveTransport)
+	if !ok {
+		return "", fmt.Errorf("transport 不支持 Drive 复制")
+	}
+	return drive.CopyDrive(ctx, accountID, token, fileID, name)
+}
+
+// UploadAssistantFile 将写代码助手附件上传委托给同一认证传输
+func (transport *authRetryTransport) UploadAssistantFile(ctx context.Context, accountID string, blob aistudio.Blob) (string, error) {
+	uploader, ok := transport.transport.(aistudio.AssistantUploader)
+	if !ok {
+		return "", fmt.Errorf("transport 不支持写代码助手附件上传")
+	}
+	return uploader.UploadAssistantFile(ctx, accountID, blob)
 }
 
 // newAuthRuntimeRefresher 创建生产环境认证续签器
@@ -348,6 +372,21 @@ func (transport *authRetryProtectedTransport) DoProtectedVideo(
 	})
 }
 
+// DoProtectedTitle 在认证失败后续签同一账户并重放 GenerateTitle 请求
+func (transport *authRetryProtectedTransport) DoProtectedTitle(
+	ctx context.Context,
+	request aistudio.TitleRequest,
+	rpc aistudio.RPCRequest,
+) (*aistudio.RPCResponse, error) {
+	titleTransport, ok := transport.transport.(aistudio.TitleProtectedTransport)
+	if !ok {
+		return nil, fmt.Errorf("protected transport 不支持 GenerateTitle")
+	}
+	return transport.refresher.do(ctx, rpc.Method, func() (*aistudio.RPCResponse, error) {
+		return titleTransport.DoProtectedTitle(ctx, request, rpc)
+	})
+}
+
 // Refresh 续签当前租约账户并保存新的 storage state
 func (refresher *authRuntimeRefresher) Refresh(ctx context.Context) error {
 	lease, ok := aistudio.AccountLeaseFromContext(ctx)
@@ -376,7 +415,7 @@ func (refresher *authRuntimeRefresher) Refresh(ctx context.Context) error {
 		proxy := account.EffectiveProxy(refresher.globalProxy)
 		var cookies []aistudio.StateCookie
 		if extension.OAuth != nil {
-			cookies, err = refresher.refresh(ctx, *extension.OAuth, proxy)
+			cookies, err = refresher.refresh(ctx, extension.Source, *extension.OAuth, proxy)
 		}
 		if extension.OAuth == nil || errors.Is(err, chromeauth.ErrCredentialsRejected) {
 			if extension.Source.Browser != "chrome" || !strings.EqualFold(extension.Source.Email, account.ID) {

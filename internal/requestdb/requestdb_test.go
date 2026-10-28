@@ -26,7 +26,7 @@ func TestLedgerUsageAndBodies(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	store.Record(Row{ID: "a", Time: now.Add(-time.Hour), Model: "flash", RequestedModel: "alias", ResponseModel: "response-model",
-		State: "completed", Duration: 2 * time.Second, InputTokens: 10, TotalTokens: 30})
+		State: "completed", Duration: 2 * time.Second, InputTokens: 10, CachedTokens: 4, TotalTokens: 30})
 	store.Record(Row{ID: "b", Time: now.Add(-2 * time.Hour), Model: "flash", State: "failed", Status: 429, Duration: 4 * time.Second})
 	store.Record(Row{ID: "c", Time: now.Add(-3 * time.Hour), Model: "pro", State: "completed", Duration: 6 * time.Second, TotalTokens: 5})
 	store.Record(Row{ID: "old", Time: now.Add(-30 * time.Hour), Model: "pro", State: "completed", Duration: time.Second})
@@ -68,7 +68,7 @@ func TestLedgerUsageAndBodies(t *testing.T) {
 	if err != nil || len(page.Items) != 2 {
 		t.Fatalf("page=%+v err=%v", page, err)
 	}
-	if record := page.Items[0]; record.ID != "a" || record.Model != "flash" || record.RequestedModel != "alias" || record.ResponseModel != "response-model" {
+	if record := page.Items[0]; record.ID != "a" || record.Model != "flash" || record.RequestedModel != "alias" || record.ResponseModel != "response-model" || record.CachedTokens != 4 {
 		t.Fatalf("record=%+v", record)
 	}
 	if record := page.Items[1]; record.ID != "b" || record.Model != "flash" || record.RequestedModel != "" || record.ResponseModel != "" {
@@ -90,8 +90,12 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
  duration_ms INTEGER NOT NULL, first_event_ms INTEGER NOT NULL, queue_ms INTEGER NOT NULL,
  input_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, reply_tokens INTEGER NOT NULL,
  total_tokens INTEGER NOT NULL, tool_calls INTEGER NOT NULL, error TEXT NOT NULL, attempts TEXT NOT NULL)`
-	for _, tc := range []struct{ name, column string }{
-		{"legacy", ""}, {"requested_only", "requested_model"}, {"response_only", "response_model"},
+	for _, tc := range []struct {
+		name, columns string
+		cached        bool
+	}{
+		{"legacy", "", false}, {"requested_only", "requested_model", false}, {"response_only", "response_model", false},
+		{"fork", "requested_model,response_model", false}, {"upstream", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "requests.db")
@@ -103,8 +107,19 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 			if _, err := db.Exec(legacySchema); err != nil {
 				t.Fatal(err)
 			}
-			if tc.column != "" {
-				if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN ` + tc.column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
+			for _, column := range strings.FieldsFunc(tc.columns, func(r rune) bool { return r == ',' }) {
+				if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.cached {
+				if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, table := range []string{"hours", "days"} {
+				oldColumns := strings.Replace(rollupColumns, ", cached_tokens INTEGER NOT NULL", "", 1)
+				if _, err := db.Exec(`CREATE TABLE ` + table + ` (` + oldColumns + `) WITHOUT ROWID`); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -125,7 +140,7 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 			}
 			defer store.Close()
 			store.Record(Row{ID: "new", Time: now.Add(time.Millisecond), Model: "resolved-model",
-				RequestedModel: "requested-alias", ResponseModel: "response-json-model", State: "completed"})
+				RequestedModel: "requested-alias", ResponseModel: "response-json-model", CachedTokens: 3, State: "completed"})
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -138,10 +153,10 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 			if err != nil || len(page.Items) != 2 {
 				t.Fatalf("page=%+v err=%v", page, err)
 			}
-			if record := page.Items[0]; record.ID != "new" || record.Model != "resolved-model" || record.RequestedModel != "requested-alias" || record.ResponseModel != "response-json-model" {
+			if record := page.Items[0]; record.ID != "new" || record.Model != "resolved-model" || record.RequestedModel != "requested-alias" || record.ResponseModel != "response-json-model" || record.CachedTokens != 3 {
 				t.Fatalf("new record=%+v", record)
 			}
-			if record := page.Items[1]; record.ID != "old" || record.Model != "legacy-model" || record.RequestedModel != "" || record.ResponseModel != "" {
+			if record := page.Items[1]; record.ID != "old" || record.Model != "legacy-model" || record.RequestedModel != "" || record.ResponseModel != "" || record.CachedTokens != 0 {
 				t.Fatalf("old record=%+v", record)
 			}
 		})
@@ -171,16 +186,16 @@ func TestExportRecordsModelColumns(t *testing.T) {
 	}
 	wantHeader := []string{
 		"time", "id", "protocol", "path", "model", "account", "channel", "status", "state", "duration_ms", "first_event_ms",
-		"queue_ms", "input_tokens", "reasoning_tokens", "reply_tokens", "total_tokens", "tool_calls", "error", "attempts",
+		"queue_ms", "input_tokens", "cached_tokens", "reasoning_tokens", "reply_tokens", "total_tokens", "tool_calls", "error", "attempts",
 		"requested_model", "response_model",
 	}
 	if !slices.Equal(records[0], wantHeader) {
 		t.Fatalf("header=%v want=%v", records[0], wantHeader)
 	}
-	if record := records[1]; record[1] != "new" || record[4] != "resolved-model" || record[18] != "[]" || record[19] != "'=requested" || record[20] != "'+response" {
+	if record := records[1]; record[1] != "new" || record[4] != "resolved-model" || record[13] != "0" || record[19] != "[]" || record[20] != "'=requested" || record[21] != "'+response" {
 		t.Fatalf("new record=%v", record)
 	}
-	if record := records[2]; record[1] != "old" || record[4] != "legacy-model" || record[18] != "[]" || record[19] != "" || record[20] != "" {
+	if record := records[2]; record[1] != "old" || record[4] != "legacy-model" || record[13] != "0" || record[19] != "[]" || record[20] != "" || record[21] != "" {
 		t.Fatalf("old record=%v", record)
 	}
 }

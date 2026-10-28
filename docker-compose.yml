@@ -7,9 +7,11 @@ services:
     init: true
     ports:
       - "2048:2048"
+      - "2050:2050"
     environment:
       TZ: Asia/Shanghai
       LISTEN_ADDR: 0.0.0.0:2048
+      PREVIEW_LISTEN_ADDR: 0.0.0.0:2050
       # 公网管理必须登录；凭据从宿主机环境或同目录 .env 显式传入。
       ADMIN_AUTH_ENABLED: "true"
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}

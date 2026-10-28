@@ -3,18 +3,99 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
+	"github.com/Mag1cFall/AIStudio2API/internal/config"
 )
 
 type rootChannelService struct {
 	aistudio.Service
+}
+
+func TestRunServerWithoutAccounts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	directory := t.TempDir()
+	cfg := config.Default()
+	cfg.AuthStates = filepath.Join(directory, "accounts")
+	cfg.ListenAddr, cfg.PreviewListenAddr = "127.0.0.1:0", "127.0.0.1:0"
+	cfg.AutoStart, cfg.LogFile, cfg.AdminAuthEnabled = false, false, false
+	cfg.ProxyAPIKey = "isolated-smoke-key"
+	manager, err := newRuntimeManager(ctx, filepath.Join(directory, ".env"), cfg, dataConfigOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		_, err := runServer(ctx, cfg, manager, nil, func(address string) { ready <- address })
+		done <- err
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("server shutdown: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("management listeners did not stop")
+		}
+		if err := manager.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	var address string
+	select {
+	case address = <-ready:
+	case err := <-done:
+		t.Fatalf("server did not start: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	for _, tc := range []struct {
+		path string
+		key  bool
+		code int
+		html bool
+	}{
+		{"/", false, http.StatusOK, true},
+		{"/playground/", false, http.StatusOK, true},
+		{"/api/status", false, http.StatusOK, false},
+		{"/v1/models", false, http.StatusUnauthorized, false},
+		{"/build/v1/models", false, http.StatusUnauthorized, false},
+		{"/v1/models", true, http.StatusServiceUnavailable, false},
+		{"/build/v1/models", true, http.StatusServiceUnavailable, false},
+		{"/build/v1/not-an-endpoint", true, http.StatusNotFound, false},
+	} {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, address+tc.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.key {
+			request.Header.Set("Authorization", "Bearer "+cfg.ProxyAPIKey)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+		response.Body.Close()
+		if readErr != nil || response.StatusCode != tc.code || strings.Contains(response.Header.Get("Content-Type"), "text/html") != tc.html {
+			t.Fatalf("%s key=%t status=%d type=%s body=%s err=%v", tc.path, tc.key, response.StatusCode, response.Header.Get("Content-Type"), body, readErr)
+		}
+	}
 }
 
 func (*rootChannelService) Models(context.Context) ([]aistudio.Model, error) {

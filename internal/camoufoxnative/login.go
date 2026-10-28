@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ const loginEmailExpression = `(() => {
   return values.join('\n').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || '';
 })()`
 
-// LoginOptions 定义纯 Go 隔离登录环境
+// LoginOptions 定义纯 Go 隔离登录环境，View 不为空时浏览器以无头方式运行，画面与输入经管理页登录窗口传递
 type LoginOptions struct {
 	ExecutablePath string
 	Directory      string
@@ -34,6 +35,8 @@ type LoginOptions struct {
 	ProxyBypass    string
 	Timeout        time.Duration
 	Log            io.Writer
+	View           *LiveView
+	headless       bool
 }
 
 // LoginResult 返回隔离浏览器导出的 Playwright storage state
@@ -43,14 +46,7 @@ type LoginResult struct {
 	PageURL          string
 	VerifiedAt       time.Time
 	DriveError       string
-}
-
-// LoginVerification 返回已有登录态的页面验证结果
-type LoginVerification struct {
-	Authenticated bool
-	PageURL       string
-	VerifiedAt    time.Time
-	Reason        string
+	CloseError       string
 }
 
 type loginSession struct {
@@ -58,28 +54,44 @@ type loginSession struct {
 	connection *websocket.Conn
 	client     *bidiClient
 	contextID  string
+	// stopView 停止登录窗口的截图与输入转发
+	stopView func()
 }
 
-// Login 启动可见隔离 Camoufox 并在 AI Studio 可用后导出认证状态
+// ErrNoDisplay 表示本机没有图形界面，无法打开可见的登录窗口
+var ErrNoDisplay = errors.New("当前环境没有图形界面，无法打开 Camoufox 登录窗口：启动服务后在管理页面“添加账户”中选择“浏览器登录”，登录窗口显示在管理页面中")
+
+// HasDisplay 判断本机能否显示可见的浏览器窗口，Linux 上需要 DISPLAY 或 WAYLAND_DISPLAY
+func HasDisplay() bool {
+	return runtime.GOOS != "linux" || os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
+}
+
+// Login 启动隔离 Camoufox 供用户登录 Google，并在 AI Studio 可用后导出认证状态
 func Login(ctx context.Context, options LoginOptions) (result LoginResult, err error) {
 	options, err = validateLoginOptions(options)
 	if err != nil {
 		return LoginResult{}, err
 	}
+	if options.View == nil && !HasDisplay() {
+		return LoginResult{}, ErrNoDisplay
+	}
+	options.View.setStatus(liveViewStarting)
 	loginCtx, cancel := context.WithTimeout(ctx, options.Timeout)
 	defer cancel()
-	session, err := startLoginSession(loginCtx, options, false, storageState{})
+	session, err := startLoginSession(loginCtx, options, storageState{})
 	if err != nil {
 		return LoginResult{}, err
 	}
 	defer func() {
-		err = errors.Join(err, session.Close())
+		err = result.recordClose(err, session.Close())
 	}()
+	options.View.setStatus(liveViewWaiting)
 	origins := make(map[string]storageOrigin)
 	pageURL, err := session.waitLogin(loginCtx, origins)
 	if err != nil {
 		return LoginResult{}, err
 	}
+	options.View.setStatus(liveViewSaving)
 	email, err := session.client.evaluateString(loginCtx, session.contextID, loginEmailExpression)
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("读取 AI Studio 登录邮箱: %w", err)
@@ -109,38 +121,13 @@ func Login(ctx context.Context, options LoginOptions) (result LoginResult, err e
 	}, nil
 }
 
-// Verify 使用无头隔离 Camoufox 验证已有 Playwright storage state
-func Verify(ctx context.Context, options LoginOptions, storageStateJSON []byte) (verification LoginVerification, err error) {
-	options, err = validateLoginOptions(options)
-	if err != nil {
-		return LoginVerification{}, err
+// recordClose 保留成功导出的结果，清理失败只作为警告；登录失败仍附带清理错误。
+func (result *LoginResult) recordClose(err, closeErr error) error {
+	if err == nil {
+		result.CloseError = errorText(closeErr)
+		return nil
 	}
-	var state storageState
-	if err := json.Unmarshal(storageStateJSON, &state); err != nil {
-		return LoginVerification{}, fmt.Errorf("解析 storage state: %w", err)
-	}
-	if len(state.Cookies) == 0 {
-		return LoginVerification{}, errors.New("storage state 没有 Cookie")
-	}
-	verifyCtx, cancel := context.WithTimeout(ctx, options.Timeout)
-	defer cancel()
-	session, err := startLoginSession(verifyCtx, options, true, state)
-	if err != nil {
-		return LoginVerification{}, err
-	}
-	defer func() {
-		err = errors.Join(err, session.Close())
-	}()
-	pageURL, authenticated, reason, err := session.waitVerification(verifyCtx)
-	if err != nil {
-		return LoginVerification{}, err
-	}
-	return LoginVerification{
-		Authenticated: authenticated,
-		PageURL:       pageURL,
-		VerifiedAt:    time.Now().UTC(),
-		Reason:        reason,
-	}, nil
+	return errors.Join(err, closeErr)
 }
 
 // errorText 返回错误文本，nil 返回空字符串
@@ -174,7 +161,7 @@ func validateLoginOptions(options LoginOptions) (LoginOptions, error) {
 	return options, nil
 }
 
-func startLoginSession(ctx context.Context, options LoginOptions, headless bool, state storageState) (*loginSession, error) {
+func startLoginSession(ctx context.Context, options LoginOptions, state storageState) (*loginSession, error) {
 	ffVersion := camoufoxFirefoxMajor
 	fingerprintPath := filepath.Join(options.Directory, "storage-state.json")
 	fingerprint, err := loadAccountCamoufoxConfig(fingerprintPath, ffVersion, options.Locale, options.Timezone)
@@ -187,9 +174,10 @@ func startLoginSession(ctx context.Context, options LoginOptions, headless bool,
 		Timezone:       options.Timezone,
 		Proxy:          options.Proxy,
 		ProxyBypass:    options.ProxyBypass,
-		Headless:       headless,
+		Headless:       options.headless || options.View != nil,
 		ReadyTimeout:   options.Timeout,
 		Log:            options.Log,
+		liveView:       options.View != nil,
 	}, fingerprint)
 	if err != nil {
 		return nil, err
@@ -208,7 +196,11 @@ func startLoginSession(ctx context.Context, options LoginOptions, headless bool,
 	}
 	session.connection = connection
 	session.client = newBiDiClient(connection)
-	if _, err := session.client.command(ctx, "session.new", map[string]any{"capabilities": map[string]any{}}); err != nil {
+	capabilities := map[string]any{}
+	if options.View != nil {
+		capabilities = liveViewCapabilities
+	}
+	if _, err := session.client.command(ctx, "session.new", map[string]any{"capabilities": capabilities}); err != nil {
 		return nil, err
 	}
 	tree, err := session.client.command(ctx, "browsingContext.getTree", map[string]any{"maxDepth": 0})
@@ -240,10 +232,18 @@ func startLoginSession(ctx context.Context, options LoginOptions, headless bool,
 	}); err != nil {
 		return nil, err
 	}
+	wait := "interactive"
+	if options.View != nil {
+		session.stopView, err = options.View.attach(ctx, session.client, session.contextID)
+		if err != nil {
+			return nil, err
+		}
+		wait = "none"
+	}
 	if _, err := session.client.command(ctx, "browsingContext.navigate", map[string]any{
 		"context": session.contextID,
 		"url":     aiStudioOrigin + "/prompts/new_chat",
-		"wait":    "interactive",
+		"wait":    wait,
 	}); err != nil && !strings.Contains(err.Error(), "NS_ERROR_ABORT") {
 		return nil, fmt.Errorf("导航 AI Studio: %w", err)
 	}
@@ -276,37 +276,6 @@ func (session *loginSession) waitLogin(ctx context.Context, origins map[string]s
 		}
 		if err := waitContext(ctx, 300*time.Millisecond); err != nil {
 			return "", err
-		}
-	}
-}
-
-func (session *loginSession) waitVerification(ctx context.Context) (string, bool, string, error) {
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", false, "", err
-		}
-		pageURL, err := session.client.evaluateString(ctx, session.contextID, "location.href")
-		if err != nil {
-			if !retryablePageEvaluation(err) {
-				return "", false, "", fmt.Errorf("读取隔离验证页面: %w", err)
-			}
-			if err := waitContext(ctx, 200*time.Millisecond); err != nil {
-				return "", false, "", err
-			}
-			continue
-		}
-		if isGoogleLoginURL(pageURL) {
-			return pageURL, false, "AI Studio 登录已失效", nil
-		}
-		ready, err := session.client.evaluateBool(ctx, session.contextID, promptReadyExpression)
-		if err != nil && !retryablePageEvaluation(err) {
-			return "", false, "", fmt.Errorf("检查隔离验证页面: %w", err)
-		}
-		if err == nil && ready && strings.HasPrefix(pageURL, aiStudioOrigin+"/") {
-			return pageURL, true, "", nil
-		}
-		if err := waitContext(ctx, 200*time.Millisecond); err != nil {
-			return "", false, "", err
 		}
 	}
 }
@@ -405,6 +374,9 @@ func decodeStorageCookie(value map[string]any) (storageCookie, bool) {
 func (session *loginSession) Close() error {
 	if session == nil {
 		return nil
+	}
+	if session.stopView != nil {
+		session.stopView()
 	}
 	if session.client != nil && session.connection != nil {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

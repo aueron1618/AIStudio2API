@@ -92,7 +92,7 @@ const selectedKey = computed({
             :value="String(index)"
             class="flex cursor-pointer items-center justify-between gap-3 px-3 py-1.5 text-gray-300 outline-none select-none data-[highlighted]:bg-raised data-[highlighted]:text-white data-[state=checked]:font-medium data-[state=checked]:text-blue-300"
           >
-            <SelectItemText class="min-w-0 whitespace-normal [overflow-wrap:anywhere]">{{
+            <SelectItemText v-tooltip.overflow="option.label" class="min-w-0 truncate">{{
               option.label
             }}</SelectItemText>
             <SelectItemIndicator class="shrink-0">

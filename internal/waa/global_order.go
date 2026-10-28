@@ -55,7 +55,7 @@ func parseGlobalOrderShape(source string) (*globalOrderShape, error) {
 }
 
 // newFrameGlobalOrder 以新建同源 iframe 的首次枚举结果初始化惰性名称表与已定义属性顺序
-func newFrameGlobalOrder(shape *globalOrderShape) *firefoxGlobalOrder {
+func newFrameGlobalOrder(shape *globalOrderShape, closureName string) *firefoxGlobalOrder {
 	order := newGlobalOrder(shape)
 	split := len(shape.Frame.FreshKeys)
 	for index, name := range shape.Frame.FreshKeys {
@@ -65,23 +65,24 @@ func newFrameGlobalOrder(shape *globalOrderShape) *firefoxGlobalOrder {
 		}
 	}
 	for _, name := range shape.Frame.FreshKeys[:split] {
+		name = replaceClosureListenerMap(name, closureName)
 		order.lazy = append(order.lazy, name)
 		order.isLazy[name] = true
 	}
 	for _, name := range shape.Frame.FreshKeys[split:] {
-		order.appendNative(name)
+		order.appendNative(replaceClosureListenerMap(name, closureName))
 	}
 	return order
 }
 
 // newTopGlobalOrder 以采集时顶层页面的全局键顺序初始化已解析顺序
-func newTopGlobalOrder(shape *globalOrderShape) *firefoxGlobalOrder {
+func newTopGlobalOrder(shape *globalOrderShape, closureName string) *firefoxGlobalOrder {
 	order := newGlobalOrder(shape)
 	order.lazy = []string{"undefined"}
 	order.isLazy["undefined"] = true
 	order.resolved["undefined"] = true
 	for _, entry := range shape.Top.Global {
-		order.appendNative(entry.N)
+		order.appendNative(replaceClosureListenerMap(entry.N, closureName))
 	}
 	return order
 }

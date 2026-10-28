@@ -393,7 +393,7 @@ successful model/scope history
 3. 已有 Worker 无可用槽位时，按活动 Worker 上限从待机账户启动 Worker；容量已满时先启动目标 Worker，再替换最久未用的空闲 Worker
 4. 目标 Worker 启动失败或请求取消时保留原 Worker；旧实例关闭失败时保留旧实例并回收目标 Worker，两者回收均失败时同时计入容量；候选均忙时等待槽位
 
-HTTP 403 且协议 Code 7 保留对应模型或 scope 的成功记录；未固定且首个上游语义事件尚未到达的请求继续尝试下一账户，固定请求、资源绑定请求和已开始的流返回上游错误。HTTP 404 且协议 Code 5 的消息包含 `Ambiguous request for service ''`、本地 Worker 失败或实例被替换时，运行时按 Worker generation 重建同一账户实例并重放一次。
+HTTP 403 且协议 Code 7 保留对应模型或 scope 的成功记录；未固定且首个上游语义事件尚未到达的请求，以及上游流中途中断的未固定非流式请求，继续尝试下一账户，固定请求、资源绑定请求和已开始的流返回上游错误。HTTP 404 且协议 Code 5 的消息包含 `Ambiguous request for service ''`、本地 Worker 失败或实例被替换时，运行时按 Worker generation 重建同一账户实例并重放一次。
 
 认证写回使用 `authGeneration` 与 `checkedAt`；模型资格和冷却使用 `modelAccessGeneration` 与 `checked_at`。结果仅在对应 generation 值匹配且时间不早于当前状态时应用，同一时间以成功状态为最终值。目录、权益或认证材料更新时递增对应 generation。
 
@@ -403,7 +403,7 @@ Bidi setup 成功使用 lease（本次会话持有的账户租约）的 `checked
 
 本段中的 generation 表示一次 Stop/Start 创建的生成服务实例。模型目录驻留在当前 generation 的内存中，新 generation 以空缓存启动。`Start` 先用当前 generation 已有的真实 `CachedModels` 生成公开目录，并为全部 `enabled` 且处于 `ready` 或 `busy` 的账户各启动一个后台 `ListModels` 任务。缓存非空时立即开始 Worker 预热；缓存为空时等待新 generation 的首个非空结果，再开始 Worker 预热。每个非空结果都会立即重新合并 `CachedModels`、发布账户与模型事件，并在生成服务已经运行时继续预热其他 Worker。全部账户同步结束时，认证集合变化会补发一次账户与模型快照；日志记录同步成功数、非空数、公共模型数、待重试账户数与耗时。
 
-目录错误或返回空目录的账户 ID 保留在 pending set（待重试账户集合），返回非空目录或删除账户时移除。初次 fan-out（并发向全部目标账户调用 `ListModels`）结束后，单个 30 秒 ticker（Go 定时器）对排序后的待重试账户列表再次执行 fan-out；每个非空结果立即同步公共目录、发布管理事件并继续预热其他 Worker，批末认证集合变化触发一次快照补发。停止流程对目录任务最多等待 2 秒；管理调用对整次启动或停止切换最多等待 12 秒，超时后返回，后台清理继续并保留最终错误。
+目录错误或返回空目录的账户 ID 保留在 pending set（待重试账户集合），返回非空目录或删除账户时移除。初次 fan-out（并发向全部目标账户调用 `ListModels`）结束后，单个 30 秒 ticker（Go 定时器）对排序后的待重试账户列表再次执行 fan-out；每个非空结果立即同步公共目录、发布管理事件并继续预热其他 Worker，批末认证集合变化触发一次快照补发。同一循环的 10 分钟 ticker 对全部 `enabled` 且处于 `ready` 或 `busy` 的账户并发调用 `GetAiStudioBenefitTier`，每个账户占用一个普通并发槽位，槽位已满的账户跳过本轮；权益变化时沿用当前目录写回权益、递增 `modelAccessGeneration` 并发布管理事件。停止流程对目录任务最多等待 2 秒；管理调用对整次启动或停止切换最多等待 12 秒，超时后返回，后台清理继续并保留最终错误。
 
 ## 6. 上游变化与恢复
 

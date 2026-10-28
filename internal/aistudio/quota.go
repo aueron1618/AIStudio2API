@@ -18,6 +18,9 @@ var planLimitBackoff = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.M
 // quotaLimitPattern 匹配额度错误中逐项列出的额度上限
 var quotaLimitPattern = regexp.MustCompile(`\blimit:\s*(\d+)`)
 
+// usageLimitResetPattern 匹配套餐限额错误中 resets in 之后的小时与分钟
+var usageLimitResetPattern = regexp.MustCompile(`resets in (?:(\d+) hours?)?(?:, )?(?:(\d+) minutes?)?`)
+
 // CooldownState 表示账户或模型暂时不可调度的状态
 type CooldownState struct {
 	Until  time.Time `json:"until"`
@@ -71,10 +74,21 @@ func QuotaCooldownForError(err error, now time.Time) (QuotaCooldown, bool) {
 	escalate := false
 	if rpcError.RetryDelay > 0 {
 		until = now.Add(rpcError.RetryDelay)
+	} else if reset, ok := usageLimitReset(message); ok {
+		until, kind = now.Add(reset), "套餐限额"
 	} else if kind == "短期限额" && strings.Contains(message, "reached your usage limit") {
 		kind, escalate = "套餐限额", true
 	}
 	return QuotaCooldown{Until: until, Global: global, Kind: kind, Reason: kind + ": " + err.Error(), Escalate: escalate}, true
+}
+
+// BuildRejectionCooldown 返回 Build 代理以参数错误拒绝、同账户 Playground 完成的请求对应的 Build 递增冷却
+func BuildRejectionCooldown(err error) (QuotaCooldown, bool) {
+	var rpcError *RPCError
+	if !errors.As(err, &rpcError) || rpcError.StatusCode != http.StatusBadRequest || rpcError.Code != 3 {
+		return QuotaCooldown{}, false
+	}
+	return QuotaCooldown{Kind: "Build 拒绝", Reason: "Build 拒绝: " + err.Error(), Escalate: true}, true
 }
 
 // zeroQuotaLimit 判断额度错误列出的每个额度项上限都为 0
@@ -86,6 +100,17 @@ func zeroQuotaLimit(message string) bool {
 		}
 	}
 	return len(matches) > 0
+}
+
+// usageLimitReset 返回套餐限额错误写明的恢复等待时长
+func usageLimitReset(message string) (time.Duration, bool) {
+	match := usageLimitResetPattern.FindStringSubmatch(message)
+	if match == nil || match[1] == "" && match[2] == "" {
+		return 0, false
+	}
+	hours, _ := strconv.Atoi(match[1])
+	minutes, _ := strconv.Atoi(match[2])
+	return time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute, true
 }
 
 // planLimitCooldown 按同一范围上一次套餐限额冷却计算本次冷却；上一次仍未结束时沿用它

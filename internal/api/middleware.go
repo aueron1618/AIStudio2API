@@ -34,6 +34,7 @@ type accessLogMetadata struct {
 	finishReason    string
 	err             string
 	canceled        bool
+	detached        bool
 	failureStatus   int
 	firstEvent      time.Duration
 	upstreamBytes   int64
@@ -66,6 +67,7 @@ type accessLogSnapshot struct {
 	finishReason    string
 	requestErr      string
 	canceled        bool
+	detached        bool
 	failureStatus   int
 	firstEvent      time.Duration
 	upstreamBytes   int64
@@ -262,7 +264,7 @@ func (metadata *accessLogMetadata) snapshot() accessLogSnapshot {
 		generation: metadata.generation,
 		model:      metadata.model, account: metadata.account, channel: metadata.channel, finishReason: metadata.finishReason,
 		requestedModel: metadata.requestedModel, responseModel: metadata.responseModel,
-		requestErr: metadata.err, canceled: metadata.canceled,
+		requestErr: metadata.err, canceled: metadata.canceled, detached: metadata.detached,
 		failureStatus: metadata.failureStatus,
 		firstEvent:    metadata.firstEvent,
 		upstreamBytes: metadata.upstreamBytes, usage: metadata.usage, toolCalls: metadata.toolCalls,
@@ -291,6 +293,15 @@ func MarkAccessLogScheduled(ctx context.Context) {
 		if !metadata.startedAt.IsZero() {
 			metadata.queueWait = time.Since(metadata.startedAt)
 		}
+		metadata.mu.Unlock()
+	}
+}
+
+// DetachAccessLog 标记请求的生成不随客户端连接关闭而结束，访问日志的状态按生成结果记录
+func DetachAccessLog(ctx context.Context) {
+	if metadata, ok := ctx.Value(accessLogContextKey{}).(*accessLogMetadata); ok {
+		metadata.mu.Lock()
+		metadata.detached = true
 		metadata.mu.Unlock()
 	}
 }
@@ -416,6 +427,15 @@ func SetAccessLogError(ctx context.Context, err error) {
 	}
 }
 
+// setAccessLogFailureStatus 记录响应头以 200 提交后才确定的失败状态
+func setAccessLogFailureStatus(ctx context.Context, status int) {
+	if metadata, ok := ctx.Value(accessLogContextKey{}).(*accessLogMetadata); ok && status >= http.StatusBadRequest {
+		metadata.mu.Lock()
+		metadata.failureStatus = status
+		metadata.mu.Unlock()
+	}
+}
+
 // SetAccessLogFinishReason 写入生成请求的上游终止原因
 func SetAccessLogFinishReason(ctx context.Context, reason string) {
 	if metadata, ok := ctx.Value(accessLogContextKey{}).(*accessLogMetadata); ok {
@@ -446,7 +466,7 @@ func requestLoggingMiddleware(admin AdminService, next http.Handler) http.Handle
 			status = http.StatusOK
 		}
 		snapshot := metadata.snapshot()
-		if snapshot.canceled || errors.Is(r.Context().Err(), context.Canceled) {
+		if snapshot.canceled || !snapshot.detached && errors.Is(r.Context().Err(), context.Canceled) {
 			status = 499
 		} else if status < http.StatusBadRequest && snapshot.failureStatus >= http.StatusBadRequest {
 			status = snapshot.failureStatus
@@ -601,10 +621,15 @@ func sameOriginMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func authMiddleware(requiredKey string, next http.Handler) http.Handler {
-	requiredKey = strings.TrimSpace(requiredKey)
+func authMiddleware(configuredKeys string, next http.Handler) http.Handler {
+	var keys []string
+	for key := range strings.SplitSeq(configuredKeys, ",") {
+		if key = strings.TrimSpace(key); key != "" {
+			keys = append(keys, key)
+		}
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if requiredKey != "" && !checkAPIKeyMatches(r, requiredKey) {
+		if len(keys) > 0 && !checkAPIKeyMatches(r, keys) {
 			writeAuthError(w, r)
 			return
 		}
@@ -613,9 +638,8 @@ func authMiddleware(requiredKey string, next http.Handler) http.Handler {
 	})
 }
 
-// checkAPIKeyMatches 判断请求头或 URL 中任一 API key 是否与配置的 key 相同
-func checkAPIKeyMatches(r *http.Request, requiredKey string) bool {
-	requiredBytes := []byte(requiredKey)
+// checkAPIKeyMatches 判断请求头或 URL 中任一 API key 是否与配置的某个 key 相同
+func checkAPIKeyMatches(r *http.Request, keys []string) bool {
 	candidates := []string{
 		r.Header.Get("X-Goog-API-Key"),
 		r.Header.Get("X-API-Key"),
@@ -624,8 +648,13 @@ func checkAPIKeyMatches(r *http.Request, requiredKey string) bool {
 	}
 	for _, cand := range candidates {
 		cand = strings.TrimSpace(cand)
-		if cand != "" && subtle.ConstantTimeCompare([]byte(cand), requiredBytes) == 1 {
-			return true
+		if cand == "" {
+			continue
+		}
+		for _, key := range keys {
+			if subtle.ConstantTimeCompare([]byte(cand), []byte(key)) == 1 {
+				return true
+			}
 		}
 	}
 	return false

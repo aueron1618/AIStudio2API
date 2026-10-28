@@ -58,7 +58,7 @@ func TestRequestErrorPayloads(t *testing.T) {
 		write func(http.ResponseWriter, error)
 		want  map[string]any
 	}{
-		{"openai", writeOpenAIRequestError, map[string]any{"error": map[string]any{"message": err.Error(), "type": "api_error", "code": "upstream_error"}}},
+		{"openai", writeOpenAIRequestError, map[string]any{"error": map[string]any{"message": err.Error(), "type": "requests", "code": "rate_limit_exceeded", "param": nil}}},
 		{"anthropic", writeAnthropicRequestError, map[string]any{"type": "error", "error": map[string]any{"type": "rate_limit_error", "message": err.Error()}}},
 		{"gemini", writeGeminiRequestError, map[string]any{"error": map[string]any{"code": float64(429), "message": err.Error(), "status": "RESOURCE_EXHAUSTED", "details": []any{map[string]any{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "2s"}}}}},
 	} {
@@ -298,7 +298,7 @@ func TestValidationErrorsKeepProtocolShape(t *testing.T) {
 			body := payload["error"].(map[string]any)
 			switch tc.protocol {
 			case "openai":
-				if len(body) != 3 || body["type"] != "invalid_request_error" || body["code"] != "invalid_request" {
+				if len(body) != 4 || body["type"] != "invalid_request_error" || body["code"] != "invalid_request" || body["param"] != nil {
 					t.Errorf("OpenAI validation shape=%s", raw)
 				}
 			case "anthropic":

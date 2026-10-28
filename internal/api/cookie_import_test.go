@@ -13,7 +13,13 @@ import (
 
 type cookieImportAdmin struct {
 	AdminService
-	inputs []CookieImportInput
+	inputs       []CookieImportInput
+	browserCalls int
+}
+
+func (admin *cookieImportAdmin) CookieBrowsers(context.Context) ([]CookieBrowser, error) {
+	admin.browserCalls++
+	return []CookieBrowser{{Address: "127.0.0.1:9222", Email: "cookie@example.com", Browser: "Chromium", Locale: "zh-CN", Timezone: "Asia/Shanghai"}}, nil
 }
 
 func (admin *cookieImportAdmin) ImportCookieAccount(_ context.Context, input CookieImportInput) (AdminAccount, error) {
@@ -68,5 +74,39 @@ func TestCookieImportEndpoint(t *testing.T) {
 	}
 	if len(admin.inputs) != 1 {
 		t.Fatal("invalid input reached importer")
+	}
+	response = serve(path, `{"cdp":"127.0.0.1:9222","label":"claimed@example.com","locale":"ja-JP"}`, session)
+	if response.Code != http.StatusCreated || len(admin.inputs) != 2 || admin.inputs[1].CDP != "127.0.0.1:9222" || admin.inputs[1].Locale != "ja-JP" {
+		t.Fatalf("CDP entry did not reach the same importer: %d %s", response.Code, response.Body)
+	}
+	if response := serve(path, `{"cdp":" "}`, session); response.Code != http.StatusBadRequest {
+		t.Fatal("blank CDP bypassed required Cookie text")
+	}
+	// Escaping may expand a valid 1 MiB raw value beyond the raw-text limit.
+	escaped, _ := json.Marshal(CookieImportInput{Cookies: strings.Repeat("<", aistudio.MaxCookieImportBytes)})
+	if response := serve(path, string(escaped), session); response.Code != http.StatusCreated {
+		t.Fatalf("valid escaped envelope rejected: %d", response.Code)
+	}
+	unicodeLarge, _ := json.Marshal(CookieImportInput{Cookies: strings.Repeat("\u4e2d", aistudio.MaxCookieImportBytes/3+1)})
+	if response := serve(path, string(unicodeLarge), session); response.Code != http.StatusBadRequest {
+		t.Fatal("Cookie limit counted characters instead of UTF-8 bytes")
+	}
+	for _, authenticated := range []bool{false, true} {
+		request := httptest.NewRequest(http.MethodGet, "/api/accounts/import/browsers", nil)
+		if authenticated {
+			request.Header = session.Clone()
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		want := http.StatusUnauthorized
+		if authenticated {
+			want = http.StatusOK
+		}
+		if recorder.Code != want {
+			t.Fatalf("browser discovery auth=%v status=%d", authenticated, recorder.Code)
+		}
+	}
+	if admin.browserCalls != 1 {
+		t.Fatal("unauthenticated browser discovery reached the service")
 	}
 }

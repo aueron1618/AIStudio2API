@@ -15,6 +15,7 @@ func (service *trackedService) Transcribe(
 	ctx context.Context,
 	request aistudio.TranscriptionRequest,
 ) (aistudio.TranscriptionResult, error) {
+	request.Model = service.mappedModel(request.Model)
 	api.SetAccessLogTarget(ctx, request.Model, "")
 	api.SetAccessLogGenerationConfig(ctx, request.Config)
 	api.StartAccessLog(ctx)
@@ -46,7 +47,7 @@ func (service *trackedService) Transcribe(
 				break
 			}
 		}
-		service.requests.log(label, "WARN", fmt.Sprintf(
+		service.requests.logRequestProgress(request.ID, label, "WARN", fmt.Sprintf(
 			"账号切换 | 模型=%s\n原因: %s",
 			strings.TrimPrefix(request.Model, "models/"), strings.TrimSpace(cause.Error()),
 		))
@@ -83,9 +84,9 @@ func (service *trackedService) Transcribe(
 		}
 		modelID := strings.TrimPrefix(request.Model, "models/")
 		if workerFailed || waaRuntimeFailed {
-			service.requests.log(label, "WARN", "WAA Worker 重建 | 模型="+modelID)
+			service.requests.logRequestProgress(request.ID, label, "WARN", "WAA Worker 重建 | 模型="+modelID)
 		}
-		service.requests.log(label, "WARN", "WAA Worker 已更新 | 模型="+modelID+" | 重放当前请求")
+		service.requests.logRequestProgress(request.ID, label, "WARN", "WAA Worker 已更新 | 模型="+modelID+" | 重放当前请求")
 		return true, nil
 	}
 	observed := aistudio.ContextWithAccountSelectionObserver(requestCtx, func(account *aistudio.Account) {

@@ -118,7 +118,7 @@ func (s *server) translationModels(ctx context.Context, model string) (string, s
 	if err != nil {
 		return "", "", err
 	}
-	if entry, ok := lookupPublicModel(models, model); ok && !entry.Capabilities["transcription_output"] {
+	if entry, ok := LookupPublicModel(models, model); ok && !entry.Capabilities["transcription_output"] {
 		return aistudio.DefaultTranscriptionModel, entry.ID, nil
 	}
 	return model, openAITranslationModel, nil

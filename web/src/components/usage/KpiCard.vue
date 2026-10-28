@@ -7,6 +7,7 @@ const props = defineProps<{
   label: string
   icon: IconName
   value: string
+  raw: number | null
   help: string
   details: { label: string; value: string; tone?: string | undefined }[]
   delta?:
@@ -40,36 +41,40 @@ const deltaClass = computed(() => {
 
 <template>
   <article class="flex min-w-0 flex-col rounded-lg border border-line bg-panel p-4">
-    <div class="flex items-center gap-2 text-xs text-gray-500">
-      <UiIcon :name="icon" :size="14" />
-      <span
-        v-tooltip="help"
-        class="cursor-help underline decoration-gray-700 decoration-dotted underline-offset-4"
-        >{{ label }}</span
-      >
-    </div>
-    <div class="mt-2 flex items-baseline gap-2">
-      <span
-        class="truncate text-2xl font-semibold tracking-tight tabular-nums"
-        :class="tone ?? 'text-white'"
-        >{{ value }}</span
-      >
+    <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-500">
+      <span class="flex min-w-0 items-center gap-2">
+        <UiIcon :name="icon" :size="14" class="shrink-0" />
+        <span
+          v-tooltip="help"
+          class="cursor-help underline decoration-gray-700 decoration-dotted underline-offset-4"
+          >{{ label }}</span
+        >
+      </span>
       <span
         v-if="delta"
         v-tooltip="delta.help"
-        class="flex shrink-0 items-center text-xs tabular-nums"
+        class="ml-auto flex shrink-0 items-center tabular-nums"
         :class="deltaClass"
       >
         <UiIcon :name="delta.direction" :size="12" />{{ delta.text }}
         <span class="sr-only">{{ delta.help }}</span>
       </span>
     </div>
-    <dl class="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-gray-500">
-      <div v-for="detail in details" :key="detail.label" class="flex gap-1">
-        <dt>{{ detail.label }}</dt>
-        <dd class="tabular-nums" :class="detail.tone ?? 'text-gray-300'">{{ detail.value }}</dd>
-      </div>
-    </dl>
+    <data
+      v-tooltip.overflow="value"
+      :value="raw ?? ''"
+      class="mt-2 block truncate text-2xl font-semibold tracking-tight tabular-nums"
+      :class="tone ?? 'text-white'"
+      >{{ value }}</data
+    >
+    <p class="mt-1 text-xs text-gray-500">
+      <template v-for="(detail, index) in details" :key="detail.label">
+        <span v-if="index > 0" aria-hidden="true"> · </span>{{ detail.label }}
+        <span v-if="detail.value" class="tabular-nums" :class="detail.tone ?? 'text-gray-300'">{{
+          detail.value
+        }}</span>
+      </template>
+    </p>
     <svg
       v-if="sparkPath"
       class="mt-auto h-7 w-full pt-2"

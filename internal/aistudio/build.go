@@ -144,7 +144,6 @@ func encodeBuildContents(contents []Content) ([]any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("编码 content %d: %w", index, err)
 		}
-		content = attachYouTubeMedia(content)
 		role := "user"
 		switch content.Role {
 		case RoleUser, RoleTool:
@@ -287,6 +286,13 @@ func encodeBuildTools(tools Tools) ([]any, bool, error) {
 			if declaration.Description != "" {
 				encoded["description"] = declaration.Description
 			}
+			behavior, _, err := functionBehavior(declaration)
+			if err != nil {
+				return nil, false, fmt.Errorf("function declaration %d: %w", index, err)
+			}
+			if behavior != "" {
+				encoded["behavior"] = behavior
+			}
 			if len(bytes.TrimSpace(declaration.Parameters)) > 0 {
 				parameters, err := normalizeFunctionParameters(declaration.Parameters)
 				if err != nil {
@@ -348,6 +354,7 @@ func encodeBuildTools(tools Tools) ([]any, bool, error) {
 
 // encodeBuildGenerationConfig 复用 Playground 的参数校验与默认值，并转换为 Gemini API 字段
 func encodeBuildGenerationConfig(config GenerationConfig, defaults GenerationDefaults) (map[string]any, error) {
+	defaults.ContinuedOutputTokens = 0
 	wire, err := encodeGenerationConfig(config, defaults)
 	if err != nil {
 		return nil, err
@@ -444,7 +451,13 @@ type buildResponse struct {
 				EndIndex   int    `json:"endIndex"`
 			} `json:"citationSources"`
 		} `json:"citationMetadata"`
-		GroundingMetadata *buildGrounding `json:"groundingMetadata"`
+		GroundingMetadata  *buildGrounding `json:"groundingMetadata"`
+		URLContextMetadata *struct {
+			URLMetadata []struct {
+				RetrievedURL       string `json:"retrievedUrl"`
+				URLRetrievalStatus string `json:"urlRetrievalStatus"`
+			} `json:"urlMetadata"`
+		} `json:"urlContextMetadata"`
 	} `json:"candidates"`
 	PromptFeedback *struct {
 		BlockReason        string `json:"blockReason"`
@@ -454,6 +467,7 @@ type buildResponse struct {
 		PromptTokenCount        int64  `json:"promptTokenCount"`
 		CandidatesTokenCount    *int64 `json:"candidatesTokenCount"`
 		TotalTokenCount         int64  `json:"totalTokenCount"`
+		CachedContentTokenCount int64  `json:"cachedContentTokenCount"`
 		ThoughtsTokenCount      int64  `json:"thoughtsTokenCount"`
 		ToolUsePromptTokenCount int64  `json:"toolUsePromptTokenCount"`
 	} `json:"usageMetadata"`
@@ -506,10 +520,12 @@ var buildChunkSources = map[string]string{"web": "web", "retrievedContext": "ret
 type BuildStreamDecoder struct {
 	usage    *Usage
 	finished bool
+	frames   int
 }
 
 // Decode 解码一个 Gemini API GenerateContentResponse JSON
 func (d *BuildStreamDecoder) Decode(raw []byte) ([]Event, error) {
+	d.frames++
 	var response buildResponse
 	if err := json.Unmarshal(raw, &response); err != nil {
 		return nil, &ProtocolEvidenceError{Method: buildProxyStreamedMethod, Path: "$chunk", Detail: err.Error(), Raw: cloneRaw(raw)}
@@ -517,7 +533,7 @@ func (d *BuildStreamDecoder) Decode(raw []byte) ([]Event, error) {
 	if response.UsageMetadata != nil && response.UsageMetadata.TotalTokenCount > 0 {
 		metadata := response.UsageMetadata
 		usage := Usage{
-			InputTokens: metadata.PromptTokenCount, ReasoningTokens: metadata.ThoughtsTokenCount,
+			InputTokens: metadata.PromptTokenCount, CachedTokens: metadata.CachedContentTokenCount, ReasoningTokens: metadata.ThoughtsTokenCount,
 			ToolTokens: metadata.ToolUsePromptTokenCount, TotalTokens: metadata.TotalTokenCount,
 		}
 		if metadata.CandidatesTokenCount != nil {
@@ -556,8 +572,17 @@ func (d *BuildStreamDecoder) Decode(raw []byte) ([]Event, error) {
 			events = append(events, Event{Kind: EventCitation, Citation: &citation})
 		}
 	}
-	if grounding := candidate.GroundingMetadata; grounding != nil {
-		events = append(events, Event{Kind: EventGrounding, Grounding: decodeBuildGrounding(*grounding)})
+	if candidate.GroundingMetadata != nil || candidate.URLContextMetadata != nil {
+		grounding := &GroundingMetadata{}
+		if candidate.GroundingMetadata != nil {
+			grounding = decodeBuildGrounding(*candidate.GroundingMetadata)
+		}
+		if candidate.URLContextMetadata != nil {
+			for _, item := range candidate.URLContextMetadata.URLMetadata {
+				grounding.URLContext = append(grounding.URLContext, URLMetadata{RetrievedURL: item.RetrievedURL, Status: item.URLRetrievalStatus})
+			}
+		}
+		events = append(events, Event{Kind: EventGrounding, Grounding: grounding})
 	}
 	if candidate.FinishReason != "" && !d.finished {
 		if d.usage != nil {
@@ -575,7 +600,7 @@ func (d *BuildStreamDecoder) End() error {
 	if d.finished {
 		return nil
 	}
-	return &ProtocolEvidenceError{Method: buildProxyStreamedMethod, Path: "$", Detail: "流结束前没有 finishReason"}
+	return &StreamInterruptedError{Method: buildProxyStreamedMethod, Frames: d.frames, Err: errMissingFinishFrame}
 }
 
 // buildEnumName 把 Gemini API 枚举名转换为规范小写名称
@@ -746,7 +771,7 @@ func DecodeBuildStream(source io.Reader, decoder *BuildStreamDecoder, emit func(
 func DecodeBuildUnary(source io.Reader, decoder *BuildStreamDecoder, emit func(Event) error) error {
 	raw, err := io.ReadAll(source)
 	if err != nil {
-		return fmt.Errorf("读取 AI Studio %s: %w", buildProxyUnaryMethod, err)
+		return &StreamInterruptedError{Method: buildProxyUnaryMethod, Err: err}
 	}
 	decoded, err := decodeJSONValue(raw)
 	if err != nil {

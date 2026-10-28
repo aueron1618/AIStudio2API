@@ -44,11 +44,15 @@ func TestZeroWarmPoolStartsWithoutWorker(t *testing.T) {
 
 func TestGoWorkerStartupConcurrencyIsBounded(t *testing.T) {
 	manager := memoryTestManager(t, 1, 5)
-	if cap(manager.startupSlots) != 1 || manager.warmConcurrency != 1 {
+	if manager.startup.size() != 1 {
 		t.Fatal("pure Go ignored startup concurrency")
 	}
 	if manager.idleTimeout() != 5*time.Minute {
 		t.Fatal("explicit warm pools must keep existing timeout")
+	}
+	manager.SetCapacity(0, 3, 2)
+	if manager.warmLimit() != 0 || manager.activeLimit() != 3 || manager.startup.size() != 2 || manager.idleTimeout() != 30*time.Second {
+		t.Fatal("live capacity update lost zero-warm or Go startup limits")
 	}
 }
 

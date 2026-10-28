@@ -39,7 +39,7 @@ const rollupColumns = `
  state TEXT NOT NULL, status INTEGER NOT NULL, requests INTEGER NOT NULL,
  input_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, reply_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL,
  duration_ms INTEGER NOT NULL, first_event_ms INTEGER NOT NULL, first_events INTEGER NOT NULL, queue_ms INTEGER NOT NULL,
- duration_hist BLOB NOT NULL, first_event_hist BLOB NOT NULL, last_time INTEGER NOT NULL,
+ duration_hist BLOB NOT NULL, first_event_hist BLOB NOT NULL, last_time INTEGER NOT NULL, cached_tokens INTEGER NOT NULL,
  PRIMARY KEY (start, model, account, channel, protocol, state, status)`
 
 const schema = `
@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS requests (
  duration_ms INTEGER NOT NULL, first_event_ms INTEGER NOT NULL, queue_ms INTEGER NOT NULL,
  input_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, reply_tokens INTEGER NOT NULL,
  total_tokens INTEGER NOT NULL, tool_calls INTEGER NOT NULL, error TEXT NOT NULL, attempts TEXT NOT NULL,
+ cached_tokens INTEGER NOT NULL DEFAULT 0,
  requested_model TEXT NOT NULL DEFAULT '', response_model TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS requests_time ON requests(time);
 CREATE INDEX IF NOT EXISTS requests_model_time ON requests(model, time);
@@ -77,6 +78,7 @@ type Row struct {
 	FirstEvent      time.Duration
 	Queue           time.Duration
 	InputTokens     int64
+	CachedTokens    int64
 	ReasoningTokens int64
 	ReplyTokens     int64
 	TotalTokens     int64
@@ -131,12 +133,31 @@ func Open(path string, log Logger) (*Store, error) {
 			}
 		}
 	}
+	if err := addCachedTokens(db); err != nil {
+		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
+	}
 	store := &Store{db: db, writes: make(chan write, queueLimit), done: make(chan struct{}), log: log}
 	if err := store.alignDays(); err != nil {
 		return nil, errors.Join(fmt.Errorf("重建本地日汇总: %w", err), db.Close())
 	}
 	go store.run()
 	return store, nil
+}
+
+// addCachedTokens 为没有缓存 token 列的请求与汇总表追加该列，已有记录计为 0
+func addCachedTokens(db *sql.DB) error {
+	for _, table := range []string{"requests", "hours", "days"} {
+		var exists bool
+		if err := db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info(?) WHERE name = 'cached_tokens'`, table).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			if _, err := db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Close 写完已排队的记录后关闭数据库
@@ -296,11 +317,11 @@ func (store *Store) write(batch []write) (err error) {
 			result, err := tx.Exec(`INSERT OR IGNORE INTO requests (
  id, time, protocol, path, model, account, channel, status, state,
  duration_ms, first_event_ms, queue_ms, input_tokens, reasoning_tokens, reply_tokens, total_tokens, tool_calls, error, attempts,
- requested_model, response_model) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+ cached_tokens, requested_model, response_model) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				row.ID, row.Time.UnixMilli(), row.Protocol, row.Path, row.Model, row.Account, row.Channel, row.Status, row.State,
 				row.Duration.Milliseconds(), row.FirstEvent.Milliseconds(), row.Queue.Milliseconds(),
 				row.InputTokens, row.ReasoningTokens, row.ReplyTokens, row.TotalTokens, row.ToolCalls, row.Error, string(encoded),
-				row.RequestedModel, row.ResponseModel)
+				row.CachedTokens, row.RequestedModel, row.ResponseModel)
 			if err != nil {
 				return err
 			}
@@ -344,11 +365,12 @@ func mergeRollup(tx *sql.Tx, table string, key rollupKey, value *entry) error {
 	existing := &entry{}
 	var durations, firstEvents []byte
 	err := tx.QueryRow(`SELECT requests, input_tokens, reasoning_tokens, reply_tokens, total_tokens, duration_ms, first_event_ms,
- first_events, queue_ms, duration_hist, first_event_hist, last_time FROM `+table+`
+ first_events, queue_ms, duration_hist, first_event_hist, last_time, cached_tokens FROM `+table+`
  WHERE start=? AND model=? AND account=? AND channel=? AND protocol=? AND state=? AND status=?`,
 		key.start, key.model, key.account, key.channel, key.protocol, key.state, key.status).Scan(
 		&existing.requests, &existing.inputTokens, &existing.reasoningTokens, &existing.replyTokens, &existing.totalTokens,
-		&existing.durationMS, &existing.firstEventMS, &existing.firstEvents, &existing.queueMS, &durations, &firstEvents, &existing.lastTime)
+		&existing.durationMS, &existing.firstEventMS, &existing.firstEvents, &existing.queueMS, &durations, &firstEvents, &existing.lastTime,
+		&existing.cachedTokens)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 	case err != nil:
@@ -362,11 +384,11 @@ func mergeRollup(tx *sql.Tx, table string, key rollupKey, value *entry) error {
 		}
 		value.combine(existing)
 	}
-	_, err = tx.Exec(`INSERT OR REPLACE INTO `+table+` VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err = tx.Exec(`INSERT OR REPLACE INTO `+table+` VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		key.start, key.model, key.account, key.channel, key.protocol, key.state, key.status, value.requests,
 		value.inputTokens, value.reasoningTokens, value.replyTokens, value.totalTokens,
 		value.durationMS, value.firstEventMS, value.firstEvents, value.queueMS,
-		value.duration.encode(), value.firstEvent.encode(), value.lastTime)
+		value.duration.encode(), value.firstEvent.encode(), value.lastTime, value.cachedTokens)
 	return err
 }
 

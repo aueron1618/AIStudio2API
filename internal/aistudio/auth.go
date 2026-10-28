@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 )
 
 // StateCookie 表示 Playwright storage state 中的 Cookie
@@ -49,15 +51,16 @@ type StorageState struct {
 // AuthSource 记录认证状态的来源
 type AuthSource struct {
 	Browser string `json:"browser"`
+	Root    string `json:"root,omitempty"`
 	Profile string `json:"profile,omitempty"`
 	Email   string `json:"email,omitempty"`
 }
 
-// ChromeOAuthMaterial 保存 Chrome DBSC 续签材料
+// ChromeOAuthMaterial 保存 Chrome OAuth 续签材料，设备绑定密钥可为空
 type ChromeOAuthMaterial struct {
 	GaiaID            string `json:"gaia_id"`
 	RefreshToken      string `json:"refresh_token"`
-	WrappedBindingKey []byte `json:"wrapped_binding_key"`
+	WrappedBindingKey []byte `json:"wrapped_binding_key,omitempty"`
 }
 
 // AuthExtension 保存 aistudio2api 认证扩展
@@ -97,13 +100,14 @@ func (s StorageState) AuthExtension() (AuthExtension, bool, error) {
 	return extension, true, nil
 }
 
-// IsolatedLoginRequest 描述独立浏览器登录所需的稳定环境
+// IsolatedLoginRequest 描述独立浏览器登录所需的稳定环境，View 不为空时登录画面显示在管理页登录窗口
 type IsolatedLoginRequest struct {
 	AccountID string
 	Directory string
 	Proxy     string
 	Locale    string
 	Timezone  string
+	View      *camoufoxnative.LiveView
 }
 
 // IsolatedLoginResult 返回独立浏览器导出的认证状态
@@ -112,19 +116,12 @@ type IsolatedLoginResult struct {
 	Email        string
 	VerifiedAt   time.Time
 	DriveError   string
+	CloseError   string
 }
 
-// LoginVerification 表示隔离运行时对登录态的验证结果
-type LoginVerification struct {
-	Authenticated bool      `json:"authenticated"`
-	VerifiedAt    time.Time `json:"verified_at"`
-	Reason        string    `json:"reason,omitempty"`
-}
-
-// IsolatedLoginDriver 定义独立浏览器登录与验证合同
+// IsolatedLoginDriver 定义独立浏览器登录
 type IsolatedLoginDriver interface {
 	Login(context.Context, IsolatedLoginRequest) (IsolatedLoginResult, error)
-	Verify(context.Context, IsolatedLoginRequest, StorageState) (LoginVerification, error)
 }
 
 // CookieLoginDriver 定义无需交互登录的 Cookie 验证与身份识别能力。

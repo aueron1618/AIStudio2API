@@ -17,8 +17,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	appconfig "github.com/Mag1cFall/AIStudio2API/internal/config"
 	"github.com/gofrs/flock"
 )
@@ -73,10 +75,15 @@ var (
 type AllCoolingError struct {
 	ModelID string
 	Until   time.Time
+	Reason  string
 }
 
 func (e *AllCoolingError) Error() string {
-	return fmt.Sprintf("模型 %s 的可用账户均在冷却，最早恢复时间 %s", e.ModelID, e.Until.Local().Format(time.RFC3339))
+	message := fmt.Sprintf("模型 %s 的可用账户均在冷却，最早恢复时间 %s", e.ModelID, e.Until.Local().Format(time.RFC3339))
+	if e.Reason == "" {
+		return message
+	}
+	return message + "；" + e.Reason
 }
 
 // RetryAt 返回最早恢复的时刻
@@ -134,11 +141,12 @@ type ResourceBinding struct {
 	Video     *VideoResourceMetadata `json:"video,omitempty"`
 }
 
-// VideoResourceMetadata 保存 OpenAI 视频对象的持久字段
+// VideoResourceMetadata 保存 OpenAI 视频对象的持久字段与可下载的结果文件
 type VideoResourceMetadata struct {
 	Model   string `json:"model"`
 	Seconds string `json:"seconds"`
 	Size    string `json:"size"`
+	File    string `json:"file,omitempty"`
 }
 
 type accountRuntimeState struct {
@@ -147,6 +155,7 @@ type accountRuntimeState struct {
 	ModelAccess        map[string]ModelAccess     `json:"model_access,omitempty"`
 	BenefitTier        BenefitTier                `json:"benefit_tier,omitempty"`
 	CatalogFingerprint string                     `json:"catalog_fingerprint,omitempty"`
+	Proxy              string                     `json:"proxy,omitempty"`
 }
 
 // ModelAccessState 表示账户对单个模型的实测调用资格
@@ -191,8 +200,10 @@ type Account struct {
 	authCheckedAt         time.Time
 	modelAccessGeneration uint64
 	stateMessage          string
+	catalogErr            error
 	initializedAt         time.Time
 	buildModels           []Model
+	boundProxy            atomic.Pointer[string]
 }
 
 // AccountStatus 表示管理界面使用的脱敏账户状态
@@ -202,6 +213,7 @@ type AccountStatus struct {
 	State       AccountState             `json:"state"`
 	Enabled     bool                     `json:"enabled"`
 	Proxy       string                   `json:"proxy"`
+	Egress      string                   `json:"egress"`
 	Locale      string                   `json:"locale"`
 	Timezone    string                   `json:"timezone"`
 	Models      []string                 `json:"models"`
@@ -223,6 +235,7 @@ type AccountSelection struct {
 	PlaygroundOnly    bool
 	Channel           Channel
 	PreferredChannel  Channel
+	anyTier           bool
 }
 
 const preferredBootstrapModelID = "gemini-flash-latest"
@@ -244,7 +257,7 @@ type AccountCandidateGroups struct {
 	WarmBusy         []string
 	StandbyReady     []string
 	StandbyBusy      []string
-	EarliestCooldown time.Time
+	EarliestCooldown CooldownState
 	Eligible         bool
 }
 
@@ -271,6 +284,7 @@ type AccountPool struct {
 	lastPicked            map[string]string
 	lastPickedChannel     map[string]Channel
 	channels              []Channel
+	modelChannels         map[string]Channel
 	changed               chan struct{}
 }
 
@@ -575,10 +589,27 @@ func (c AccountConfig) Validate() error {
 	return nil
 }
 
-// EffectiveProxy 返回账户固定代理或全局代理
+// EffectiveProxy 返回账户固定代理、代理池绑定或全局代理
 func (a *Account) EffectiveProxy(globalProxy string) string {
 	if a != nil && strings.TrimSpace(a.Config.Proxy) != "" {
 		return strings.TrimSpace(a.Config.Proxy)
+	}
+	return a.PoolProxy(globalProxy)
+}
+
+// SetPoolProxy 设置账户加入账户池前使用的代理池绑定
+func (a *Account) SetPoolProxy(proxy string) {
+	if proxy = strings.TrimSpace(proxy); proxy != "" {
+		a.boundProxy.Store(&proxy)
+	}
+}
+
+// PoolProxy 返回账户的代理池绑定，未绑定时返回全局代理
+func (a *Account) PoolProxy(globalProxy string) string {
+	if a != nil {
+		if bound := a.boundProxy.Load(); bound != nil && *bound != "" {
+			return *bound
+		}
 	}
 	return strings.TrimSpace(globalProxy)
 }
@@ -641,7 +672,7 @@ func accountSupportsSelection(account *Account, selection AccountSelection) bool
 		if !modelMatchesID(model, modelID) {
 			continue
 		}
-		if !modelAllowedByTier(model, account.BenefitTier) {
+		if !selection.anyTier && !modelAllowedByTier(model, account.BenefitTier) {
 			return false
 		}
 		if strings.TrimSpace(selection.Method) != "" && !hasMethod(model, selection.Method) {
@@ -652,30 +683,60 @@ func accountSupportsSelection(account *Account, selection AccountSelection) bool
 	return false
 }
 
-// CatalogModels 返回完整目录，每项带有启用账户可以调用的通道
+// CatalogModels 返回完整目录，每项带有启用账户可以调用的通道，按 callableFirst 排列
 func (p *AccountPool) CatalogModels(models []Model) []Model {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	catalog := make([]Model, len(models))
 	for index, model := range models {
-		model.Channels = p.modelChannelsLocked(model)
+		model.Channels = p.modelChannelsLocked(model, false)
 		catalog[index] = model
 	}
-	return catalog
+	return callableFirst(catalog)
 }
 
-// EligibleModels 返回至少一个启用账户具有模型资格的目录项
+// EligibleModels 返回账户实际可调用的目录，供固定通道的公开入口使用。
 func (p *AccountPool) EligibleModels(models []Model) []Model {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	eligible := make([]Model, 0, len(models))
-	for _, model := range models {
-		if channels := p.modelChannelsLocked(model); len(channels) > 0 {
-			model.Channels = channels
+	catalog := p.CatalogModels(models)
+	eligible := make([]Model, 0, len(catalog))
+	for _, model := range catalog {
+		if len(model.Channels) > 0 {
 			eligible = append(eligible, model)
 		}
 	}
 	return eligible
+}
+
+// PublicModels 返回已启用通道可以提供的目录项，只因账户权益不足而无法调用的模型同样列出且通道为空，按 callableFirst 排列
+func (p *AccountPool) PublicModels(models []Model) []Model {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	public := make([]Model, 0, len(models))
+	for _, model := range models {
+		model.Channels = p.modelChannelsLocked(model, false)
+		if len(model.Channels) == 0 && len(p.modelChannelsLocked(model, true)) == 0 {
+			continue
+		}
+		public = append(public, model)
+	}
+	return callableFirst(public)
+}
+
+// callableFirst 保持原顺序依次排列有通道的普通模型、有通道的 Interactions 代理模型与没有通道的模型
+func callableFirst(models []Model) []Model {
+	ordered := make([]Model, 0, len(models))
+	var agents, restricted []Model
+	for _, model := range models {
+		switch {
+		case len(model.Channels) == 0:
+			restricted = append(restricted, model)
+		case model.Capabilities["interaction_route"]:
+			agents = append(agents, model)
+		default:
+			ordered = append(ordered, model)
+		}
+	}
+	return append(append(ordered, agents...), restricted...)
 }
 
 // CanonicalModelID 把实时目录中的模型别名换成上游接受的正式模型 ID
@@ -1259,7 +1320,45 @@ func (p *AccountPool) validateSelectionLocked(selection AccountSelection) error 
 	if selection.Capability != "" && !p.hasModelCapabilityLocked(modelID, selection.Capability) {
 		return fmt.Errorf("%w: 模型 %s 不支持 %s", ErrModelNotFound, modelID, selection.Capability)
 	}
-	return nil
+	if limited, ok := p.modelChannels[modelID]; ok && limited != ChannelPlayground && selection.Method == "generateContent" &&
+		(strings.TrimSpace(selection.ResourceID) != "" || selection.PlaygroundOnly) {
+		return fmt.Errorf("%w: 模型 %s 限定使用 %s 通道，此请求含文件引用或只有 Playground 支持的参数，只能经 Playground 发送", ErrInvalidArgument, modelID, limited)
+	}
+	return p.modelAccessErrorLocked(selection)
+}
+
+// modelAccessErrorLocked 返回只因启用账户权益不足而无法调用模型时的错误
+func (p *AccountPool) modelAccessErrorLocked(selection AccountSelection) error {
+	if p.enabledAccountSupportsLocked(selection) {
+		return nil
+	}
+	selection.anyTier = true
+	if !p.enabledAccountSupportsLocked(selection) {
+		return nil
+	}
+	modelID := strings.TrimPrefix(strings.TrimSpace(selection.ModelID), "models/")
+	var modes []int64
+	for _, account := range p.accounts {
+		if account == nil {
+			continue
+		}
+		for _, model := range account.Models {
+			if modelMatchesID(model, modelID) {
+				modes = unionInt64(modes, model.AccessModes)
+			}
+		}
+	}
+	return &ModelAccessError{Model: modelID, AccessModes: modes}
+}
+
+// enabledAccountSupportsLocked 判断是否有启用账户的某个通道支持选择
+func (p *AccountPool) enabledAccountSupportsLocked(selection AccountSelection) bool {
+	for _, account := range p.accounts {
+		if account != nil && account.Config.Enabled && p.accountSupportsAnyChannelLocked(account, selection) {
+			return true
+		}
+	}
+	return false
 }
 
 // AcquireResource 获取创建资源的固定账户
@@ -1625,6 +1724,21 @@ func (l *AccountLease) BindVideoOperation(
 	return l.pool.bindVideoOperation(ctx, resourceID, l.account.ID, metadata)
 }
 
+// BindVideoResult 保存视频任务可下载的结果文件并绑定该文件
+func (l *AccountLease) BindVideoResult(ctx context.Context, operationID string, fileID string) error {
+	if l == nil || l.account == nil || l.pool == nil {
+		return fmt.Errorf("账户租约未初始化")
+	}
+	l.operation.Lock()
+	defer l.operation.Unlock()
+	if l.released {
+		return fmt.Errorf("账户租约已释放")
+	}
+	l.account.storageMu.Lock()
+	defer l.account.storageMu.Unlock()
+	return l.pool.bindVideoResult(ctx, strings.TrimSpace(operationID), strings.TrimSpace(fileID), l.account.ID)
+}
+
 // VideoOperationBinding 返回当前账户持有的视频任务元数据
 func (l *AccountLease) VideoOperationBinding(resourceID string) (ResourceBinding, error) {
 	if l == nil || l.account == nil || l.pool == nil {
@@ -1749,6 +1863,7 @@ func (p *AccountPool) SetCatalog(accountID string, tier BenefitTier, models []Mo
 			}
 			account.BenefitTier = tier
 			account.Models = cloneAccountModels(models)
+			account.catalogErr = nil
 			account.initializedAt = time.Now()
 			if account.State == AccountUnavailable {
 				account.State = AccountReady
@@ -2037,6 +2152,23 @@ func (p *AccountPool) MarkQuotaCooldownIfGeneration(
 	return until, nil
 }
 
+// ModelRequiresSubscription 判断账户实时目录中的模型是否只对 Pro 或 Ultra 权益开放
+func (p *AccountPool) ModelRequiresSubscription(accountID string, modelID string) bool {
+	modelID = strings.TrimPrefix(strings.TrimSpace(modelID), "models/")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	account := p.byID[accountID]
+	if account == nil {
+		return false
+	}
+	for _, model := range account.Models {
+		if modelMatchesID(model, modelID) {
+			return !modelAllowedByTier(model, BenefitTierFree)
+		}
+	}
+	return false
+}
+
 // ClearCooldownIfGeneration 清除当前目录代际中的作用域冷却
 func (p *AccountPool) ClearCooldownIfGeneration(
 	accountID string,
@@ -2081,6 +2213,18 @@ func (p *AccountPool) ClearCooldownIfGeneration(
 			}
 		}
 		return changed, nil, nil
+	})
+	return err
+}
+
+// ClearCooldown 清除账户在作用域上的冷却，作用域为全局 *、模型 ID 或 build:<模型 ID>
+func (p *AccountPool) ClearCooldown(accountID string, scope string) error {
+	_, err := p.updateRuntime(accountID, func(_ *Account, runtimeState *accountRuntimeState) (bool, func(*Account), error) {
+		if _, exists := runtimeState.Cooldowns[scope]; !exists {
+			return false, nil, nil
+		}
+		delete(runtimeState.Cooldowns, scope)
+		return true, nil, nil
 	})
 	return err
 }
@@ -2147,6 +2291,27 @@ func (p *AccountPool) bindVideoOperation(
 		return ResourceBinding{}, err
 	}
 	return bound, nil
+}
+
+func (p *AccountPool) bindVideoResult(ctx context.Context, operationID string, fileID string, accountID string) error {
+	_, err := p.updateRuntimeContext(ctx, accountID, func(_ *Account, runtimeState *accountRuntimeState) (bool, func(*Account), error) {
+		if owner, exists := p.resources[fileID]; exists && owner != accountID {
+			return false, nil, fmt.Errorf("资源 %s 已绑定账户 %s", fileID, owner)
+		}
+		operation, exists := runtimeState.Resources[operationID]
+		if !exists || operation.Kind != "video-operation" || operation.Video == nil {
+			return false, nil, fmt.Errorf("%w: %s", ErrResourceNotFound, operationID)
+		}
+		metadata := *operation.Video
+		metadata.File = fileID
+		operation.Video = &metadata
+		runtimeState.Resources[operationID] = operation
+		if _, exists := runtimeState.Resources[fileID]; !exists {
+			runtimeState.Resources[fileID] = ResourceBinding{Kind: "video-file", CreatedAt: time.Now().UTC()}
+		}
+		return true, nil, nil
+	})
+	return err
 }
 
 func (p *AccountPool) replaceResource(previousResourceID string, resourceID string, accountID string, kind string) error {
@@ -2228,6 +2393,15 @@ func (p *AccountPool) MarkAuthRequired(accountID string, reason string) error {
 	return p.setAccountState(accountID, AccountAuthRequired, reason)
 }
 
+// recordCatalogFailure 记录账户最近一次权益或目录读取失败的原因
+func (p *AccountPool) recordCatalogFailure(accountID string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if account := p.byID[accountID]; account != nil {
+		account.catalogErr = err
+	}
+}
+
 // MarkUnavailable 将账户标记为初始化或运行失败
 func (p *AccountPool) MarkUnavailable(accountID string, reason string) error {
 	return p.setAccountState(accountID, AccountUnavailable, reason)
@@ -2265,18 +2439,27 @@ func (p *AccountPool) Status() []AccountStatus {
 			models = append(models, model.ID)
 		}
 		sort.Strings(models)
+		tier := account.BenefitTier.String()
+		message := account.stateMessage
+		if account.runtime.CatalogFingerprint == "" {
+			tier = "Unknown"
+		}
+		if message == "" && account.catalogErr != nil && (account.runtime.CatalogFingerprint == "" || errors.Is(account.catalogErr, camoufoxnative.ErrRegionNotSupported)) {
+			message = account.catalogErr.Error()
+		}
 		status := AccountStatus{
 			ID:          account.ID,
 			Label:       account.Config.Label,
 			State:       state,
 			Enabled:     account.Config.Enabled,
 			Proxy:       account.Config.Proxy,
+			Egress:      account.EffectiveProxy(""),
 			Locale:      account.Config.Locale,
 			Timezone:    account.Config.Timezone,
 			Models:      models,
-			BenefitTier: account.BenefitTier.String(),
+			BenefitTier: tier,
 			Cooldowns:   cloneCooldowns(account.runtime.Cooldowns),
-			Message:     account.stateMessage,
+			Message:     message,
 		}
 		if !account.LastUsed.IsZero() {
 			status.LastUsed = timePointer(account.LastUsed)
@@ -2311,7 +2494,7 @@ func (p *AccountPool) ClassifyCandidates(
 		}
 		available := len(groups.WarmReady)+len(groups.WarmAvailable)+len(groups.WarmBusy)+
 			len(groups.StandbyReady)+len(groups.StandbyBusy) > 0
-		if attempt == 0 && (!groups.Eligible || !available && !groups.EarliestCooldown.IsZero()) {
+		if attempt == 0 && (!groups.Eligible || !available && !groups.EarliestCooldown.Until.IsZero()) {
 			if err := p.refreshSelectionRuntimes(ctx, selection); err != nil {
 				return AccountCandidateGroups{}, err
 			}
@@ -2337,6 +2520,9 @@ func (p *AccountPool) classifyCandidatesLocked(
 		if selection.Method != "" && !p.hasModelMethodLocked(modelID, selection.Method) {
 			return AccountCandidateGroups{}, fmt.Errorf("%w: 模型 %s 不支持 %s", ErrModelNotFound, modelID, selection.Method)
 		}
+		if err := p.modelAccessErrorLocked(selection); err != nil {
+			return AccountCandidateGroups{}, err
+		}
 	}
 	indices, err := p.selectionIndicesLocked(selection)
 	if err != nil {
@@ -2359,9 +2545,9 @@ func (p *AccountPool) classifyCandidatesLocked(
 			continue
 		}
 		groups.Eligible = true
-		if until, active := p.accountChannelCooldownLocked(account, selection, now); active {
-			if groups.EarliestCooldown.IsZero() || until.Before(groups.EarliestCooldown) {
-				groups.EarliestCooldown = until
+		if cooldown, active := p.accountChannelCooldownLocked(account, selection, now); active {
+			if groups.EarliestCooldown.Until.IsZero() || cooldown.Until.Before(groups.EarliestCooldown.Until) {
+				groups.EarliestCooldown = cooldown
 			}
 			continue
 		}
@@ -2543,7 +2729,7 @@ func accountBootstrapModels(account *Account) []string {
 func waaBootstrapModelEligible(account *Account, modelID string) bool {
 	for _, model := range account.Models {
 		if !modelMatchesID(model, modelID) || !hasMethod(model, "generateContent") ||
-			!modelAllowedByTier(model, account.BenefitTier) || !model.Capabilities["chat_model"] {
+			!modelAllowedByTier(model, account.BenefitTier) || !model.Capabilities["chat_model"] || model.Capabilities["assistant_route"] {
 			continue
 		}
 		return true
@@ -2612,6 +2798,14 @@ func (p *AccountPool) selectionIndicesLocked(selection AccountSelection) ([]int,
 func (p *AccountPool) SetRoutingStrategy(strategy string) {
 	p.mu.Lock()
 	p.routingStrategy = strategy
+	p.mu.Unlock()
+}
+
+// SetPerAccountConcurrency 设置单账户同时处理的请求数并唤醒等待中的请求
+func (p *AccountPool) SetPerAccountConcurrency(limit int) {
+	p.mu.Lock()
+	p.perAccountConcurrency = limit
+	p.notifyLocked()
 	p.mu.Unlock()
 }
 
@@ -3154,6 +3348,7 @@ func cloneRuntime(value accountRuntimeState) accountRuntimeState {
 		ModelAccess:        make(map[string]ModelAccess, len(value.ModelAccess)),
 		BenefitTier:        value.BenefitTier,
 		CatalogFingerprint: value.CatalogFingerprint,
+		Proxy:              value.Proxy,
 	}
 	for key, cooldown := range value.Cooldowns {
 		result.Cooldowns[key] = cooldown

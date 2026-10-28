@@ -6,7 +6,7 @@ import (
 	"time"
 	"weak"
 
-	"github.com/Mag1cFall/AIStudio2API/internal/waa/goja"
+	"github.com/Mag1cFall/goja"
 )
 
 func TestObjectStringsLiveObject(t *testing.T) {
@@ -63,5 +63,51 @@ func TestTrustedScriptMarkers(t *testing.T) {
 	unmarked := vm.NewObject()
 	if transform(unmarked) != unmarked {
 		t.Fatal("unmarked object must not become source code")
+	}
+}
+
+func TestTrustedScriptFunctionAndTimerSinks(t *testing.T) {
+	vm := goja.New()
+	registry := newHostRegistry()
+	vm.SetEvalTransformer(registry.evalTransformer(vm, true))
+	vm.SetFunctionTransformer(registry.functionTransformer(vm, true))
+	for name, source := range map[string]string{"trustedExpression": "1 + 2", "trustedArgument": "value", "trustedBody": "return value + 4", "trustedTimer": "globalThis.timerRan = true"} {
+		object := vm.NewObject()
+		registry.trusted.set(object, source)
+		if err := vm.Set(name, object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var jobs []func()
+	timers := &realmTimers{
+		vm: vm, registry: registry, trustedTypes: true, active: make(map[int64]bool),
+		schedule: func(_ time.Duration, job func()) { jobs = append(jobs, job) },
+		report: func(err error) {
+			if err != nil {
+				t.Errorf("timer failed: %v", err)
+			}
+		},
+	}
+	if err := vm.Set("setTimeout", func(call goja.FunctionCall) goja.Value { return timers.start(call, false) }); err != nil {
+		t.Fatal(err)
+	}
+	value, err := vm.RunString(`(() => {
+  if (eval(trustedExpression) !== 3 || new Function(trustedArgument, trustedBody)(3) !== 7) return false;
+  const blocked = (fn, name) => { try { fn(); } catch (error) { return error.name === name; } return false; };
+  if (!blocked(() => eval('1 + 2'), 'EvalError')) return false;
+  if (!blocked(() => new Function('value', 'return value'), 'EvalError')) return false;
+  if (!blocked(() => setTimeout('timerRan = false', 0), 'TypeError')) return false;
+  setTimeout(trustedTimer, 0);
+  return true;
+})()`)
+	if err != nil || !value.ToBoolean() {
+		t.Fatalf("Trusted Types sinks failed: %v, %v", value, err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("unexpected accepted timers: %d", len(jobs))
+	}
+	jobs[0]()
+	if value := vm.Get("timerRan"); value == nil || !value.ToBoolean() {
+		t.Fatal("trusted timer did not execute")
 	}
 }

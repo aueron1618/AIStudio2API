@@ -84,6 +84,8 @@ func TestGenerateWithRetryStreamInterruption(t *testing.T) {
 			{name: "exhausted-attempts-discard-partials", unary: true, failAll: true, failure: interrupted, wantCalls: 2, wantError: true},
 			{name: "fixed-account-does-not-switch", unary: true, fixed: true, failure: interrupted, wantCalls: 1, wantError: true},
 			{name: "transport-error-before-first", unary: true, beforeFirst: true, failure: &url.Error{Op: "Post", URL: "https://example.test", Err: io.ErrUnexpectedEOF}, wantCalls: 2, wantText: "success"},
+			{name: "bad-request-does-not-cross-channels", unary: true, beforeFirst: true, failure: &aistudio.RPCError{StatusCode: 400, Message: "INVALID_ARGUMENT"}, wantCalls: 1, wantError: true},
+			{name: "upstream-5xx-retries-same-channel", unary: true, beforeFirst: true, failure: &aistudio.RPCError{StatusCode: 503, Message: "UNAVAILABLE"}, wantCalls: 2, wantText: "success"},
 		} {
 			t.Run(string(channel)+"/"+tc.name, func(t *testing.T) {
 				var calls []string
@@ -199,7 +201,7 @@ func TestCollectGenerateEventsCancellationDuringDrain(t *testing.T) {
 	defer close(source)
 	done := make(chan error, 1)
 	go func() {
-		_, err := collectGenerateEvents(ctx, source)
+		_, err := collectGenerateEvents(ctx, source, nil)
 		done <- err
 	}()
 	source <- aistudio.Event{Kind: aistudio.EventError, Err: &aistudio.StreamInterruptedError{Err: io.ErrUnexpectedEOF}}

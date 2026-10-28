@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -83,6 +84,9 @@ func (c *Client) CountTokens(ctx context.Context, request TokenCountRequest) (To
 
 // CountTokensForAccount 使用指定账户调用权威 token 计数
 func (c *Client) CountTokensForAccount(ctx context.Context, accountID string, request TokenCountRequest) (TokenCount, error) {
+	if entry, err := c.modelEntry(ctx, accountID, request.Model); err == nil && entry.model.Capabilities["assistant_route"] {
+		request.Model = assistantBaseModelID(request.Model)
+	}
 	body, err := EncodeCountTokensRequest(request)
 	if err != nil {
 		return TokenCount{}, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
@@ -154,7 +158,6 @@ func linkFunctionResults(content Content, pendingCalls *[]FunctionCall) (Content
 }
 
 func encodeContent(content Content) ([]any, error) {
-	content = attachYouTubeMedia(content)
 	role := ""
 	switch content.Role {
 	case RoleUser:
@@ -192,6 +195,9 @@ func encodePart(part Part) ([]any, error) {
 		variants++
 	}
 	if part.File != nil {
+		variants++
+	}
+	if part.Upload != nil {
 		variants++
 	}
 	if part.FunctionCall != nil {
@@ -256,6 +262,12 @@ func encodePart(part Part) ([]any, error) {
 		if err != nil {
 			return nil, err
 		}
+		return setPartThoughtSignature(wire, part.ThoughtSignature), nil
+	}
+	if upload := part.Upload; upload != nil {
+		// Part field 18 上传附件：MIME、上传路径、文件名、字节数
+		wire := make([]any, 18)
+		wire[17] = []any{upload.MIME, upload.Path, upload.Name, strconv.FormatInt(upload.Size, 10)}
 		return setPartThoughtSignature(wire, part.ThoughtSignature), nil
 	}
 	if part.FunctionCall != nil {
@@ -338,7 +350,6 @@ func wireModelName(model string) string {
 
 func countTokensNeedsGenerateRequest(contents []Content) bool {
 	for _, content := range contents {
-		content = attachYouTubeMedia(content)
 		for _, part := range content.Parts {
 			if part.InlineData != nil || part.ExternalMedia != nil || part.File != nil || part.FunctionCall != nil || part.FunctionResult != nil ||
 				part.ExecutableCode != nil || part.CodeExecutionResult != nil {

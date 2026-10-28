@@ -8,28 +8,31 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
+	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 )
 
 // AdminService 定义管理端需要的权威状态能力
 type AdminService interface {
 	Status(context.Context) (AdminStatus, error)
-	Models(context.Context) ([]aistudio.Model, error)
+	CatalogModels(context.Context) ([]aistudio.Model, error)
 	Accounts(context.Context) ([]AdminAccount, error)
-	CreateAccount(context.Context, AccountCreateInput) (AdminAccount, error)
+	CreateAccount(context.Context, AccountCreateInput, *camoufoxnative.LiveView) (AdminAccount, error)
 	ChromeImportProfiles(context.Context) ([]ChromeImportProfile, error)
+	CookieBrowsers(context.Context) ([]CookieBrowser, error)
 	ImportChromeAccounts(context.Context, ChromeImportInput) ([]AdminAccount, error)
 	ImportCookieAccount(context.Context, CookieImportInput) (AdminAccount, error)
 	ImportAccountState(context.Context, AccountStateInput) (AdminAccount, error)
 	UpdateAccount(context.Context, string, AccountInput) (AdminAccount, error)
 	DeleteAccount(context.Context, string) error
-	LoginAccount(context.Context, string) (AdminAccount, error)
-	VerifyAccount(context.Context, string) (AdminAccount, error)
+	LoginAccount(context.Context, string, *camoufoxnative.LiveView) (AdminAccount, error)
+	RefreshAccount(context.Context, string) (AdminAccountRefresh, error)
 	StartService(context.Context) (AdminStatus, error)
 	StopService(context.Context) (AdminStatus, error)
 	ClearLogs(context.Context) error
 	RuntimeConfig(context.Context) (RuntimeConfig, error)
 	UpdateRuntimeConfig(context.Context, RuntimeConfig) (RuntimeConfig, error)
 	Cooldowns(context.Context) ([]AdminCooldown, error)
+	ClearCooldown(ctx context.Context, accountID string, scope string) error
 	Requests(context.Context) ([]AdminRequest, error)
 	CancelRequest(context.Context, string) error
 	Events(context.Context) (<-chan AdminEvent, error)
@@ -61,6 +64,7 @@ type AdminLog struct {
 type RequestLog struct {
 	ID              string            `json:"id"`
 	State           string            `json:"state"`
+	StartedAt       time.Time         `json:"started_at,omitzero"`
 	Model           string            `json:"model,omitempty"`
 	Method          string            `json:"method,omitempty"`
 	Path            string            `json:"path,omitempty"`
@@ -83,9 +87,10 @@ type RequestLog struct {
 	Channel         string            `json:"channel,omitempty"`
 }
 
-// RequestLogUsage 区分输入、思考、回复与端到端输出速率
+// RequestLogUsage 区分输入、缓存命中、思考、回复与端到端输出速率
 type RequestLogUsage struct {
 	InputTokens            int64   `json:"input_tokens"`
+	CachedTokens           int64   `json:"cached_tokens"`
 	ReasoningTokens        int64   `json:"reasoning_tokens"`
 	ReplyTokens            int64   `json:"reply_tokens"`
 	OutputTokens           int64   `json:"output_tokens"`
@@ -144,11 +149,30 @@ type AdminAccount struct {
 	Enabled     bool     `json:"enabled"`
 	State       string   `json:"state"`
 	Proxy       string   `json:"proxy"`
+	Egress      string   `json:"egress"`
 	Locale      string   `json:"locale"`
 	Timezone    string   `json:"timezone"`
 	Models      []string `json:"models"`
 	BenefitTier string   `json:"benefit_tier"`
 	Message     string   `json:"message"`
+}
+
+// AdminProxy 表示代理池中一个代理的可用性与绑定账户数
+type AdminProxy struct {
+	Proxy     string     `json:"proxy"`
+	Available bool       `json:"available"`
+	Accounts  int        `json:"accounts"`
+	CheckedAt *time.Time `json:"checked_at,omitempty"`
+	Error     string     `json:"error,omitempty"`
+}
+
+// AdminAccountRefresh 表示一次手动刷新后的账户与刷新前后的权益和模型数
+type AdminAccountRefresh struct {
+	Account        AdminAccount `json:"account"`
+	PreviousTier   string       `json:"previous_tier"`
+	Tier           string       `json:"tier"`
+	PreviousModels int          `json:"previous_models"`
+	Models         int          `json:"models"`
 }
 
 // AccountInput 表示已有账户配置
@@ -167,6 +191,18 @@ type AccountCreateInput struct {
 	Timezone string `json:"timezone"`
 }
 
+// CookieImportInput 接受 Cookie 文本或 CDP 地址；Label 仅兼容上游客户端，身份始终由验证结果决定。
+type CookieImportInput struct {
+	Label    string `json:"label"`
+	Cookies  string `json:"cookies"`
+	CDP      string `json:"cdp"`
+	Proxy    string `json:"proxy"`
+	Locale   string `json:"locale"`
+	Timezone string `json:"timezone"`
+}
+
+const maxCookieImportRequestBytes = 8 * aistudio.MaxCookieImportBytes
+
 // ChromeImportProfile 表示可从本机 Chrome 导入的账号
 type ChromeImportProfile struct {
 	ID          string `json:"id"`
@@ -174,6 +210,18 @@ type ChromeImportProfile struct {
 	DisplayName string `json:"display_name"`
 	Email       string `json:"email"`
 	Locale      string `json:"locale"`
+}
+
+// CookieBrowser 表示本机开启远程调试的浏览器与其中登录 AI Studio 的账户
+type CookieBrowser struct {
+	Address   string `json:"address"`
+	Browser   string `json:"browser"`
+	Email     string `json:"email"`
+	Locale    string `json:"locale"`
+	Timezone  string `json:"timezone"`
+	Imported  bool   `json:"imported"`
+	SignedOut bool   `json:"signed_out"`
+	Error     string `json:"error"`
 }
 
 // ChromeImportInput 表示批量导入的 Chrome 账号与账户环境
@@ -184,42 +232,47 @@ type ChromeImportInput struct {
 	Timezone   string   `json:"timezone"`
 }
 
-// CookieImportInput 表示 Cookie 文本及账户环境；邮箱由上游登录页面识别。
-type CookieImportInput struct {
-	Cookies  string `json:"cookies"`
-	Proxy    string `json:"proxy"`
-	Locale   string `json:"locale"`
-	Timezone string `json:"timezone"`
-}
-
 // RuntimeConfig 表示全局运行配置
 type RuntimeConfig struct {
-	AutoStart                 bool     `json:"auto_start"`
-	RequestBodyLog            bool     `json:"request_body_log"`
-	AdminAuthEnabled          bool     `json:"admin_auth_enabled"`
-	AdminUsername             string   `json:"admin_username"`
-	AdminPassword             *string  `json:"admin_password,omitempty"`
-	AdminPasswordSet          bool     `json:"admin_password_set"`
-	SavedAdminPassword        string   `json:"-"`
-	BuildNativeNonstream      bool     `json:"build_native_nonstream"`
-	AuthStates                string   `json:"auth_states"`
-	ListenAddr                string   `json:"listen_addr"`
-	APIKey                    string   `json:"proxy_api_key"`
-	ActiveListenAddr          string   `json:"active_listen_addr"`
-	ActiveAPIKey              string   `json:"active_proxy_api_key"`
-	ManagementRestartRequired bool     `json:"management_restart_required"`
-	ServiceRestartRequired    bool     `json:"service_restart_required"`
-	Proxy                     string   `json:"proxy"`
-	InitTimeout               string   `json:"init_timeout"`
-	RequestTimeout            string   `json:"request_timeout"`
-	WarmWorkerLimit           int      `json:"warm_worker_limit"`
-	MaxActiveWorkers          int      `json:"max_active_workers"`
-	WarmStartupConcurrency    int      `json:"warm_startup_concurrency"`
-	PerAccountConcurrency     int      `json:"per_account_concurrency"`
-	RoutingStrategy           string   `json:"routing_strategy"`
-	UpstreamChannels          []string `json:"upstream_channels"`
-	TemporaryChat             bool     `json:"temporary_chat"`
-	WAABackend                string   `json:"waa_backend"`
+	AutoStart                 bool         `json:"auto_start"`
+	RequestBodyLog            bool         `json:"request_body_log"`
+	AdminAuthEnabled          bool         `json:"admin_auth_enabled"`
+	AdminUsername             string       `json:"admin_username"`
+	AdminPassword             *string      `json:"admin_password,omitempty"`
+	AdminPasswordSet          bool         `json:"admin_password_set"`
+	SavedAdminPassword        string       `json:"-"`
+	BuildNativeNonstream      bool         `json:"build_native_nonstream"`
+	NonstreamKeepalive        bool         `json:"nonstream_keepalive"`
+	FakeStream                bool         `json:"fake_stream"`
+	YouTubeLinks              bool         `json:"youtube_links"`
+	LogFile                   bool         `json:"log_file"`
+	LogMaxTotalMB             int          `json:"log_max_total_mb"`
+	AuthStates                string       `json:"auth_states"`
+	ListenAddr                string       `json:"listen_addr"`
+	APIKey                    string       `json:"proxy_api_key"`
+	ActiveListenAddr          string       `json:"active_listen_addr"`
+	PreviewListenAddr         string       `json:"preview_listen_addr"`
+	ActivePreviewListenAddr   string       `json:"active_preview_listen_addr"`
+	ActiveAPIKey              string       `json:"active_proxy_api_key"`
+	ManagementRestartRequired bool         `json:"management_restart_required"`
+	ServiceRestartRequired    bool         `json:"service_restart_required"`
+	Proxy                     string       `json:"proxy"`
+	ActiveProxy               string       `json:"active_proxy"`
+	ProxyPool                 []AdminProxy `json:"proxy_pool"`
+	InitTimeout               string       `json:"init_timeout"`
+	RequestTimeout            string       `json:"request_timeout"`
+	WarmWorkerLimit           int          `json:"warm_worker_limit"`
+	MaxActiveWorkers          int          `json:"max_active_workers"`
+	WarmStartupConcurrency    int          `json:"warm_startup_concurrency"`
+	PerAccountConcurrency     int          `json:"per_account_concurrency"`
+	RoutingStrategy           string       `json:"routing_strategy"`
+	UpstreamChannels          []string     `json:"upstream_channels"`
+	ModelMapping              string       `json:"model_mapping"`
+	ModelChannels             string       `json:"model_channels"`
+	TemporaryChat             bool         `json:"temporary_chat"`
+	WAABackend                string       `json:"waa_backend"`
+	MediaOutput               string       `json:"media_output"`
+	MediaBaseURL              string       `json:"media_base_url"`
 }
 
 // AdminCooldown 表示账户模型冷却
@@ -228,6 +281,7 @@ type AdminCooldown struct {
 	AccountLabel string    `json:"account_label"`
 	Channel      string    `json:"channel"`
 	ModelID      string    `json:"model_id"`
+	Scope        string    `json:"scope"`
 	Until        time.Time `json:"until"`
 	Reason       string    `json:"reason,omitempty"`
 }
@@ -254,18 +308,21 @@ func (s *server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/accounts", s.handleCreateAccount)
 	mux.HandleFunc("GET /api/accounts/import/chrome", s.handleChromeImportProfiles)
 	mux.HandleFunc("POST /api/accounts/import/chrome", s.handleImportChromeAccounts)
+	mux.HandleFunc("GET /api/accounts/import/browsers", s.handleCookieBrowsers)
 	mux.HandleFunc("POST /api/accounts/import/cookies", s.handleImportCookieAccount)
 	mux.HandleFunc("POST /api/pairing", s.handleCreatePairing)
 	mux.HandleFunc("PUT /api/accounts/{id}", s.handleUpdateAccount)
 	mux.HandleFunc("DELETE /api/accounts/{id}", s.handleDeleteAccount)
 	mux.HandleFunc("POST /api/accounts/{id}/login", s.handleLoginAccount)
-	mux.HandleFunc("POST /api/accounts/{id}/verify", s.handleVerifyAccount)
+	mux.HandleFunc("GET /api/login-view/{view}", s.handleLoginView)
+	mux.HandleFunc("POST /api/accounts/{id}/refresh", s.handleRefreshAccount)
 	mux.HandleFunc("POST /api/control/start", s.handleStartService)
 	mux.HandleFunc("POST /api/control/stop", s.handleStopService)
 	mux.HandleFunc("DELETE /api/logs", s.handleClearLogs)
 	mux.HandleFunc("GET /api/config", s.handleRuntimeConfig)
 	mux.HandleFunc("PUT /api/config", s.handleUpdateRuntimeConfig)
 	mux.HandleFunc("GET /api/cooldowns", s.handleCooldowns)
+	mux.HandleFunc("DELETE /api/accounts/{id}/cooldowns/{scope}", s.handleClearCooldown)
 	mux.HandleFunc("GET /api/requests", s.handleRequests)
 	mux.HandleFunc("POST /api/requests/{id}/cancel", s.handleCancelRequest)
 	mux.HandleFunc("GET /api/events", s.handleAdminEvents)
@@ -293,7 +350,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAdminModels(w http.ResponseWriter, r *http.Request) {
-	models, err := s.config.Admin.Models(r.Context())
+	models, err := s.config.Admin.CatalogModels(r.Context())
 	if err != nil {
 		writeAdminUpstreamError(w, err)
 		return
@@ -311,12 +368,17 @@ func (s *server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
-	var input AccountCreateInput
+	var input struct {
+		AccountCreateInput
+		View string `json:"view"`
+	}
 	if err := decodeJSON(r, &input); err != nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	account, err := s.config.Admin.CreateAccount(r.Context(), input)
+	view, release := s.loginView(r, input.View)
+	defer release()
+	account, err := s.config.Admin.CreateAccount(r.Context(), input.AccountCreateInput, view)
 	if err != nil {
 		writeAdminUpstreamError(w, err)
 		return
@@ -326,14 +388,14 @@ func (s *server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleImportCookieAccount(w http.ResponseWriter, r *http.Request) {
 	// JSON 转义后的文本可能大于原始 Cookie，解析前后分别限制大小。
-	r.Body = http.MaxBytesReader(w, r.Body, 8*aistudio.MaxCookieImportBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxCookieImportRequestBytes)
 	var input CookieImportInput
 	if err := decodeJSON(r, &input); err != nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", "Cookie 导入请求必须是有效且不超限的 JSON")
 		return
 	}
-	if strings.TrimSpace(input.Cookies) == "" || len(input.Cookies) > aistudio.MaxCookieImportBytes {
-		writeAdminError(w, http.StatusBadRequest, "invalid_request", "Cookie 文本不能为空且不能超过 1 MiB")
+	if strings.TrimSpace(input.CDP) == "" && strings.TrimSpace(input.Cookies) == "" || len(input.Cookies) > aistudio.MaxCookieImportBytes {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "需要 Cookie 文本或浏览器调试地址，Cookie 文本不能超过 1 MiB")
 		return
 	}
 	account, err := s.config.Admin.ImportCookieAccount(r.Context(), input)
@@ -367,6 +429,15 @@ func (s *server) handleImportChromeAccounts(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusCreated, map[string][]AdminAccount{"accounts": accounts})
 }
 
+func (s *server) handleCookieBrowsers(w http.ResponseWriter, r *http.Request) {
+	browsers, err := s.config.Admin.CookieBrowsers(r.Context())
+	if err != nil {
+		writeAdminUpstreamError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string][]CookieBrowser{"browsers": browsers})
+}
+
 func (s *server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	var input AccountInput
 	if err := decodeJSON(r, &input); err != nil {
@@ -390,7 +461,18 @@ func (s *server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
-	account, err := s.config.Admin.LoginAccount(r.Context(), r.PathValue("id"))
+	var input struct {
+		View string `json:"view"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeJSON(r, &input); err != nil {
+			writeAdminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+	}
+	view, release := s.loginView(r, input.View)
+	defer release()
+	account, err := s.config.Admin.LoginAccount(r.Context(), r.PathValue("id"), view)
 	if err != nil {
 		writeAdminUpstreamError(w, err)
 		return
@@ -398,13 +480,13 @@ func (s *server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]AdminAccount{"account": account})
 }
 
-func (s *server) handleVerifyAccount(w http.ResponseWriter, r *http.Request) {
-	account, err := s.config.Admin.VerifyAccount(r.Context(), r.PathValue("id"))
+func (s *server) handleRefreshAccount(w http.ResponseWriter, r *http.Request) {
+	refresh, err := s.config.Admin.RefreshAccount(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeAdminUpstreamError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]AdminAccount{"account": account})
+	writeJSON(w, http.StatusOK, refresh)
 }
 
 func (s *server) handleStartService(w http.ResponseWriter, r *http.Request) {
@@ -463,6 +545,14 @@ func (s *server) handleCooldowns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string][]AdminCooldown{"cooldowns": cooldowns})
+}
+
+func (s *server) handleClearCooldown(w http.ResponseWriter, r *http.Request) {
+	if err := s.config.Admin.ClearCooldown(r.Context(), r.PathValue("id"), r.PathValue("scope")); err != nil {
+		writeAdminUpstreamError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) handleRequests(w http.ResponseWriter, r *http.Request) {
