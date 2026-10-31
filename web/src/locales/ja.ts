@@ -13,9 +13,15 @@ export const messages: Record<TranslationKey, string> = {
     'Cookie ヘッダー、複数行テキスト、拡張機能 JSON、storage-state JSON、Netscape ファイルに対応。UTF-8 で最大 1 MiB。document.cookie には HttpOnly Cookie が含まれないため、完全なヘッダーをコピーしてください。',
   'accounts.cookieSecurity':
     'Cookie はログイン認証情報です。自分のアカウントのみ HTTPS または SSH トンネルでインポートし、共有やコミットをしないでください。実際のメールアドレスを検証し、既存アカウントは上書きしません。Chrome 更新認証情報や対話型 Drive 認証は取得しません。',
+  'accounts.cookieInstructions': 'Cookie の取得方法',
   'accounts.cookieFile': 'Cookie ファイルを読み込む',
   'accounts.cookieTooLarge': 'Cookie は 1 MiB（UTF-8）以下にしてください',
   'accounts.cookieImporting': '検証してインポート中',
+  'accounts.cookieMethod': '検証方法',
+  'accounts.cookieMethodBrowser': 'ブラウザーで検証（既定）',
+  'accounts.cookieMethodHttp': 'HTTP（ブラウザー不要の代替手段）',
+  'accounts.cookieMethodHttpHelp':
+    'HTTP による代替インポートでも実際のメールアドレスとモデル一覧を検証します。ヘッドレスブラウザーの起動やダウンロードは行いません。',
   'usage.requestedModel': 'リクエストモデル',
   'usage.responseModel': 'レスポンスモデル',
   'usage.loadBody': '必要に応じて本文を読み込む',
@@ -1155,6 +1161,7 @@ export const messages: Record<TranslationKey, string> = {
     'アカウントがリクエストを処理中です。しばらくしてからもう一度お試しください',
   'error.account_exists': 'アカウントはすでに存在します',
   'error.signed_out': 'Cookie で AI Studio にログインしていないか、期限切れです',
+  'error.cookie_import_http_failed': 'Cookie の HTTP 検証に失敗しました: {detail}',
   'error.account_required':
     '利用できるアカウントがありません。先にアカウントを追加するか有効にしてください',
   'error.request_not_found': 'リクエストが存在しないか、すでに終了しています',

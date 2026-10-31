@@ -7,3 +7,10 @@ internal/webui/dist/
 .env
 *.exe
 aistudio2api
+
+# Local Windows development server and credentials
+dev.bat
+dev.ps1
+web/vite.local.config.ts
+docs/windows-development.local.md
+cookie.json

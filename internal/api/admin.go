@@ -191,11 +191,13 @@ type AccountCreateInput struct {
 	Timezone string `json:"timezone"`
 }
 
-// CookieImportInput 接受 Cookie 文本或 CDP 地址；Label 仅兼容上游客户端，身份始终由验证结果决定。
+// CookieImportInput 接受 Cookie 文本或 CDP 地址；Method 默认为 browser，http 使用无浏览器验证。
+// Label 仅兼容上游客户端，身份始终由验证结果决定。
 type CookieImportInput struct {
 	Label    string `json:"label"`
 	Cookies  string `json:"cookies"`
 	CDP      string `json:"cdp"`
+	Method   string `json:"method,omitempty"`
 	Proxy    string `json:"proxy"`
 	Locale   string `json:"locale"`
 	Timezone string `json:"timezone"`

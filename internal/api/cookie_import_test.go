@@ -63,11 +63,11 @@ func TestCookieImportEndpoint(t *testing.T) {
 	if response.Code != http.StatusCreated || strings.Contains(response.Body.String(), "cookie-secret") {
 		t.Fatalf("import = %d %s", response.Code, response.Body)
 	}
-	if len(admin.inputs) != 1 || admin.inputs[0].Locale != "zh-CN" || admin.inputs[0].Cookies != "SAPISID=cookie-secret" || admin.inputs[0].Proxy == "" {
+	if len(admin.inputs) != 1 || admin.inputs[0].Locale != "zh-CN" || admin.inputs[0].Cookies != "SAPISID=cookie-secret" || admin.inputs[0].Proxy == "" || admin.inputs[0].Method != "" {
 		t.Fatal("input not forwarded")
 	}
 	large, _ := json.Marshal(CookieImportInput{Cookies: strings.Repeat("x", aistudio.MaxCookieImportBytes+1)})
-	for _, body := range []string{`{`, `{"cookies":[]}`, `{"cookies":""}`, `{"cookies":"x"} {}`, string(large), strings.Repeat(" ", 8*aistudio.MaxCookieImportBytes+1)} {
+	for _, body := range []string{`{`, `{"cookies":[]}`, `{"cookies":""}`, `{"cookies":"x","method":true}`, `{"cookies":"x"} {}`, string(large), strings.Repeat(" ", 8*aistudio.MaxCookieImportBytes+1)} {
 		if response := serve(path, body, session); response.Code != http.StatusBadRequest {
 			t.Fatalf("invalid request = %d", response.Code)
 		}
@@ -108,5 +108,18 @@ func TestCookieImportEndpoint(t *testing.T) {
 	}
 	if admin.browserCalls != 1 {
 		t.Fatal("unauthenticated browser discovery reached the service")
+	}
+	for _, method := range []string{"browser", "http"} {
+		body, err := json.Marshal(CookieImportInput{Cookies: "SAPISID=cookie-secret", Method: method})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := serve(path, string(body), session)
+		if response.Code != http.StatusCreated || admin.inputs[len(admin.inputs)-1].Method != method {
+			t.Fatalf("verification method %s was not forwarded: %d", method, response.Code)
+		}
+		if strings.Contains(response.Body.String(), "cookie-secret") {
+			t.Fatal("verification response leaked credentials")
+		}
 	}
 }

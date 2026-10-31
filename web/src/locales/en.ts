@@ -13,9 +13,15 @@ export const messages: Record<TranslationKey, string> = {
     'Accepts Cookie headers, multiline text, extension JSON, storage-state JSON and Netscape files, up to 1 MiB in UTF-8. Copy the full Cookie header; document.cookie omits HttpOnly cookies.',
   'accounts.cookieSecurity':
     'Cookies are login credentials. Import only your own accounts over HTTPS or an SSH tunnel; never share or commit cookies. Import verifies the real email without overwriting existing accounts, Chrome renewal credentials or interactive Drive authorization.',
+  'accounts.cookieInstructions': 'How to get cookies',
   'accounts.cookieFile': 'Read cookie file',
   'accounts.cookieTooLarge': 'Cookie content must not exceed 1 MiB (UTF-8)',
   'accounts.cookieImporting': 'Verifying and importing',
+  'accounts.cookieMethod': 'Verification method',
+  'accounts.cookieMethodBrowser': 'Browser verification (default)',
+  'accounts.cookieMethodHttp': 'HTTP (browser-free fallback)',
+  'accounts.cookieMethodHttpHelp':
+    'HTTP fallback import still verifies the real email and model catalog without starting or downloading a headless browser.',
   'usage.requestedModel': 'Requested model',
   'usage.responseModel': 'Response model',
   'usage.loadBody': 'Load bodies on demand',
@@ -1156,6 +1162,7 @@ export const messages: Record<TranslationKey, string> = {
   'error.account_busy': 'The account is handling a request. Try again shortly',
   'error.account_exists': 'The account already exists',
   'error.signed_out': 'The cookies are not signed in to AI Studio or have expired',
+  'error.cookie_import_http_failed': 'HTTP cookie verification failed: {detail}',
   'error.account_required': 'No usable account. Add or enable an account first',
   'error.request_not_found': 'The request does not exist or has finished',
   'error.admin_login_required': 'Sign in to the console first',

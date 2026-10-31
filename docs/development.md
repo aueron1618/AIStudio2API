@@ -14,7 +14,7 @@ AIStudio2API 使用 Go 直接调用 Google AI Studio 的 MakerSuite 私有协议
 
 Windows 用户解压发布包后双击 `aistudio2api.exe`。程序启动后自动打开管理页面，生成服务初始保持停止；账户登录、日志查看和生成服务启停均在该页面完成。
 
-前端或 Go 源码变化需要重建时，先结束当前管理进程，再按下面“源码首次启动”的命令构建并运行。
+发布式源码运行需要更新前端或 Go 代码时，先结束当前管理进程，再按下面“源码首次启动”的命令构建并运行。Windows 日常开发可使用下面的开发服务器，前端支持热更新。
 
 `start.bat` 仅作为 Windows launcher 保留：等待同目录现有可执行文件退出，原样传递 `setup`、`--cookie-file`、`--cdp`、`-open-ui=false` 等参数，不自动安装依赖或构建，不替代桌面窗口、托盘与更新器。
 
@@ -36,6 +36,115 @@ npm run build
 cd ..
 go run ./cmd/aistudio2api
 ```
+
+### Windows 开发服务器
+
+在项目根目录使用 `dev.bat`，由它调用 `dev.ps1`。需要 Windows PowerShell 5.1+、Go 1.27+，推荐 Node.js 24.15 与 npm 11；不需要管理员权限、Wails CLI 或 WebView2。脚本只为本次 PowerShell 进程设置 `ExecutionPolicy Bypass`，不修改系统执行策略，npm 使用 `npm.cmd`，避免 `npm.ps1` 被执行策略拦截。
+
+#### 首次启动
+
+在终端 A 中运行：
+
+```powershell
+.\dev.bat
+```
+
+脚本会在缺少 Vite+ 时运行 `npm ci`，构建前端到 `internal/webui/dist/`，然后编译并在前台运行命令行版 `data/dev/aistudio2api-dev.exe`。首次编译需要下载 Go/npm 依赖；任何安装或构建失败都会停止，不会继续运行旧二进制。
+
+后端输出就绪日志后，可以直接打开 `http://127.0.0.1:12048` 使用已构建的管理页面。需要修改 Vue、TypeScript 或样式时，在终端 B 中运行：
+
+```powershell
+.\dev.bat -Mode Frontend
+```
+
+前端热更新页面为 `http://127.0.0.1:5173`。两个命令均保持前台运行，不自动打开浏览器；前端命令不会另外启动后端。请始终使用 `127.0.0.1`，避免 `localhost` 的 IPv6 解析与后端 IPv4 监听不一致。
+
+| 服务 | 默认地址 | 用途 |
+| --- | --- | --- |
+| Go 后端 | `http://127.0.0.1:12048` | 管理 API、公开生成 API、已构建的管理页面 |
+| Vite 前端 | `http://127.0.0.1:5173` | 管理页面与 Playground 热更新，代理请求到 Go 后端 |
+| HTML 预览 | `http://127.0.0.1:12050` | Playground HTML 预览的独立来源，不是管理页面 |
+
+开发监听固定为本机回环地址，不向局域网或公网暴露。前端代理覆盖 `/api`（含 SSE 与登录 WebSocket）、`/health`、`/v1`、`/v1beta`、`/build/v1`、`/upload` 和 `/media`，保留原始 `Host`（`changeOrigin: false`）以满足管理接口的同源校验；不要为开发关闭这些安全检查。HTML 预览直接连接独立的预览端口，不经 Vite 代理。
+
+#### 配置与数据隔离
+
+首次启动只在不存在时从 `.env.example` 创建 `data/dev/.env`，不会覆盖已有开发配置，也不会读取或修改项目根目录的 `.env`、`auth/`、`runtime/` 或正式版可执行文件。开发进程的工作目录固定为 `data/dev/`，从其他目录调用脚本也一样。
+
+| 路径 | 内容 |
+| --- | --- |
+| `data/dev/.env` | 开发专用代理、API key、管理登录、WAA 等配置 |
+| `data/dev/auth/` | 开发账户及认证状态，首次运行为空，需自行导入测试账户 |
+| `data/dev/runtime/` | 开发日志、数据库、媒体、管理会话与按需下载的 Camoufox |
+| `data/dev/aistudio2api-dev.exe` | 可重复构建的开发二进制 |
+
+这些数据已由 `.gitignore` 中的 `/data/` 排除；不要提交或分享其中的 Cookie、密钥、日志或数据库。脚本通过进程环境固定 `LISTEN_ADDR`、`PREVIEW_LISTEN_ADDR` 与 `AISTUDIO_AUTH_STATES`，端口应使用下面的脚本参数修改，账户目录固定为 `data/dev/auth/`。其他进程环境变量仍优先于 `data/dev/.env`；测试文件配置前检查终端是否继承了同名变量。
+
+默认 `AUTO_START=false`、`WAA_BACKEND=go`，可不导入账户先开发管理界面；启动面板不需要下载 Camoufox。测试真实生成请求时，在开发面板添加自己的测试账户并点击“启动服务”，公开 API 的 Base URL 使用 `http://127.0.0.1:12048/v1`，API key 对应开发配置的 `PROXY_API_KEY`。浏览器登录、默认 Cookie 验证或启用 Camoufox 后端时才按需准备浏览器。
+
+目录隔离不等于同一 Google 账户可同时运行多个 Worker：`%LOCALAPPDATA%/AIStudio2API/runtime-leases/` 中的邮箱租约仍为本机共享，不要删除或绕过锁。与正式服务并行测试时使用不同的测试账户。
+
+#### 重启与参数
+
+修改前端源码后 Vite 自动热更新；修改 Go 源码后，在终端 A 按 `Ctrl+C`，再执行 `./dev.bat -SkipFrontendBuild` 重新编译后端。该选项要求至少成功构建过一次前端，适合已在使用 Vite 的场景；`12048` 上的内嵌页面仍为上次构建的版本，实时前端应访问 `5173`。
+
+依赖锁文件变化后，停止前端和后端，运行 `./dev.bat -Install`，按锁文件重新安装依赖并完整构建，再启动前端。需要验收内嵌前端时，同样不带 `-SkipFrontendBuild` 启动。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-Mode Backend` / `-Mode Frontend` | `Backend` | 分别启动 Go 后端或 Vite 热更新服务 |
+| `-BackendPort` | `12048` | 后端端口；启动前端时传入相同值，作为代理目标 |
+| `-PreviewPort` | `12050` | 后端 HTML 预览端口，必须与后端端口不同 |
+| `-FrontendPort` | `5173` | Vite 监听端口，占用时报错，不自动换端口 |
+| `-Install` | 关闭 | 强制执行 `npm ci`，更新本地安装的依赖 |
+| `-SkipFrontendBuild` | 关闭 | 后端启动时复用已有内嵌前端；Go 后端仍重新编译 |
+
+例如默认端口被占用或被 Windows 保留时：
+
+```powershell
+# 终端 A
+.\dev.bat -BackendPort 13048 -PreviewPort 13050
+
+# 终端 B，BackendPort 必须与终端 A 相同
+.\dev.bat -Mode Frontend -BackendPort 13048 -PreviewPort 13050 -FrontendPort 5174
+```
+
+停止时在两个终端分别按 `Ctrl+C`，关闭浏览器标签页不会结束服务。脚本不使用 `go run` 包裹服务、不启动托盘版，也不会按进程名称批量终止其他 Go、Node 或正式服务进程。不要在开发后端仍运行时重复构建同一个开发可执行文件。
+
+#### 开发测试
+
+在另一个 PowerShell 终端确认 HTTP 服务和代理可达，无需调用 Google 生成接口：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:12048/health
+Invoke-RestMethod http://127.0.0.1:5173/health
+```
+
+管理面板已启动不代表生成服务已启动；默认 `STOPPED` 是正常状态。Go 测试需要已生成的 `internal/webui/dist/`，首次执行 `./dev.bat` 完成构建后即可运行。以下命令均从项目根目录执行：
+
+```powershell
+go test -mod=readonly ./cmd/... ./internal/...
+go vet ./...
+npm.cmd --prefix web run typecheck
+npm.cmd --prefix web run test
+npm.cmd --prefix web run lint
+npm.cmd --prefix web run format:check
+npm.cmd --prefix web run build
+```
+
+仅检查相关包时可用 `go test -mod=readonly ./internal/config ./internal/api ./internal/app`；涉及浏览器、真实账户或上游联网的验收需另外在开发实例手动执行，不以 `/health` 成功代替。
+
+| 问题 | 排查方式 |
+| --- | --- |
+| 找不到 Go、Node 或 npm | 安装上表要求的版本并重新打开终端，用 `go version`、`node --version`、`npm.cmd --version` 确认 PATH |
+| 安装或构建失败 | 先处理终端的首个错误；依赖不完整时停止两个服务并使用 `-Install` 重装，不会修改锁文件 |
+| 端口不可用 | 停止已有开发实例或调整端口；用 `netsh interface ipv4 show excludedportrange protocol=tcp` 检查 Windows 保留端口，不必修改系统网络服务 |
+| 前端请求 502 / `ECONNREFUSED` | 后端未就绪或两个命令的 `-BackendPort` 不一致 |
+| 管理请求 401 / 403 | 检查开发配置的管理登录状态；通过同一个 `127.0.0.1` 页面登录，不要把请求改成跨域或启用 `changeOrigin: true` |
+| 开发面板没有正式账户 | 开发数据隔离的预期行为，在开发实例自行导入测试账户 |
+| 页面看不到最新前端代码 | 热更新访问 `5173`；访问 `12048` 时需不带 `-SkipFrontendBuild` 完整重建 |
+
+### 账户与普通启动
 
 管理页面“账户”页的“添加账户”菜单提供从 Chrome 导入、粘贴 Cookie、从指纹浏览器导入、浏览器登录和远程添加，也可以重新登录、立即刷新、编辑、启停和删除账户。浏览器登录会在隔离 Camoufox 中完成并自动读取邮箱。
 
@@ -73,7 +182,7 @@ go run ./cmd/aistudio2api
 - 文件导入：`--storage-state`
 - Cookie 导入：`--cookie`、`--cookie-file` 或 `--cdp`，账户邮箱按 Cookie 验证，支持请求头、多行文本、扩展/storage-state JSON 和 Netscape 文件，UTF-8 上限 1 MiB；只保留 google.com 及其子域的 Cookie，要求有效的 `SAPISID`、`__Secure-1PAPISID` 与 `__Secure-3PAPISID`。优先使用受保护的文件，避免 Cookie 写入命令行历史
 - `--cdp` 接受 `host:port`、HTTP 调试地址或浏览器级 `ws://` 地址，经 CDP `Storage.getCookies` 读取该浏览器的全部未分区 Cookie，再附加到第一个页面读取 `navigator.language` 与 Intl 时区，未给 `--locale`、`--timezone` 时作为账户的语言与时区
-- 管理页面支持粘贴或读文件；`POST /api/accounts/import/cookies` 接受 `{cookies?,cdp?,label?,proxy?,locale?,timezone?}`，整个 JSON 上限 8 MiB。导入在无头 Camoufox 中验证真实邮箱、保存轮换 Cookie 与指纹，201 返回 `{account}`，已有账户 409 不覆盖；上传的身份、origins 与 OAuth 扩展不被信任，`label` 不作为邮箱。前端在读文件和提交文本时再次校验 UTF-8 1 MiB，并关闭拼写检查、自动填写与自动大写；关闭或成功后清空输入
+- 管理页面支持粘贴或读文件，并可选择验证方式；`POST /api/accounts/import/cookies` 接受 `{cookies?,cdp?,method?,label?,proxy?,locale?,timezone?}`，整个 JSON 上限 8 MiB。`method` 默认为 `browser`，在无头 Camoufox 中验证真实邮箱、保存轮换 Cookie 与指纹；显式选择 `http` 为无浏览器后备方式，直接请求 AI Studio 页面识别真实邮箱并验证 `ListModels`，验证受 `INIT_TIMEOUT` 限制，不下载或启动 Camoufox，也不执行 WAA。两种方式均在验证成功后保存轮换 Cookie，201 返回 `{account}`，已有账户 409 不覆盖，验证失败不保存账户；上传的身份、origins 与 OAuth 扩展不被信任，`label` 不作为邮箱。前端在读文件和提交文本时再次校验 UTF-8 1 MiB，并关闭拼写检查、自动填写与自动大写；关闭或成功后清空输入并重置验证方式，失败时保留输入供切换方式重试
 - 登录、Chrome/Cookie 导入与账户编辑共用地区组件，提供常用 locale/IANA 时区候选并接受自定义值；`PUT /api/accounts/{id}` 的 `locale`、`timezone` 写入配置且运行时继续复用
 - “从指纹浏览器导入”从本机进程命令行找出带 `--remote-debugging-port` 的浏览器（端口为 0 时读取用户数据目录的 `DevToolsActivePort`），逐个读取 Cookie 并识别账户，列出可导入、已导入与未登录的浏览器
 - 隔离登录：`--login`
@@ -395,6 +504,8 @@ npm run build
 
 前端工具链为 Vite+：`vite.config.ts` 同时配置开发服务、构建、Oxlint 与 Oxfmt。
 
+直接运行 `npm run dev` 时，API 代理默认指向 `http://127.0.0.1:2048`；可以通过进程环境变量 `AISTUDIO_DEV_API_TARGET` 修改。Windows 开发脚本会按 `-BackendPort` 自动设置该变量，详见 [Windows 开发服务器](#windows-开发服务器)。
+
 - `npm run lint` 先运行 Oxlint，再运行 ESLint；ESLint 只负责 eslint-plugin-vue 的 `recommended` 模板规则，`<script lang="ts">` 由 `@typescript-eslint/parser` 解析，与 Oxlint 共有的规则由 eslint-plugin-oxlint 关闭，与格式化冲突的格式规则由 eslint-config-prettier 关闭
 - `npm run typecheck` 由 vue-tsc 检查脚本与模板类型
 - `npm run format:check` 由 Oxfmt 检查格式
@@ -473,7 +584,9 @@ GitHub Actions 对 `main`、`v*` 标签和 Pull Request 执行 npm ci、typechec
 发布流程：
 
 - 推送 `v*` 版本标签后自动创建 Release 并附上这些发布包；含 `-` 的标签发布为预发布版本
-- `main` 和 `v*` 标签均构建 linux/amd64 与 linux/arm64 镜像，前后端检查通过后在各架构原生 runner 构建并合并 manifest，使用 GitHub Actions 层缓存，推送到 `ghcr.io/${{ github.repository }}`（本 fork 为 `ghcr.io/aueron1618/aistudio2api`）。分支发布 `main`，标签发布 `vX.Y.Z` 与 `X.Y.Z`，稳定版同时更新 `latest`
+- `main` 和 `v*` 标签均构建 `browser` 与 `no-browser` 两种 linux/amd64、linux/arm64 镜像，共四个原生 runner 构建任务。Dockerfile 共用前端/Go 编译产物、证书与时区层；`no-browser` 跳过浏览器下载和 GUI 依赖，默认 target 仍为 `browser`
+- 两种版本的 GitHub Actions 层缓存、digest artifact 和 manifest 发布任务相互隔离，镜像推送到 `ghcr.io/${{ github.repository }}`（本 fork 为 `ghcr.io/aueron1618/aistudio2api`）。内置浏览器版保留 `main`、`vX.Y.Z`、`X.Y.Z`、稳定版 `latest`；无浏览器版对应 `main-no-browser`、`vX.Y.Z-no-browser`、`X.Y.Z-no-browser`、`latest-no-browser`。预发布不会更新 latest 标签
+- 每个架构在发布 digest artifact 前以断网、只读容器运行 CLI 帮助和镜像内容检查；内置版校验 Camoufox、字体与 Xvfb，无浏览器版确认未设置 `CAMOUFOX_PATH`、没有浏览器及 GTK/Xvfb/Mesa 包。每种 manifest 必须恰好收集本版本的两个架构 digest 才发布，避免混入另一种版本
 - 普通构建产物在 Actions 中保留七天，Release 附件长期保留
 
 管理端“版本”页的在线更新由 `internal/app/update.go` 实现：

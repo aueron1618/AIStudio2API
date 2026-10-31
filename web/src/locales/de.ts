@@ -13,9 +13,15 @@ export const messages: Record<TranslationKey, string> = {
     'Unterstützt Cookie-Header, mehrzeiligen Text, Erweiterungs-JSON, storage-state-JSON und Netscape-Dateien bis 1 MiB in UTF-8. Kopieren Sie den vollständigen Header; document.cookie lässt HttpOnly-Cookies aus.',
   'accounts.cookieSecurity':
     'Cookies sind Zugangsdaten. Importieren Sie nur eigene Konten über HTTPS oder einen SSH-Tunnel, ohne Cookies zu teilen oder zu committen. Die echte E-Mail wird geprüft; vorhandene Konten werden nicht überschrieben. Chrome-Erneuerungsdaten und interaktive Drive-Berechtigungen werden nicht übernommen.',
+  'accounts.cookieInstructions': 'Cookies exportieren',
   'accounts.cookieFile': 'Cookie-Datei lesen',
   'accounts.cookieTooLarge': 'Cookie-Inhalt darf 1 MiB (UTF-8) nicht überschreiten',
   'accounts.cookieImporting': 'Prüfen und importieren',
+  'accounts.cookieMethod': 'Prüfmethode',
+  'accounts.cookieMethodBrowser': 'Browserprüfung (Standard)',
+  'accounts.cookieMethodHttp': 'HTTP (Fallback ohne Browser)',
+  'accounts.cookieMethodHttpHelp':
+    'Der HTTP-Fallback prüft beim Import die echte E-Mail-Adresse und den Modellkatalog, ohne einen Headless-Browser zu starten oder herunterzuladen.',
   'usage.requestedModel': 'Angefordertes Modell',
   'usage.responseModel': 'Antwortmodell',
   'usage.loadBody': 'Inhalte bei Bedarf laden',
@@ -1184,6 +1190,7 @@ export const messages: Record<TranslationKey, string> = {
     'Das Konto bearbeitet gerade eine Anfrage. Versuchen Sie es gleich noch einmal',
   'error.account_exists': 'Das Konto existiert bereits',
   'error.signed_out': 'Die Cookies sind nicht bei AI Studio angemeldet oder abgelaufen',
+  'error.cookie_import_http_failed': 'HTTP-Prüfung der Cookies fehlgeschlagen: {detail}',
   'error.account_required':
     'Kein nutzbares Konto. Fügen Sie zuerst ein Konto hinzu oder aktivieren Sie eines',
   'error.request_not_found': 'Die Anfrage existiert nicht oder ist bereits beendet',

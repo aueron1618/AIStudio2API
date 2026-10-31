@@ -17,8 +17,21 @@ COPY --from=web /src/internal/webui/dist internal/webui/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -mod=readonly -trimpath \
     -ldflags="-s -w -X $(go list -m)/internal/app.version=${VERSION}" -o /out/aistudio2api ./cmd/aistudio2api
 
+# Shared runtime settings, certificates and timezone data for both variants.
+FROM debian:bookworm-slim AS runtime-base
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /data
+ENV LISTEN_ADDR=0.0.0.0:2048 \
+    PREVIEW_LISTEN_ADDR=0.0.0.0:2050
+EXPOSE 2048 2050
+CMD ["aistudio2api", "-open-ui=false"]
+
+FROM runtime-base AS no-browser
+COPY --from=build /out/aistudio2api /usr/local/bin/aistudio2api
+
 # Download on the build platform; select the browser archive for the target platform.
-FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS browser
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS browser-download
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
@@ -46,18 +59,13 @@ RUN set -eu; \
     rm -rf /opt/camoufox/fonts/macos /opt/camoufox/fontconfig/macos; \
     rm /tmp/camoufox.zip /tmp/camoufox-download.go
 
-FROM debian:bookworm-slim
+# Keep the browser-enabled image as the default docker build target.
+FROM runtime-base AS browser
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates tzdata \
     libgtk-3-0 libasound2 libnss3 libdbus-glib-1-2 libxtst6 libxrandr2 libgbm1 libxkbcommon0 \
     libpango-1.0-0 libcairo2 libxcomposite1 libxdamage1 libxfixes3 libx11-xcb1 \
     xvfb libfontconfig1 libegl1 libgl1 libgl1-mesa-dri libglx-mesa0 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/aistudio2api /usr/local/bin/aistudio2api
-COPY --from=browser /opt/camoufox /opt/camoufox
-WORKDIR /data
-ENV LISTEN_ADDR=0.0.0.0:2048 \
-    PREVIEW_LISTEN_ADDR=0.0.0.0:2050 \
-    CAMOUFOX_PATH=/opt/camoufox/camoufox-bin
-EXPOSE 2048 2050
-CMD ["aistudio2api", "-open-ui=false"]
+COPY --from=browser-download /opt/camoufox /opt/camoufox
+ENV CAMOUFOX_PATH=/opt/camoufox/camoufox-bin

@@ -13,9 +13,15 @@ export const messages: Record<TranslationKey, string> = {
     'Cookie 헤더, 여러 줄 텍스트, 확장 프로그램 JSON, storage-state JSON 및 Netscape 파일을 지원합니다. UTF-8 기준 최대 1 MiB입니다. document.cookie는 HttpOnly 쿠키를 누락하므로 전체 헤더를 복사하세요.',
   'accounts.cookieSecurity':
     '쿠키는 로그인 자격 증명입니다. HTTPS 또는 SSH 터널로 자신의 계정만 가져오고 공유하거나 커밋하지 마세요. 실제 이메일을 검증하며 기존 계정을 덮어쓰지 않습니다. Chrome 갱신 정보나 대화형 Drive 권한은 가져오지 않습니다.',
+  'accounts.cookieInstructions': 'Cookie 가져오는 방법',
   'accounts.cookieFile': '쿠키 파일 읽기',
   'accounts.cookieTooLarge': '쿠키 내용은 1 MiB(UTF-8)를 초과할 수 없습니다',
   'accounts.cookieImporting': '검증 및 가져오는 중',
+  'accounts.cookieMethod': '검증 방식',
+  'accounts.cookieMethodBrowser': '브라우저 검증(기본값)',
+  'accounts.cookieMethodHttp': 'HTTP(브라우저 없는 대체 방식)',
+  'accounts.cookieMethodHttpHelp':
+    'HTTP 대체 가져오기도 실제 이메일과 모델 목록을 검증하며, 헤드리스 브라우저를 실행하거나 다운로드하지 않습니다.',
   'usage.requestedModel': '요청 모델',
   'usage.responseModel': '응답 모델',
   'usage.loadBody': '필요할 때 본문 불러오기',
@@ -1144,6 +1150,7 @@ export const messages: Record<TranslationKey, string> = {
   'error.account_busy': '계정이 요청을 처리하는 중입니다. 잠시 후 다시 시도하세요',
   'error.account_exists': '이미 있는 계정입니다',
   'error.signed_out': 'Cookie가 AI Studio에 로그인되어 있지 않거나 만료되었습니다',
+  'error.cookie_import_http_failed': '쿠키 HTTP 검증에 실패했습니다: {detail}',
   'error.account_required':
     '사용할 수 있는 계정이 없습니다. 먼저 계정을 추가하거나 사용 설정하세요',
   'error.request_not_found': '요청이 없거나 이미 끝났습니다',

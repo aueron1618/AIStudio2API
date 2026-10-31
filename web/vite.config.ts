@@ -4,7 +4,7 @@ import { defineConfig } from 'vite-plus'
 import { compression, defineAlgorithm } from 'vite-plugin-compression2'
 import { fileURLToPath, URL } from 'node:url'
 
-const serviceTarget = 'http://127.0.0.1:2048'
+const serviceTarget = process.env.AISTUDIO_DEV_API_TARGET || 'http://127.0.0.1:2048'
 
 // defineConfig 定义前端构建、本地联调、静态检查与格式化入口
 export default defineConfig({
@@ -208,7 +208,7 @@ export default defineConfig({
   },
   server: {
     proxy: Object.fromEntries(
-      ['/api', '/health', '/v1', '/v1beta', '/build/v1'].map((path) => [
+      ['/api', '/health', '/v1', '/v1beta', '/build/v1', '/upload', '/media'].map((path) => [
         path,
         { target: serviceTarget, changeOrigin: false, ws: true },
       ]),
