@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { vTooltip } from '@/playground/ui/tooltip'
+import { showTooltip } from '@/tooltip'
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
@@ -13,6 +13,7 @@ import CodeDialog from '../CodeDialog.vue'
 import MarkdownView from '../MarkdownView.vue'
 import ThoughtChunk from '../ThoughtChunk.vue'
 import { Capability, hasCode, modelMatches } from '../catalog'
+import { copyToClipboard } from '../clipboard'
 import LiveSettings from './LiveSettings.vue'
 import MediaLayout from './MediaLayout.vue'
 import MediaPromptBox from './MediaPromptBox.vue'
@@ -30,7 +31,7 @@ import {
 } from './live'
 
 const route = useRoute()
-const { t } = useI18n()
+const { t, logText } = useI18n()
 const store = useConsole()
 const live = useLive()
 const { state, currentModel, variant } = live
@@ -40,48 +41,32 @@ const preview = ref<HTMLVideoElement>()
 const panels = ref<HTMLElement>()
 const toolsOpen = ref(false)
 
-// zeroConfig 是官网 gemini-live 空态：对话类 Gemini Live 模型显示示例，翻译与转录模型显示 Try the Live API
-const zeroConfig = {
-  description:
-    'Low-latency bidirectional voice, camera, and screen-sharing conversations with tool use.',
+// zeroConfig 是当前界面语言的官网 gemini-live 空态：对话类 Gemini Live 模型显示示例，翻译与转录模型显示 Try the Live API
+const zeroConfig = computed(() => ({
+  description: t('zero.live.subtitle'),
   starters: [
-    {
-      title: 'Practice a mock system-design interview',
-      prompt:
-        'Act as a staff engineer conducting a 15-minute system design interview. Ask me to design a distributed rate limiter and probe my tradeoffs.',
-    },
-    {
-      title: 'Brainstorm architecture while I whiteboard',
-      prompt:
-        'Watch my screen as I sketch a service architecture diagram and suggest failure modes, caching layers, and schema improvements in real time.',
-    },
-    {
-      title: 'Practice ordering in conversational Japanese',
-      prompt:
-        'Play a friendly izakaya chef in Tokyo. Speak natural polite Japanese, ask one question at a time, and gently recaps any grammar slips.',
-    },
+    { title: t('zero.live.starter1'), prompt: t('zero.live.starter1Prompt') },
+    { title: t('zero.live.starter2'), prompt: t('zero.live.starter2Prompt') },
+    { title: t('zero.live.starter3'), prompt: t('zero.live.starter3Prompt') },
   ] satisfies Starter[],
   examples: [
     {
-      title: 'Co-Drawing Canvas',
-      prompt:
-        'Collaborate with me on a shared sketch canvas in real time—watch what I draw and take turns adding details to the scene.',
+      title: t('zero.live.example1'),
+      prompt: t('zero.live.example1Prompt'),
       preview: 'https://www.gstatic.com/aistudio/starter-apps/thumbnails/codrawing.png',
     },
     {
-      title: 'Screen-Share Tutor',
-      prompt:
-        'Look at my screen with me. Walk me through what this interface shows and answer my questions step by step.',
+      title: t('zero.live.example2'),
+      prompt: t('zero.live.example2Prompt'),
       preview: 'https://www.gstatic.com/aistudio/zero-state/live_screen_share_tutor.webp',
     },
     {
-      title: 'Live Hardware Debug',
-      prompt:
-        'Look at this breadboard and microcontroller wiring through my camera and help me verify the pin connections and resistor values.',
+      title: t('zero.live.example3'),
+      prompt: t('zero.live.example3Prompt'),
       preview: 'https://www.gstatic.com/aistudio/zero-state/live_hardware_debug.webp',
     },
   ] satisfies Example[],
-}
+}))
 
 // liveModels 是目录中的 Live 模型，顺序沿用目录
 const liveModels = computed(() =>
@@ -156,19 +141,37 @@ const handset = useMediaQuery('(max-width: 768px)')
 const statusText = computed(() => {
   if (state.status === 'connecting') return t('pg.streamConnecting')
   if (state.status === 'live') return t('pg.streamLive')
-  return state.error || t('pg.streamStart')
+  return state.error ? logText(state.error) : t('pg.streamStart')
 })
 // canRun 表示输入框有文字且会话不在连接中
 const canRun = computed(() => state.draft.trim() !== '' && state.status !== 'connecting')
 
-// sourceTip 返回实时输入按钮的提示
+// failed 表示一路实时输入打不开过且未在采集
+function failed(source: LiveSource): boolean {
+  return state.denied.includes(source) && !state.sources.includes(source)
+}
+
+// sourceTip 返回实时输入按钮的提示，与官网一致麦克风与摄像头打不开时显示失败说明
 function sourceTip(source: LiveSource): string {
   const active = state.sources.includes(source)
-  if (source === 'mic')
-    return state.sources.includes('tab') ? t('pg.stopTabForMic') : t('pg.microphone')
-  if (source === 'camera') return active ? t('pg.stopCamera') : t('pg.startCamera')
+  if (source === 'mic') {
+    if (state.sources.includes('tab')) return t('pg.stopTabForMic')
+    return failed('mic') ? t('pg.microphoneOpenFailed') : t('pg.microphone')
+  }
+  if (source === 'camera') {
+    if (active) return t('pg.stopCamera')
+    return failed('camera') ? t('pg.cameraOpenFailed') : t('pg.startCamera')
+  }
   if (source === 'tab') return active ? t('pg.stopTabAudio') : t('pg.shareAudioFromTab')
   return active ? t('pg.stopScreen') : t('pg.startScreen')
+}
+
+// clickSource 打开或关闭输入框旁的一路实时输入，麦克风打不开后不再打开；打不开且指针仍在按钮上时显示提示中的失败说明
+async function clickSource(source: LiveSource, event: MouseEvent): Promise<void> {
+  const button = event.currentTarget as HTMLElement
+  if (!(source === 'mic' && failed('mic'))) await live.toggleSource(source)
+  await nextTick()
+  if (failed(source) && button.matches(':hover')) showTooltip(button)
 }
 
 // videoLocked 与官网一致，摄像头与屏幕共享其中一路打开时另一路按钮不可用
@@ -202,16 +205,6 @@ function streamingPart(turn: LiveTurn, index: number): boolean {
   return state.status === 'live' && turn === state.turns.at(-1) && index === turn.parts.length - 1
 }
 
-// copyResponse 复制函数调用的响应
-async function copyResponse(part: Extract<LivePart, { type: 'call' }>): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(part.response)
-    store.showNotice(t('pg.copied'), 'success')
-  } catch (error) {
-    store.showNotice(error instanceof Error ? error.message : String(error), 'error')
-  }
-}
-
 // responseTip 是发送响应按钮的提示
 function responseTip(part: Extract<LivePart, { type: 'call' }>): string {
   if (part.cancelled) return t('pg.callCancelled')
@@ -242,8 +235,7 @@ let videoDrag: VideoDrag | undefined
 // startVideoDrag 开始拖动或缩放视频浮窗
 function startVideoDrag(event: PointerEvent, handle: VideoDrag['handle']): void {
   const target = event.currentTarget as HTMLElement
-  const container = target.closest<HTMLElement>('.video-container')
-  if (container === null) return
+  const container = target.closest<HTMLElement>('.video-container')!
   target.setPointerCapture(event.pointerId)
   videoDrag = {
     handle,
@@ -448,11 +440,13 @@ onUnmounted(() => live.disconnect())
                               ms-button
                               class="ms-button-borderless ms-button-icon"
                               :aria-label="t('pg.copyToClipboard')"
-                              @click="copyResponse(part)"
+                              @click="copyToClipboard(part.response)"
                             >
                               <UiIcon name="copy" :size="18" />
                             </button>
-                            <span v-if="part.error" class="call-error">{{ part.error }}</span>
+                            <span v-if="part.error" class="call-error">{{
+                              logText(part.error)
+                            }}</span>
                           </div>
                           <button
                             v-tooltip.right="responseTip(part)"
@@ -636,7 +630,8 @@ onUnmounted(() => live.disconnect())
                       :class="{ 'ms-button-active': state.sources.includes('mic') }"
                       :aria-label="button.label"
                       :aria-pressed="state.sources.includes('mic')"
-                      @click="live.toggleSource('mic')"
+                      :aria-disabled="failed('mic')"
+                      @click="clickSource('mic', $event)"
                     >
                       <UiIcon :name="button.icon" :size="18" />
                     </button>
@@ -651,7 +646,7 @@ onUnmounted(() => live.disconnect())
                     :aria-label="button.label"
                     :aria-pressed="state.sources.includes(button.source)"
                     :aria-disabled="videoLocked(button.source)"
-                    @click="videoLocked(button.source) || live.toggleSource(button.source)"
+                    @click="videoLocked(button.source) || clickSource(button.source, $event)"
                   >
                     <UiIcon :name="button.icon" :size="18" />
                   </button>
@@ -678,7 +673,8 @@ onUnmounted(() => live.disconnect())
                     :class="{ 'ms-button-active': state.sources.includes('mic') }"
                     :aria-label="button.label"
                     :aria-pressed="state.sources.includes('mic')"
-                    @click="live.toggleSource('mic')"
+                    :aria-disabled="failed('mic')"
+                    @click="clickSource('mic', $event)"
                   >
                     <UiIcon :name="button.icon" :size="18" />
                   </button>
@@ -693,7 +689,7 @@ onUnmounted(() => live.disconnect())
                   :aria-label="button.label"
                   :aria-pressed="state.sources.includes(button.source)"
                   :aria-disabled="videoLocked(button.source)"
-                  @click="videoLocked(button.source) || live.toggleSource(button.source)"
+                  @click="videoLocked(button.source) || clickSource(button.source, $event)"
                 >
                   <UiIcon :name="button.icon" :size="18" />
                 </button>

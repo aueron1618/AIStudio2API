@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { vTooltip } from '@/playground/ui/tooltip'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   DropdownMenuContent,
@@ -24,15 +23,17 @@ import SampleMediaDialog, { type SampleSelection } from './SampleMediaDialog.vue
 import { driveNames, type DriveFile } from './drive'
 import { readImage } from './media/api'
 import { useCompare, usePlayground } from './session'
-import { audioInput } from './shell/preferences'
+import { useAudioRecording } from './recording'
 import { useMediaQuery } from './media-query'
+import { dataURL } from './protocols'
+import { failureText } from './request'
 import RunKeyHint from './RunKeyHint.vue'
 import { appends, submits, useRunTooltip } from './run-keys'
 import { useTools } from './tools'
 import type { Part } from './types'
 
 const { t, tokenLabel } = useI18n()
-const { showNotice, config } = useConsole()
+const { showNotice } = useConsole()
 const { session, countAttachment } = usePlayground()
 const { panes, comparing, running, submitAll, appendAll, stopAll } = useCompare()
 const { tools, setTool } = useTools()
@@ -43,7 +44,7 @@ const dragging = ref(false)
 const youtubeOpen = ref(false)
 const driveOpen = ref(false)
 const sampleOpen = ref(false)
-// preparing 为正在下载的示例图片数，下载完成前与官网一样不能运行
+// preparing 为正在读取的附件与正在下载的示例图片数，完成前与官网一样不能运行
 const preparing = ref(0)
 
 // addDriveFile 把从 Drive 选中的已上传文件作为文件引用加入附件
@@ -71,7 +72,7 @@ async function addSample(selection: SampleSelection): Promise<void> {
     if (!response.ok) throw new Error(`${response.status} ${selection.image}`)
     session.attachments.push({ inlineData: await readImage(await response.blob()) })
   } catch (error) {
-    showNotice(error instanceof Error ? error.message : String(error), 'error')
+    showNotice(failureText(error, t('pg.sampleImageFailed'), t('pg.sampleImageFailed')), 'error')
   } finally {
     preparing.value--
   }
@@ -79,11 +80,26 @@ async function addSample(selection: SampleSelection): Promise<void> {
 
 const youtubeURL = ref('')
 const camera = ref<InstanceType<typeof CameraDialog>>()
+const recordingMode = ref<'attach' | 'transcribe'>('transcribe')
+const {
+  recording: audioRecording,
+  opening,
+  transcribing,
+  start: startAudio,
+  stop: stopRecording,
+  transcribe,
+} = useAudioRecording(async (audio) => {
+  window.clearInterval(timer)
+  if (recordingMode.value === 'attach')
+    session.attachments.push(await readFile(audio, audio.type.split(';')[0]))
+  else {
+    const text = await transcribe(audio)
+    if (text !== '') session.draft = session.draft === '' ? text : `${session.draft} ${text}`
+  }
+})
 // recording 表示正在录音：attach 为插入音频附件，transcribe 为语音转文字
-const recording = ref<'' | 'attach' | 'transcribe'>('')
-const transcribing = ref(false)
+const recording = computed(() => (audioRecording.value ? recordingMode.value : ''))
 const elapsed = ref('')
-let recorder: MediaRecorder | undefined
 let timer = 0
 
 // enabledTools 是已开启并显示为标签的工具
@@ -107,8 +123,8 @@ let placeholderHeight: number | undefined
 
 // resize 与官网 cdkTextareaAutosize 一致：输入框高度取内容与占位文字中较高者，超过 210 px 后在框内滚动
 function resize(): void {
-  const element = textarea.value
-  if (element === undefined) return
+  const element = textarea.value!
+  if (element.clientHeight >= 210 && element.scrollHeight > element.clientHeight) return
   element.style.height = 'auto'
   if (placeholderHeight === undefined) {
     const { value, selectionStart, selectionEnd } = element
@@ -127,7 +143,7 @@ function remeasure(): void {
 }
 
 let resizeTimer = 0
-// onWindowResize 与官网一样在窗口尺寸变化 16 ms 后重新测量，此时布局已按新尺寸更新
+// onWindowResize 与官网一样在窗口尺寸变化 16 ms 后重新测量
 function onWindowResize(): void {
   if (resizeTimer !== 0) return
   resizeTimer = window.setTimeout(() => {
@@ -147,7 +163,7 @@ onMounted(() => {
 
 // focus 聚焦输入框
 function focus(): void {
-  textarea.value?.focus()
+  textarea.value!.focus()
 }
 
 // submit 发送输入或停止生成，对比模式下同时发往每个窗格
@@ -165,7 +181,7 @@ const runTooltip = useRunTooltip(() => running.value)
 // onKeydown 与官网 ms-prompt-box 一致：Escape 失焦，生成中或不能运行时快捷键不起作用，否则按提交键运行或追加
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
-    textarea.value?.blur()
+    textarea.value!.blur()
     return
   }
   if (running.value || !canRun.value) return
@@ -186,7 +202,7 @@ function readFile(file: Blob, mimeType = file.type || 'application/octet-stream'
       const result = String(reader.result)
       resolve({ inlineData: { mimeType, data: result.slice(result.indexOf(',') + 1) } })
     }
-    reader.onerror = () => reject(reader.error ?? new Error('read failed'))
+    reader.onerror = () => reject(reader.error)
     reader.readAsDataURL(file)
   })
 }
@@ -197,40 +213,99 @@ function documentPart(part: Part): boolean {
   return mime !== undefined && !/^(image|audio|video)\//.test(mime)
 }
 
-// addFiles 把文件加入待发送附件，文件附件随后统计 token 数
+// addFiles 把文件加入待发送附件，读取期间显示占位，文件附件随后统计 token 数
 async function addFiles(files: Iterable<File>): Promise<void> {
-  for (const file of files) {
-    const part = await readFile(file)
-    part.fileName = file.name
-    session.attachments.push(part)
-    if (documentPart(part)) void countAttachment(session.attachments.at(-1)!)
+  const list = [...files]
+  preparing.value += list.length
+  for (const file of list) {
+    try {
+      const part = await readFile(file)
+      part.fileName = file.name
+      session.attachments.push(part)
+      if (documentPart(part)) void countAttachment(session.attachments.at(-1)!)
+    } finally {
+      preparing.value--
+    }
   }
 }
 
 // onFileChange 读取文件选择框中的文件
 async function onFileChange(): Promise<void> {
-  await addFiles(fileInput.value?.files ?? [])
-  if (fileInput.value) fileInput.value.value = ''
+  await addFiles(fileInput.value!.files!)
+  fileInput.value!.value = ''
 }
 
 // onDrop 读取拖放到输入框的文件
 async function onDrop(event: DragEvent): Promise<void> {
   dragging.value = false
-  await addFiles(event.dataTransfer?.files ?? [])
+  await addFiles(event.dataTransfer!.files)
 }
 
-// onPaste 读取粘贴的文件
+// largePaste 是官网 msPasteLargeTextAsFile 的长文字数：粘贴的纯文本超过它时作为文本附件加入
+const largePaste = 25000
+
+// pasteName 与官网一致以粘贴时刻的 en-US 日期命名长文附件，如 Paste October 28, 2026 - 10:27PM
+function pasteName(date = new Date()): string {
+  const month = date.toLocaleString('en-US', { month: 'long' })
+  const day = String(date.getDate()).padStart(2, '0')
+  const minute = String(date.getMinutes()).padStart(2, '0')
+  const meridiem = date.getHours() < 12 ? 'AM' : 'PM'
+  return `Paste ${month} ${day}, ${date.getFullYear()} - ${date.getHours() % 12 || 12}:${minute}${meridiem}`
+}
+
+// onPaste 读取粘贴的文件；与官网一致，超过 largePaste 字的纯文本作为文本附件加入，不写入输入框
 async function onPaste(event: ClipboardEvent): Promise<void> {
-  const files = event.clipboardData?.files
-  if (files && files.length > 0) {
+  const { files } = event.clipboardData!
+  if (files.length > 0) {
     event.preventDefault()
     await addFiles(files)
+    return
+  }
+  const text = event.clipboardData!.getData('text/plain')
+  if (text.length > largePaste) {
+    event.preventDefault()
+    await addFiles([new File([text], pasteName(), { type: 'text/plain' })])
   }
 }
 
-// attachmentURL 返回图片附件的预览地址
-function attachmentURL(part: Part): string {
-  return `data:${part.inlineData?.mimeType};base64,${part.inlineData?.data}`
+// textPart 表示片段是可以转回输入框文字的文本附件
+function textPart(part: Part): boolean {
+  return part.inlineData?.mimeType.startsWith('text/') ?? false
+}
+
+// attachmentText 返回文本附件的全文
+async function attachmentText(part: Part): Promise<string> {
+  return (await fetch(dataURL(part.inlineData!))).text()
+}
+
+// inlineAttachment 与官网 Inline media 一致：文本附件的内容接到输入框文字之后，两段之间空一行，并移除该附件
+async function inlineAttachment(index: number): Promise<void> {
+  const part = session.attachments[index]!
+  const text = await attachmentText(part)
+  const at = session.attachments.indexOf(part)
+  if (at === -1) return
+  session.attachments.splice(at, 1)
+  session.draft = [session.draft, text].filter(Boolean).join('\n\n')
+}
+
+// viewed 是对话框中预览的文本附件的名称与全文
+const viewed = ref({ name: '', text: '' })
+const viewOpen = ref(false)
+
+// viewAttachment 与官网一致点击文本附件的缩略图时在对话框中显示全文
+async function viewAttachment(part: Part): Promise<void> {
+  viewed.value = { name: part.fileName ?? '', text: await attachmentText(part) }
+  viewOpen.value = true
+}
+
+// downloadViewed 把预览中的文本附件存为文件
+function downloadViewed(): void {
+  const url = URL.createObjectURL(new Blob([viewed.value.text], { type: 'text/plain' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = viewed.value.name
+  link.click()
+  URL.revokeObjectURL(url)
 }
 
 // tick 更新录音计时
@@ -241,59 +316,16 @@ function tick(started: number): void {
 
 // startRecording 开始录音：attach 结束后作为音频附件，transcribe 结束后转写为文字
 async function startRecording(mode: 'attach' | 'transcribe'): Promise<void> {
+  if (opening.value) return
   if (recording.value !== '') {
-    recorder?.stop()
+    stopRecording()
     return
   }
-  let stream: MediaStream
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: audioInput() })
-  } catch {
-    showNotice(t('pg.microphoneDenied'), 'error')
-    return
-  }
-  const chunks: Blob[] = []
-  recorder = new MediaRecorder(stream)
-  recorder.ondataavailable = (event) => chunks.push(event.data)
-  recorder.onstop = async () => {
-    stream.getTracks().forEach((track) => track.stop())
-    window.clearInterval(timer)
-    const kind = recording.value
-    recording.value = ''
-    const audio = new Blob(chunks, { type: recorder?.mimeType || 'audio/webm' })
-    if (kind === 'attach') session.attachments.push(await readFile(audio, audio.type.split(';')[0]))
-    else await transcribe(audio)
-  }
-  recording.value = mode
+  if (!(await startAudio())) return
+  recordingMode.value = mode
   const started = Date.now()
   tick(started)
   timer = window.setInterval(() => tick(started), 500)
-  recorder.start()
-}
-
-// transcribe 用本服务的转写接口把录音转为文字并追加到输入框
-async function transcribe(audio: Blob): Promise<void> {
-  transcribing.value = true
-  try {
-    const form = new FormData()
-    form.append('file', audio, 'speech.webm')
-    const headers = new Headers()
-    const key = (config.value?.proxy_api_key ?? '').split(',')[0]?.trim() ?? ''
-    if (key !== '') headers.set('Authorization', `Bearer ${key}`)
-    const response = await fetch('/v1/audio/transcriptions', {
-      method: 'POST',
-      headers,
-      body: form,
-    })
-    const value = (await response.json()) as { text?: string; error?: { message?: string } }
-    if (!response.ok) throw new Error(value.error?.message ?? response.statusText)
-    const text = value.text?.trim() ?? ''
-    if (text !== '') session.draft = session.draft === '' ? text : `${session.draft} ${text}`
-  } catch (error) {
-    showNotice(error instanceof Error ? error.message : String(error), 'error')
-  } finally {
-    transcribing.value = false
-  }
 }
 
 // addPhoto 把相机拍下的照片加入附件
@@ -314,7 +346,6 @@ function addYouTube(): void {
 }
 
 onUnmounted(() => {
-  if (recorder?.state === 'recording') recorder.stop()
   window.clearInterval(timer)
   window.removeEventListener('resize', onWindowResize)
   window.clearTimeout(resizeTimer)
@@ -359,12 +390,21 @@ defineExpose({ focus })
         >
           <img
             v-if="part.inlineData?.mimeType.startsWith('image/')"
-            :src="attachmentURL(part)"
+            :src="dataURL(part.inlineData)"
             alt=""
             class="attachment-image"
           />
           <template v-else-if="documentPart(part)">
-            <span class="document-preview"><UiIcon name="document" :size="24" /></span>
+            <button
+              v-if="textPart(part)"
+              type="button"
+              class="document-preview document-view"
+              :aria-label="t('pg.preview')"
+              @click="viewAttachment(part)"
+            >
+              <UiIcon name="document" :size="24" />
+            </button>
+            <span v-else class="document-preview"><UiIcon name="document" :size="24" /></span>
             <span class="document-content">
               <span class="document-name" :title="part.fileName">{{
                 part.fileName ?? part.inlineData?.mimeType
@@ -393,16 +433,30 @@ defineExpose({ focus })
                 : part.inlineData?.mimeType
             }}</span>
           </span>
-          <button
-            type="button"
-            ms-button
-            class="attachment-remove ms-button-borderless ms-button-icon"
-            :class="{ 'ms-button-small': !documentPart(part) }"
-            :aria-label="t('pg.removeAttachment')"
-            @click="session.attachments.splice(index, 1)"
-          >
-            <UiIcon name="close" :size="documentPart(part) ? 20 : 16" />
-          </button>
+          <span class="attachment-actions">
+            <button
+              v-if="textPart(part)"
+              v-tooltip.below="t('pg.inlineAttachment')"
+              type="button"
+              ms-button
+              class="attachment-inline ms-button-borderless ms-button-icon"
+              :aria-label="t('pg.inlineAttachment')"
+              @click="inlineAttachment(index)"
+            >
+              <UiIcon name="inlineText" :size="20" />
+            </button>
+            <button
+              v-tooltip.below="t('pg.removeAttachment')"
+              type="button"
+              ms-button
+              class="attachment-remove ms-button-borderless ms-button-icon"
+              :class="{ 'ms-button-small': !documentPart(part) }"
+              :aria-label="t('pg.removeAttachment')"
+              @click="session.attachments.splice(index, 1)"
+            >
+              <UiIcon name="close" :size="documentPart(part) ? 20 : 16" />
+            </button>
+          </span>
         </div>
         <div v-for="index in preparing" :key="`preparing-${index}`" class="attachment">
           <span class="attachment-file attachment-preparing">{{ t('common.loading') }}…</span>
@@ -511,7 +565,7 @@ defineExpose({ focus })
             class="stt-button ms-button-filter-chip"
             :class="{ recording: recording !== '' }"
             :aria-label="t('pg.speechToText')"
-            :aria-disabled="transcribing || recording === 'attach'"
+            :aria-disabled="transcribing || opening || recording === 'attach'"
             @click="!transcribing && recording !== 'attach' && startRecording('transcribe')"
           >
             <UiIcon
@@ -525,7 +579,7 @@ defineExpose({ focus })
             type="button"
             ms-button
             class="ms-button-primary"
-            @click="recorder?.stop()"
+            @click="stopRecording"
           >
             <UiIcon name="stop" :size="18" />
             {{ t('pg.stopRecording') }}
@@ -568,6 +622,21 @@ defineExpose({ focus })
           {{ t('pg.add') }}
         </button>
       </template>
+    </UiDialog>
+    <UiDialog v-model:open="viewOpen" :title="viewed.name" width="600px">
+      <template #header>
+        <button
+          v-tooltip.below="t('pg.download')"
+          type="button"
+          ms-button
+          class="ms-button-borderless ms-button-icon"
+          :aria-label="t('pg.download')"
+          @click="downloadViewed"
+        >
+          <UiIcon name="download" :size="20" />
+        </button>
+      </template>
+      <pre class="attachment-text" tabindex="0">{{ viewed.text }}</pre>
     </UiDialog>
     <CameraDialog ref="camera" @capture="addPhoto" />
     <DriveDialog v-model:open="driveOpen" @select="addDriveFile" />
@@ -653,6 +722,8 @@ defineExpose({ focus })
 
 .attachment-document {
   gap: 8px;
+  min-width: 180px;
+  max-width: 280px;
   height: 56px;
   padding: 8px 12px;
   border-radius: 12px;
@@ -667,6 +738,28 @@ defineExpose({ focus })
   height: 32px;
   border-radius: 4px;
   background-color: var(--color-v3-surface-container-highest);
+}
+
+.document-view {
+  padding: 0;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.attachment-actions {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.attachment-text {
+  max-height: calc(80dvh - 97px);
+  margin: 0;
+  overflow: auto;
+  color: var(--color-v3-text);
+  font-family: monospace;
+  font-size: 14px;
+  line-height: 20px;
 }
 
 .document-content {
@@ -850,10 +943,6 @@ defineExpose({ focus })
   min-width: 28px;
 }
 
-.spin {
-  animation: spin 0.66s linear infinite;
-}
-
 .tool-item {
   display: flex;
   align-items: center;
@@ -876,12 +965,6 @@ defineExpose({ focus })
   from {
     opacity: 0;
     transform: scale(0.9);
-  }
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(1turn);
   }
 }
 </style>

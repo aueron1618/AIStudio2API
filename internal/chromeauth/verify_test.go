@@ -53,11 +53,11 @@ func TestVerifyHTTPIdentityAndRotatedCookies(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: headers, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
 	})}
-	email, err := verifyChatPage(t.Context(), client, &state, "verification-test")
+	email, err := verifyChatPage(t.Context(), client, &state, "verification-test", 0)
 	if err != nil || email != "Real@Example.com" {
 		t.Fatalf("verified identity = %q, error = %v", email, err)
 	}
-	models, err := verifyModels(t.Context(), client, &state, http.Header{"X-Goog-Authuser": {"0"}})
+	models, err := verifyModels(t.Context(), client, &state, http.Header{"X-Goog-Authuser": {"0"}}, 0)
 	if err != nil || models != 1 || calls != 2 {
 		t.Fatalf("verified models = %d, calls = %d, error = %v", models, calls, err)
 	}
@@ -95,7 +95,7 @@ func TestVerifyHTTPRejectsMissingIdentity(t *testing.T) {
 					}, nil
 				}),
 			}
-			email, err := verifyChatPage(t.Context(), client, &state, "verification-test")
+			email, err := verifyChatPage(t.Context(), client, &state, "verification-test", 0)
 			if err == nil || email != "" || errors.Is(err, ErrSignedOut) != test.signedOut || calls != 1 {
 				t.Fatalf("invalid identity accepted: email=%q, error=%v", email, err)
 			}
@@ -126,7 +126,7 @@ func TestVerifyHTTPRejectsInvalidModelResponses(t *testing.T) {
 					Header: http.Header{"Content-Type": {test.contentType}},
 				}, nil
 			})}
-			if models, err := verifyModels(t.Context(), client, &state, make(http.Header)); err == nil || models != 0 {
+			if models, err := verifyModels(t.Context(), client, &state, make(http.Header), 0); err == nil || models != 0 {
 				t.Fatalf("invalid model verification succeeded: models=%d, error=%v", models, err)
 			}
 		})

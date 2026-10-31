@@ -1,103 +1,90 @@
 package waa
 
 import (
-	"slices"
+	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/Mag1cFall/goja"
 )
 
-func newTestHostState() (*goja.Runtime, *hostState) {
-	vm := goja.New()
-	state := &hostState{
-		registry:   newHostRegistry(),
-		rejections: &rejectionQueue{},
-		profile:    Profile{Locale: "en-US", TimeZone: "UTC", PageURL: "https://aistudio.google.com/prompts/new_chat"},
-		location:   time.UTC,
-		schedule:   func(time.Duration, func()) {},
-	}
-	return vm, state
-}
-
-func testRealmHost(t testing.TB) (*goja.Runtime, *hostState) {
+func testRealmHost(t testing.TB, script string) *Runtime {
 	t.Helper()
-	vm, state := newTestHostState()
-	api, err := state.installRealmHost(vm, "top", nil)
+	vm, err := NewRuntime(t.Context(), Options{
+		Challenge: Challenge{Program: script, GlobalName: "fixture"},
+		Interpreter: `var fixture = {a(program, ready) {
+  ready(callback => Promise.resolve((0, eval)(program)).then(
+    value => callback('!' + JSON.stringify(value)),
+    error => callback('!error:' + String(error))
+  ), () => {});
+}};`,
+		Profile: Profile{Locale: "en-US", TimeZone: "UTC", PageURL: "https://aistudio.google.com/prompts/new_chat"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	state.topAPI = api
-	return vm, state
+	return vm
+}
+
+func realmResult(t testing.TB, vm *Runtime) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	proof, err := vm.Proof(ctx, "digest", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimPrefix(proof, "!")
 }
 
 func TestRealmHostIsolation(t *testing.T) {
-	first, state := testRealmHost(t)
-	frame, err := newIframeWindow(first, state)
-	if err != nil {
-		t.Fatal(err)
+	first := testRealmHost(t, `(() => {
+  const iframe = document.createElement('iframe');
+  document.body.appendChild(iframe);
+  const frame = iframe.contentWindow;
+  HTMLTextAreaElement.prototype.testMarker = 42;
+  document.cookie = 'private=first';
+  localStorage.setItem('private', 'first');
+  document.body.appendChild(document.createElement('private-element'));
+  return frame.Object !== Object;
+})()`)
+	defer first.Close()
+	if result := realmResult(t, first); result != "true" {
+		t.Fatalf("iframe did not have its own realm: %s", result)
 	}
-	if frame.Get("Object") == first.Get("Object") {
-		t.Fatal("iframe constructors must belong to their own realm")
-	}
-	if _, err := first.RunString(`
-HTMLTextAreaElement.prototype.testMarker = 42;
-Object.defineProperty(HTMLTextAreaElement.prototype, 'value', { configurable: true, get() { return 'leaked'; } });
-document.cookie = 'private=first';
-localStorage.setItem('private', 'first');
-document.body.appendChild(document.createElement('private-element'));
-`); err != nil {
-		t.Fatal(err)
-	}
-	second, _ := testRealmHost(t)
-	value, err := second.RunString(`
-HTMLTextAreaElement.prototype.testMarker === undefined &&
-document.createElement('textarea').value === '' &&
-!document.cookie.includes('private=first') &&
-localStorage.getItem('private') === null &&
-document.querySelector('private-element') === null
-`)
-	if err != nil || !value.ToBoolean() {
-		t.Fatalf("host state leaked across VMs: %v, %v", value, err)
+	second := testRealmHost(t, `HTMLTextAreaElement.prototype.testMarker === undefined &&
+  !document.cookie.includes('private=first') &&
+  localStorage.getItem('private') === null &&
+  document.querySelector('private-element') === null`)
+	defer second.Close()
+	if result := realmResult(t, second); result != "true" {
+		t.Fatalf("host state leaked between accounts: %s", result)
 	}
 }
 
-func TestRealmHostClosureNameAndOrder(t *testing.T) {
-	for range 2 {
-		vm, state := testRealmHost(t)
-		value, err := vm.RunString(`Object.getOwnPropertyNames(globalThis)`)
-		if err != nil {
-			t.Fatal(err)
+func TestRealmHostGlobalKeys(t *testing.T) {
+	vm := testRealmHost(t, `Object.getOwnPropertyNames(globalThis)`)
+	defer vm.Close()
+	var keys []string
+	if err := json.Unmarshal([]byte(realmResult(t, vm)), &keys); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		if seen[key] {
+			t.Fatalf("duplicate global key %q", key)
 		}
-		var keys []string
-		if err := vm.ExportTo(value, &keys); err != nil {
-			t.Fatal(err)
-		}
-		at := slices.Index(keys, state.closureName)
-		if at < 0 || !closureListenerMapPattern.MatchString(state.closureName) {
-			t.Fatalf("runtime listener name is missing: %q", state.closureName)
-		}
-		previous := -1
-		for _, entry := range state.order.Top.Global {
-			name := replaceClosureListenerMap(entry.N, state.closureName)
-			if name == "undefined" {
-				continue
-			}
-			if index := slices.Index(keys, name); index >= 0 {
-				if index <= previous {
-					t.Fatalf("global %q is out of captured order: index %d after %d", name, index, previous)
-				}
-				previous = index
-			}
+		seen[key] = true
+	}
+	for _, key := range []string{"window", "self", "document", "navigator", "Object", "Intl"} {
+		if !seen[key] {
+			t.Errorf("missing browser global %q", key)
 		}
 	}
 }
 
 func TestRealmHostUpstreamContracts(t *testing.T) {
-	vm, _ := testRealmHost(t)
-	for _, test := range []struct {
-		name, script string
-	}{
+	for _, test := range []struct{ name, script string }{
 		{"URL", `(() => {
   const url = new URL('../\u00e9?q=a b', 'https://example.com/a/');
   if (url.href !== 'https://example.com/%C3%A9?q=a%20b') return false;
@@ -126,32 +113,20 @@ func TestRealmHostUpstreamContracts(t *testing.T) {
 		{"IntlLikelySubtags", `new Intl.Locale('en').maximize().toString() === 'en-Latn-US'`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			value, err := vm.RunString(test.script)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if promise, ok := value.Export().(*goja.Promise); ok {
-				if promise.State() != goja.PromiseStateFulfilled {
-					t.Fatalf("host promise did not fulfill: %v", promise.Result())
-				}
-				value = promise.Result()
-			}
-			if !value.ToBoolean() {
-				t.Fatalf("host contract failed: %v", value)
+			vm := testRealmHost(t, test.script)
+			defer vm.Close()
+			if result := realmResult(t, vm); result != "true" {
+				t.Fatalf("browser contract failed: %s", result)
 			}
 		})
 	}
 }
 
-// BenchmarkRealmHost measures repeated account/iframe host creation without network I/O.
 func BenchmarkRealmHost(b *testing.B) {
-	testRealmHost(b) // Warm process-wide immutable data before measuring.
+	testRealmHost(b, "true").Close()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		vm, state := testRealmHost(b)
-		if _, err := newIframeWindow(vm, state); err != nil {
-			b.Fatal(err)
-		}
+		testRealmHost(b, "true").Close()
 	}
 }

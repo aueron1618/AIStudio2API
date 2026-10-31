@@ -187,7 +187,7 @@ func TestQuotaCooldownPersistence(t *testing.T) {
 	previous := persisted.Cooldowns["shared"]
 	previous.Until = now.Add(-time.Second)
 	persisted.Cooldowns["shared"] = previous
-	if err := writeRuntime(path, persisted); err != nil {
+	if _, err := writeRuntime(path, persisted); err != nil {
 		t.Fatal(err)
 	}
 	reloaded := &Account{ID: account.ID, Directory: directory, RuntimePath: path, modelAccessGeneration: 1}
@@ -236,7 +236,7 @@ func TestQuotaCooldownWritersPreserveScope(t *testing.T) {
 					switch writer {
 					case "retryable failure":
 						service := &PooledService{pool: pool}
-						if err := service.markRetryableFailure(lease, lease.CooldownScope(model.ID), rpcError); err != nil {
+						if err := service.markRetryableFailure(ctx, lease, lease.CooldownScope(model.ID), rpcError); err != nil {
 							t.Fatal(err)
 						}
 					case "stream":

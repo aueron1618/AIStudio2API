@@ -31,6 +31,7 @@ type LoginOptions struct {
 	Directory      string
 	Locale         string
 	Timezone       string
+	AuthUser       int
 	Proxy          string
 	ProxyBypass    string
 	Timeout        time.Duration
@@ -147,6 +148,9 @@ func validateLoginOptions(options LoginOptions) (LoginOptions, error) {
 	if options.Directory == "" {
 		return LoginOptions{}, errors.New("缺少隔离登录目录")
 	}
+	if options.AuthUser < 0 || options.AuthUser > 9 {
+		return LoginOptions{}, fmt.Errorf("账户 auth_user 无效: %d", options.AuthUser)
+	}
 	directory, err := filepath.Abs(options.Directory)
 	if err != nil {
 		return LoginOptions{}, fmt.Errorf("解析隔离登录目录: %w", err)
@@ -240,9 +244,13 @@ func startLoginSession(ctx context.Context, options LoginOptions, state storageS
 		}
 		wait = "none"
 	}
+	pageURL := aiStudioOrigin + "/prompts/new_chat"
+	if options.AuthUser != 0 {
+		pageURL = fmt.Sprintf("%s/u/%d/prompts/new_chat", aiStudioOrigin, options.AuthUser)
+	}
 	if _, err := session.client.command(ctx, "browsingContext.navigate", map[string]any{
 		"context": session.contextID,
-		"url":     aiStudioOrigin + "/prompts/new_chat",
+		"url":     pageURL,
 		"wait":    wait,
 	}); err != nil && !strings.Contains(err.Error(), "NS_ERROR_ABORT") {
 		return nil, fmt.Errorf("导航 AI Studio: %w", err)
@@ -388,11 +396,6 @@ func (session *loginSession) Close() error {
 		return nil
 	}
 	return session.process.Close()
-}
-
-func isGoogleLoginURL(pageURL string) bool {
-	parsed, err := url.Parse(pageURL)
-	return err == nil && strings.EqualFold(parsed.Hostname(), "accounts.google.com")
 }
 
 func isGoogleHost(host string) bool {

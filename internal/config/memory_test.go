@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -11,10 +12,10 @@ func TestMinimumMemoryDefaults(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.WAABackend != WAABackendGo || cfg.WarmWorkerLimit != 0 || cfg.MaxActiveWorkers != 1 || cfg.WarmStartupConcurrency != 1 || cfg.PerAccountConcurrency != 1 {
+	if cfg.WAABackend != WAABackendSpiderMonkey || cfg.WarmWorkerLimit != 0 || cfg.MaxActiveWorkers != 1 || cfg.WarmStartupConcurrency != 1 || cfg.PerAccountConcurrency != 1 {
 		t.Fatalf("not minimum-memory defaults: %+v", cfg)
 	}
-	for _, backend := range []string{WAABackendGo, WAABackendCamoufox} {
+	for _, backend := range []string{WAABackendSpiderMonkey, WAABackendCamoufox} {
 		cfg.WAABackend = backend
 		raw, err := json.Marshal(cfg)
 		if err != nil {
@@ -40,7 +41,7 @@ func TestZeroWarmPoolSaveLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.WarmWorkerLimit != 0 || loaded.MaxActiveWorkers != 1 || loaded.WAABackend != WAABackendGo {
+	if loaded.WarmWorkerLimit != 0 || loaded.MaxActiveWorkers != 1 || loaded.WAABackend != WAABackendSpiderMonkey {
 		t.Fatal("save/load changed defaults")
 	}
 	// Explicit legacy settings remain authoritative.
@@ -50,6 +51,20 @@ func TestZeroWarmPoolSaveLoad(t *testing.T) {
 	loaded, err = Load(path)
 	if err != nil || loaded.WAABackend != WAABackendCamoufox || loaded.WarmWorkerLimit != 5 {
 		t.Fatalf("explicit configuration lost: %+v, %v", loaded, err)
+	}
+}
+
+func TestLegacyGoBackendMigratesWithoutOverwritingCapacity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("WAA_BACKEND=go\nWARM_WORKER_LIMIT=2\nMAX_ACTIVE_WORKERS=4\nWARM_STARTUP_CONCURRENCY=3\nPER_ACCOUNT_CONCURRENCY=2\nREQUEST_BODY_LOG=true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WAABackend != WAABackendSpiderMonkey || cfg.WarmWorkerLimit != 2 || cfg.MaxActiveWorkers != 4 || cfg.WarmStartupConcurrency != 3 || cfg.PerAccountConcurrency != 2 || !cfg.RequestBodyLog {
+		t.Fatalf("existing deployment settings changed: %+v", cfg)
 	}
 }
 

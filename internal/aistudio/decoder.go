@@ -21,9 +21,10 @@ type ProtocolEvidenceError struct {
 
 // PromptFeedbackError 表示上游拒绝当前输入且没有返回候选
 type PromptFeedbackError struct {
-	Reason  string
-	Message string
-	Raw     json.RawMessage
+	Reason        string
+	Message       string
+	SafetyRatings []SafetyRating
+	Raw           json.RawMessage
 }
 
 // Error 返回协议证据错误
@@ -202,7 +203,7 @@ func decodeGenerateItems(source io.Reader, consume func(json.RawMessage) error) 
 		if err := decoder.Decode(&raw); err != nil {
 			return fail(fmt.Sprintf("$[0][%d]", index), err)
 		}
-		if err := consume(append(json.RawMessage(nil), raw...)); err != nil {
+		if err := consume(raw); err != nil {
 			return err
 		}
 		index++

@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { vTooltip } from '@/playground/ui/tooltip'
-import { computed, onUnmounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useConsole } from '@/console'
 import { useI18n } from '@/i18n'
 import UiIcon from '@/playground/ui/UiIcon.vue'
@@ -14,10 +13,11 @@ import MediaLayout from './MediaLayout.vue'
 import MediaPromptBox from './MediaPromptBox.vue'
 import PaidUsageZeroState, { type Suggestion } from './PaidUsageZeroState.vue'
 import { imagenCode, imagenCodeOptions, useImagen, type ImagenLanguage } from './imagen'
+import { useRunningClock } from '../clock'
 import { useMediaQuery } from '../media-query'
+import { failureText } from '../request'
 
 const route = useRoute()
-const router = useRouter()
 const { t } = useI18n()
 const store = useConsole()
 const imagen = useImagen()
@@ -26,47 +26,40 @@ const codeOpen = ref(false)
 // handset 与官网一致，768 px 及以下 Tools 只显示图标
 const handset = useMediaQuery('(max-width: 768px)')
 
-// short 与官网示例卡片一致截取提示词开头
+// short 与官网示例卡片一致截取提示词开头，引号按界面语言
 function short(prompt: string): string {
-  return `“${prompt.length > 100 ? `${prompt.slice(0, 100)}...` : prompt}”`
+  return t('pg.quotedText').replace(
+    '{text}',
+    prompt.length > 100 ? `${prompt.slice(0, 100)}...` : prompt,
+  )
 }
 
-// suggestions 是官网 Imagen 页空态的四个示例
-const suggestions: Suggestion[] = [
-  {
-    prompt: 'Create an image of fuzzy bunnies next to a glass of wine in my kitchen.',
-    image: 'https://www.gstatic.com/aistudio/zero-state/bunnies_opt_162x162.png',
-  },
-  {
-    prompt: 'Create an image of sushi on a table, oil painting style.',
-    image: 'https://www.gstatic.com/aistudio/zero-state/sushi_opt_162x162.png',
-  },
-  {
-    prompt:
-      'Create an image of a fancy house by a pond in the forest in front of grassland with wildflowers, close up view.',
-    image: 'https://www.gstatic.com/aistudio/zero-state/house_in_forest_opt_288x162.png',
-  },
-  {
-    prompt:
-      'Create an image of a futuristic cityscape with tall holographic billboards, sleek flying cars, and neon lights.',
-    image: 'https://www.gstatic.com/aistudio/zero-state/futuristic_city_opt_162x162.png',
-  },
-].map((item) => ({ ...item, label: short(item.prompt) }))
+// suggestions 是当前界面语言的官网 Imagen 页空态四个示例
+const suggestions = computed<Suggestion[]>(() =>
+  [
+    {
+      prompt: t('zero.imagen.example1Prompt'),
+      image: 'https://www.gstatic.com/aistudio/zero-state/bunnies_opt_162x162.png',
+    },
+    {
+      prompt: t('zero.imagen.example2Prompt'),
+      image: 'https://www.gstatic.com/aistudio/zero-state/sushi_opt_162x162.png',
+    },
+    {
+      prompt: t('zero.imagen.example3Prompt'),
+      image: 'https://www.gstatic.com/aistudio/zero-state/house_in_forest_opt_288x162.png',
+    },
+    {
+      prompt: t('zero.imagen.example4Prompt'),
+      image: 'https://www.gstatic.com/aistudio/zero-state/futuristic_city_opt_162x162.png',
+    },
+  ].map((item) => ({ ...item, label: short(item.prompt) })),
+)
 
 const canRun = computed(() => currentModel.value !== undefined && state.draft.trim() !== '')
 
 // now 在生成期间每 100 ms 刷新，用于显示已用时间
-const now = ref(performance.now())
-let ticker = 0
-watch(
-  () => state.running,
-  (running) => {
-    window.clearInterval(ticker)
-    if (running) ticker = window.setInterval(() => (now.value = performance.now()), 100)
-  },
-  { immediate: true },
-)
-onUnmounted(() => window.clearInterval(ticker))
+const now = useRunningClock(() => state.running)
 
 // elapsed 返回模型轮次的耗时文字
 function elapsed(index: number, duration: number | undefined): string {
@@ -90,8 +83,7 @@ function code(language: ImagenLanguage): string {
 // generate 运行一次生成，失败时与官网一样以提示条显示上游说明
 function generate(): void {
   imagen.run().catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error)
-    store.showNotice(t('pg.imageFailed').replace('{error}', message), 'error')
+    store.showNotice(failureText(error, t('pg.imageUnreachable'), t('pg.imageFailed')), 'error')
   })
 }
 
@@ -99,12 +91,6 @@ function generate(): void {
 function runSuggestion(item: Suggestion): void {
   state.draft = item.prompt
   generate()
-}
-
-// newChat 清空当前会话
-function newChat(): void {
-  imagen.newSession()
-  void router.replace({ query: { ...route.query } })
 }
 
 watch(
@@ -124,7 +110,7 @@ watch(
         class="ms-button-borderless ms-button-icon"
         :aria-label="t('pg.newChat')"
         :aria-disabled="state.turns.length === 0 || state.running"
-        @click="state.turns.length > 0 && !state.running && newChat()"
+        @click="state.turns.length > 0 && !state.running && imagen.newSession()"
       >
         <UiIcon name="add" :size="20" />
       </button>
@@ -294,7 +280,7 @@ watch(
 
 .turn-separator {
   margin-top: 12px;
-  border-top: 1px solid var(--turn-separator-color, var(--color-v3-outline));
+  border-top: 1px solid var(--color-v3-outline);
 }
 
 .image-gallery {
@@ -352,16 +338,6 @@ watch(
     var(--color-loading-background) 60%
   );
   background-size: 800px;
-}
-
-@keyframes moving-gradient {
-  0% {
-    background-position: -400px 0;
-  }
-
-  to {
-    background-position: 400px 0;
-  }
 }
 
 .prompt-input-container {

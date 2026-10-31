@@ -1,10 +1,10 @@
 import { EventSourceParserStream } from 'eventsource-parser/stream'
+import { jsonBody } from '@/api'
 import type { Model } from '@/types'
 import { base64Bytes } from './bytes'
 import {
   errorMessage,
   publicAPIBase,
-  StreamError,
   streamUpdate,
   type GenerateRequest,
   type StreamUpdate,
@@ -118,11 +118,11 @@ function systemText(request: GenerateRequest): string {
 }
 
 // dataURL 把内联数据写为 data URL
-function dataURL(data: { mimeType: string; data: string }): string {
+export function dataURL(data: { mimeType: string; data: string }): string {
   return `data:${data.mimeType};base64,${data.data}`
 }
 
-// fileName 返回附件在协议请求中的文件名
+// fileName 返回没有文件名的附件在协议请求中的文件名
 function fileName(mimeType: string, index: number): string {
   return `file_${index}.${mimeType.split('/')[1]?.split(';')[0] ?? 'bin'}`
 }
@@ -170,7 +170,10 @@ function chatContent(parts: readonly Part[]): Record<string, unknown>[] {
       return [
         {
           type: 'file',
-          file: { file_data: dataURL(inline), filename: fileName(inline.mimeType, index) },
+          file: {
+            file_data: dataURL(inline),
+            filename: inline.displayName ?? fileName(inline.mimeType, index),
+          },
         },
       ]
     if (part.fileData) return [{ type: 'image_url', image_url: { url: part.fileData.fileUri } }]
@@ -266,7 +269,7 @@ function responsesInput(request: GenerateRequest): Record<string, unknown>[] {
             {
               type: 'input_file',
               file_data: dataURL(inline),
-              filename: fileName(inline.mimeType, index),
+              filename: inline.displayName ?? fileName(inline.mimeType, index),
             },
           ]
         if (part.fileData) return [{ type: 'input_image', image_url: part.fileData.fileUri }]
@@ -338,6 +341,9 @@ function anthropicContent(parts: readonly Part[]): Record<string, unknown>[] {
         {
           type: inline.mimeType.startsWith('image/') ? 'image' : 'document',
           source: { type: 'base64', media_type: inline.mimeType, data: inline.data },
+          ...(inline.displayName !== undefined && !inline.mimeType.startsWith('image/')
+            ? { title: inline.displayName }
+            : {}),
         },
       ]
     if (part.fileData)
@@ -364,7 +370,7 @@ function anthropicContent(parts: readonly Part[]): Record<string, unknown>[] {
 }
 
 // anthropicRequest 把 Gemini 请求换为 Messages 请求，max_tokens 未设置时取模型输出上限
-export function anthropicRequest(
+function anthropicRequest(
   model: Model | undefined,
   modelID: string,
   request: GenerateRequest,
@@ -461,7 +467,7 @@ function errorOf(value: Record<string, unknown>): string | undefined {
 
 // Decoder 把一种协议的事件或完整响应逐步换为片段变化
 interface Decoder {
-  event: (value: Record<string, unknown>) => StreamUpdate | undefined
+  event: (value: Record<string, unknown>) => StreamUpdate
   done: (value: Record<string, unknown>) => boolean
 }
 
@@ -745,7 +751,7 @@ function imagesCall(
 }
 
 // ProtocolCall 是一次协议请求：路径、请求头、正文与解析器
-export interface ProtocolCall {
+interface ProtocolCall {
   path: string
   headers: Headers
   body: Record<string, unknown> | GenerateRequest | FormData
@@ -808,7 +814,7 @@ export function protocolCall(
 }
 
 // GenerateOptions 是一次试用请求的协议、模型与回调
-export interface GenerateOptions {
+interface GenerateOptions {
   protocol: Protocol
   stream: boolean
   model: Model | undefined
@@ -834,36 +840,27 @@ export async function generate(options: GenerateOptions): Promise<void> {
   const response = await fetch(call.path, {
     method: 'POST',
     headers: call.headers,
-    body: call.body instanceof FormData ? call.body : JSON.stringify(call.body),
+    body: call.body instanceof FormData ? call.body : jsonBody(call.body),
     signal: options.signal,
   })
-  if (!response.ok) {
-    const message = await errorMessage(response)
-    throw new StreamError(message, response.status)
-  }
+  if (!response.ok) throw new Error(await errorMessage(response))
   if (!options.stream) {
     const text = await response.text()
     const value = record(JSON.parse(text))
     const error = errorOf(value)
-    if (error !== undefined) throw new StreamError(error, response.status)
-    const update = call.decoder.event({ ...value, type: value.type ?? '' })
-    if (update) options.onUpdate(update)
+    if (error !== undefined) throw new Error(error)
+    options.onUpdate(call.decoder.event({ ...value, type: value.type ?? '' }))
     return
   }
-  if (response.body === null) throw new StreamError('Empty event stream', response.status)
-  const events = response.body
-    .pipeThrough(new TextDecoderStream())
+  const events = response
+    .body!.pipeThrough(new TextDecoderStream())
     .pipeThrough(new EventSourceParserStream())
   for await (const { data } of events) {
     if (data === '[DONE]') return
     const value = record(JSON.parse(data))
     const error = errorOf(value)
-    if (error !== undefined) {
-      const code = record(value.error).code
-      throw new StreamError(error, typeof code === 'number' ? code : response.status)
-    }
-    const update = call.decoder.event(value)
-    if (update) options.onUpdate(update)
+    if (error !== undefined) throw new Error(error)
+    options.onUpdate(call.decoder.event(value))
     if (call.decoder.done(value)) return
   }
 }

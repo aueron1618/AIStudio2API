@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref } from 'vue'
 import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuPortal,
   DropdownMenuRoot,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from 'reka-ui'
 import { api } from '@/api'
@@ -17,14 +18,14 @@ import type {
   AccountState,
   ChromeImportProfile,
   CookieBrowser,
-  CookieImportInput,
   PairingToken,
 } from '@/types'
 import type { IconName } from '@/icons'
+import AccountEnvironmentFields from './AccountEnvironmentFields.vue'
 import DetailDialog from './DetailDialog.vue'
 import LoginViewer from './LoginViewer.vue'
 import UiIcon from './UiIcon.vue'
-import AccountRegionFields from './AccountRegionFields.vue'
+import UiSelect from './UiSelect.vue'
 
 const props = defineProps<{
   accounts: Account[]
@@ -34,17 +35,27 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   refresh: []
+  updated: [account: Account]
   notice: [message: string, tone: 'success' | 'error']
   delete: [account: Account]
 }>()
 
-const { t, locale, errorText } = useI18n()
+const { t, locale, errorText, logText } = useI18n()
+const defaultAccountLocale = ''
+const defaultAccountTimezone = ''
 const showEditor = ref(false)
 const showBrowserLogin = ref(false)
 const showChromeImport = ref(false)
 const showCookieImport = ref(false)
 const cookieText = ref('')
-const cookieMethod = ref<NonNullable<CookieImportInput['method']>>('browser')
+const cookieMethod = ref<'browser' | 'http'>('browser')
+const cookieFile = ref<HTMLInputElement | null>(null)
+const cookieImportError = ref('')
+const maxCookieBytes = 1 << 20
+let cookieController: AbortController | undefined
+let cookieSourceVersion = 0
+const cookieCandidates = ref<CookieBrowser[]>([])
+const selectedCookieUsers = ref<number[]>([])
 const showBrowserImport = ref(false)
 // cookieBrowsers 是本机找到的调试浏览器与其中登录 AI Studio 的账户
 const cookieBrowsers = ref<CookieBrowser[]>([])
@@ -52,8 +63,20 @@ const scanningBrowsers = ref(false)
 const selectedBrowsers = ref<string[]>([])
 const editingAccountID = ref('')
 const pendingAction = ref('')
+// addPending 表示添加账户菜单正在生成配对令牌或读取本机 Chrome 账户
+const addPending = computed(
+  () => pendingAction.value === 'pairing' || pendingAction.value === 'chrome-discover',
+)
 const refreshing = reactive(new Set<string>())
-const refreshingAll = ref(false)
+// queued 是刷新全部中尚未轮到的账户
+const queued = reactive(new Set<string>())
+// refreshErrors 是最近一次刷新失败的账户与失败原因
+const refreshErrors = reactive(new Map<string, string>())
+// refreshTotal 与 refreshDone 是进行中的刷新全部的账户数与已完成数，没有刷新全部时 refreshTotal 为 0
+const refreshTotal = ref(0)
+const refreshDone = ref(0)
+// toggling 是正在切换启用状态的账户
+const toggling = reactive(new Set<string>())
 const chromeProfiles = ref<ChromeImportProfile[]>([])
 const pairing = ref<PairingToken | null>(null)
 const copiedPairing = ref('')
@@ -80,15 +103,15 @@ function toggleAllChromeProfiles(): void {
 }
 const accountEnvironment = reactive({
   proxy: '',
-  locale: '',
-  timezone: '',
+  locale: defaultAccountLocale,
+  timezone: defaultAccountTimezone,
 })
 const draft = reactive<AccountDraft>({
   label: '',
   enabled: true,
   proxy: '',
-  locale: '',
-  timezone: '',
+  locale: defaultAccountLocale,
+  timezone: defaultAccountTimezone,
 })
 
 const stateKeys: Record<AccountState, TranslationKey> = {
@@ -100,8 +123,28 @@ const stateKeys: Record<AccountState, TranslationKey> = {
   disabled: 'state.disabled',
 }
 
-// messageAccount 是悬窗中显示完整状态原因的账户
-const messageAccount = ref<Account | null>(null)
+const search = ref('')
+const selectedState = ref('')
+const selectedTier = ref('')
+const selectedEgress = ref('*')
+const states = computed(() => [...new Set(props.accounts.map((account) => account.state))])
+const tiers = computed(() => [...new Set(props.accounts.map((account) => account.benefit_tier))])
+const egresses = computed(() => [...new Set(props.accounts.map((account) => account.egress))])
+
+// visibleAccounts 是邮箱检索与账户属性筛选的交集
+const visibleAccounts = computed(() => {
+  const needle = search.value.trim().toLowerCase()
+  return props.accounts.filter(
+    (account) =>
+      (account.label.toLowerCase().includes(needle) || account.id.toLowerCase().includes(needle)) &&
+      (selectedState.value === '' || account.state === selectedState.value) &&
+      (selectedTier.value === '' || account.benefit_tier === selectedTier.value) &&
+      (selectedEgress.value === '*' || account.egress === selectedEgress.value),
+  )
+})
+
+// reason 是悬窗中显示的账户、原因类别与完整原因
+const reason = ref<{ account: Account; kind: string; text: string } | null>(null)
 
 // accountSummary 把账户等级、出口、语言与时区合成一行
 function accountSummary(account: Account): string {
@@ -152,7 +195,7 @@ interface LiveLogin {
 
 const liveLogin = ref<LiveLogin | null>(null)
 
-// newViewID 生成登录窗口 ID，非 HTTPS 页面中同样可用
+// newViewID 生成登录窗口 ID
 function newViewID(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
     byte.toString(16).padStart(2, '0'),
@@ -189,14 +232,13 @@ async function runBrowserLogin(
 
 // showLiveLogin 在服务端启用页内登录窗口后关闭登录设置对话框
 function showLiveLogin(): void {
-  if (liveLogin.value === null) return
-  liveLogin.value.active = true
+  liveLogin.value!.active = true
   showBrowserLogin.value = false
 }
 
 // liveLoginUnavailable 在登录窗口无法连接时取消登录
 function liveLoginUnavailable(): void {
-  liveLogin.value?.controller.abort()
+  liveLogin.value!.controller.abort()
   liveLogin.value = null
   emit('notice', t('accounts.liveUnavailable'), 'error')
 }
@@ -286,29 +328,69 @@ async function importChromeAccounts(): Promise<void> {
 }
 
 function closeCookieImport(): void {
-  if (pendingAction.value !== '') return
   showCookieImport.value = false
-  cookieText.value = ''
+  clearCookieInput()
   cookieMethod.value = 'browser'
+}
+
+function clearCookieInput(): void {
+  cookieController?.abort()
+  cookieController = undefined
+  cookieSourceVersion++
+  if (pendingAction.value === 'cookie-import' || pendingAction.value === 'cookie-discover') {
+    pendingAction.value = ''
+    emit('refresh')
+  }
+  cookieText.value = ''
+  cookieImportError.value = ''
+  if (cookieFile.value) cookieFile.value.value = ''
+  cookieCandidates.value = []
+  selectedCookieUsers.value = []
+}
+
+function resetCookieDiscovery(): void {
+  cookieImportError.value = ''
+  cookieCandidates.value = []
+  selectedCookieUsers.value = []
 }
 
 async function readCookieFile(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
+  input.value = ''
   if (!file) return
-  pendingAction.value = 'cookie-file'
-  try {
-    if (file.size > 1024 * 1024) throw new Error(t('accounts.cookieTooLarge'))
-    const text = await file.text()
-    if (new TextEncoder().encode(text).byteLength > 1024 * 1024)
-      throw new Error(t('accounts.cookieTooLarge'))
-    cookieText.value = text
-  } catch (error) {
-    actionError(error)
-  } finally {
-    input.value = ''
-    pendingAction.value = ''
+  const version = ++cookieSourceVersion
+  if (file.size > maxCookieBytes) {
+    cookieImportError.value = t('accounts.cookieTooLarge')
+    return
   }
+  try {
+    const text = await file.text()
+    if (version !== cookieSourceVersion || !showCookieImport.value) return
+    cookieText.value = text
+    resetCookieDiscovery()
+  } catch (error) {
+    if (version === cookieSourceVersion && showCookieImport.value) {
+      cookieImportError.value = errorText(error)
+    }
+  }
+}
+
+onBeforeUnmount(closeCookieImport)
+
+// importableCookieUsers 是 Cookie 中尚未导入的会话序号
+const importableCookieUsers = computed(() =>
+  cookieCandidates.value.filter((item) => !item.imported).map((item) => item.auth_user),
+)
+
+const allCookieCandidatesSelected = computed(
+  () =>
+    importableCookieUsers.value.length > 0 &&
+    selectedCookieUsers.value.length === importableCookieUsers.value.length,
+)
+
+function toggleAllCookieCandidates(): void {
+  selectedCookieUsers.value = allCookieCandidatesSelected.value ? [] : importableCookieUsers.value
 }
 
 // pasteSteps 是粘贴 Cookie 的操作步骤
@@ -320,12 +402,24 @@ function openBrowserImport(): void {
   void scanBrowsers()
 }
 
-// browserSummary 返回浏览器条目第二行：未登录提示、读取错误或浏览器名、地址、语言与时区
+function browserKey(browser: CookieBrowser): string {
+  return `${browser.address}#${browser.auth_user}`
+}
+
+// browserSummary 返回浏览器条目第二行：未登录提示、读取错误或浏览器名、地址、u/N、语言与时区
 function browserSummary(browser: CookieBrowser): string {
   if (browser.signed_out) return t('accounts.browserSignedOut')
   return (
     browser.error ||
-    [browser.browser, browser.address, browser.locale, browser.timezone].filter(Boolean).join(' · ')
+    [
+      browser.browser,
+      browser.address,
+      browser.email ? `u/${browser.auth_user}` : '',
+      browser.locale,
+      browser.timezone,
+    ]
+      .filter(Boolean)
+      .join(' · ')
   )
 }
 
@@ -336,7 +430,7 @@ async function scanBrowsers(): Promise<void> {
     cookieBrowsers.value = await api.cookieBrowsers()
     selectedBrowsers.value = cookieBrowsers.value
       .filter((browser) => browser.email !== '' && !browser.imported && browser.error === '')
-      .map((browser) => browser.address)
+      .map((browser) => browserKey(browser))
   } catch (error) {
     actionError(error)
   } finally {
@@ -355,17 +449,21 @@ function closeBrowserImport(): void {
 async function importBrowserAccounts(): Promise<void> {
   pendingAction.value = 'browser-import'
   try {
-    for (const address of selectedBrowsers.value) {
+    const chosen = new Set(selectedBrowsers.value)
+    const targets = cookieBrowsers.value.filter((browser) => chosen.has(browserKey(browser)))
+    for (const target of targets) {
       await api.importCookieAccount({
         label: '',
         cookies: '',
-        cdp: address,
+        cdp: target.address,
+        auth_user: target.auth_user,
+        method: 'http',
         proxy: accountEnvironment.proxy,
         locale: '',
         timezone: '',
       })
     }
-    const count = selectedBrowsers.value.length
+    const count = targets.length
     pendingAction.value = ''
     closeBrowserImport()
     emit('refresh')
@@ -431,34 +529,90 @@ const addMethods: {
   },
 ]
 
-// importCookieAccount 导入粘贴的 Cookie，账户由服务按 Cookie 登录的 AI Studio 识别
-async function importCookieAccount(): Promise<void> {
-  if (pendingAction.value !== '' || !cookieText.value.trim()) return
+// importCookieAccount 第一步识别 Cookie 中各会话登录的账户供勾选，第二步按会话序号导入勾选的账户
+async function importCookieAccount(direct = false): Promise<void> {
+  if (pendingAction.value !== '' || cookieText.value.trim() === '') return
+  if (new Blob([cookieText.value]).size > maxCookieBytes) {
+    cookieImportError.value = t('accounts.cookieTooLarge')
+    return
+  }
+  cookieImportError.value = ''
+  const controller = new AbortController()
+  cookieController = controller
+  if (!direct && cookieCandidates.value.length === 0) {
+    pendingAction.value = 'cookie-discover'
+    try {
+      const discovered = await api.discoverCookieAccounts(
+        {
+          label: '',
+          cookies: cookieText.value,
+          cdp: '',
+          ...accountEnvironment,
+        },
+        controller.signal,
+      )
+      if (cookieController !== controller) return
+      cookieCandidates.value = discovered
+      selectedCookieUsers.value = importableCookieUsers.value
+    } catch (error) {
+      if (!controller.signal.aborted) cookieImportError.value = errorText(error)
+    } finally {
+      if (cookieController === controller) {
+        cookieController = undefined
+        pendingAction.value = ''
+      }
+    }
+    return
+  }
   pendingAction.value = 'cookie-import'
+  let lastAccountID = ''
   try {
-    if (new TextEncoder().encode(cookieText.value).byteLength > 1024 * 1024)
-      throw new Error(t('accounts.cookieTooLarge'))
-    const { account } = await api.importCookieAccount({
-      label: '',
-      cookies: cookieText.value,
-      cdp: '',
-      method: cookieMethod.value,
-      ...accountEnvironment,
-    })
+    const chosen = new Set(selectedCookieUsers.value)
+    const targets = direct
+      ? [{ auth_user: 0, imported: false }]
+      : cookieCandidates.value.filter((item) => chosen.has(item.auth_user))
+    for (const target of targets) {
+      const { account } = await api.importCookieAccount(
+        {
+          label: '',
+          cookies: cookieText.value,
+          cdp: '',
+          auth_user: target.auth_user,
+          method: cookieMethod.value,
+          ...accountEnvironment,
+        },
+        controller.signal,
+      )
+      if (cookieController !== controller) return
+      target.imported = true
+      selectedCookieUsers.value = selectedCookieUsers.value.filter(
+        (user) => user !== target.auth_user,
+      )
+      lastAccountID = account.id
+    }
+    const count = targets.length
+    cookieController = undefined
     pendingAction.value = ''
     closeCookieImport()
     emit('refresh')
-    emit('notice', t('accounts.importedAccount').replace('{email}', account.id), 'success')
+    if (count === 1) {
+      emit('notice', t('accounts.importedAccount').replace('{email}', lastAccountID), 'success')
+    } else {
+      emit('notice', t('accounts.importComplete').replace('{count}', String(count)), 'success')
+    }
   } catch (error) {
-    actionError(error)
+    if (lastAccountID !== '' || controller.signal.aborted) emit('refresh')
+    if (!controller.signal.aborted) cookieImportError.value = errorText(error)
   } finally {
-    pendingAction.value = ''
+    if (cookieController === controller) {
+      cookieController = undefined
+      pendingAction.value = ''
+    }
   }
 }
 
 // saveAccount 保存已有账户配置并刷新产品数据
 async function saveAccount(): Promise<void> {
-  if (editingAccountID.value === '') return
   pendingAction.value = `edit:${editingAccountID.value}`
   try {
     await api.updateAccount(editingAccountID.value, { ...draft })
@@ -474,7 +628,7 @@ async function saveAccount(): Promise<void> {
 
 // toggleAccount 切换账户是否参与请求
 async function toggleAccount(account: Account): Promise<void> {
-  pendingAction.value = `toggle:${account.id}`
+  toggling.add(account.id)
   try {
     await api.updateAccount(account.id, {
       label: account.label,
@@ -487,7 +641,7 @@ async function toggleAccount(account: Account): Promise<void> {
   } catch (error) {
     actionError(error)
   } finally {
-    pendingAction.value = ''
+    toggling.delete(account.id)
   }
 }
 
@@ -512,34 +666,58 @@ function refreshNotice(result: AccountRefresh): string {
     .replace('{models}', change(String(result.previous_models), String(result.models)))
 }
 
-// refreshAccount 立即读取账户权益与模型目录，执行期间只禁用该账户的按钮
-async function refreshAccount(account: Account): Promise<void> {
-  refreshing.add(account.id)
+// refreshOne 读取一个账户的权益与模型目录，完成后立即更新该行，失败原因记在该行
+async function refreshOne(id: string): Promise<AccountRefresh> {
+  refreshing.add(id)
+  refreshErrors.delete(id)
   try {
-    const result = await api.refreshAccount(account.id)
+    const result = await api.refreshAccount(id)
+    emit('updated', result.account)
+    return result
+  } catch (error) {
+    refreshErrors.set(id, errorText(error))
+    throw error
+  } finally {
+    refreshing.delete(id)
+  }
+}
+
+// refreshAccount 立即刷新一个账户，执行期间只禁用该账户的按钮
+async function refreshAccount(account: Account): Promise<void> {
+  try {
+    const result = await refreshOne(account.id)
     emit('refresh')
     emit('notice', refreshNotice(result), 'success')
   } catch (error) {
     actionError(error)
-  } finally {
-    refreshing.delete(account.id)
   }
 }
 
-// refreshAllAccounts 并发刷新全部启用账户，结束后提示成功与失败的数量
+// refreshConcurrency 是刷新全部时同时刷新的账户数
+const refreshConcurrency = 4
+
+// refreshAllAccounts 按 refreshConcurrency 的并发依次刷新全部启用账户，结束后提示成功与失败的数量
 async function refreshAllAccounts(): Promise<void> {
   const targets = props.accounts.filter((account) => account.enabled && !refreshing.has(account.id))
-  refreshingAll.value = true
-  targets.forEach((account) => refreshing.add(account.id))
-  const results = await Promise.allSettled(targets.map((account) => api.refreshAccount(account.id)))
-  targets.forEach((account) => refreshing.delete(account.id))
-  refreshingAll.value = false
+  for (const account of targets) queued.add(account.id)
+  refreshTotal.value = targets.length
+  refreshDone.value = 0
+  let failed = 0
+  const worker = async (): Promise<void> => {
+    for (let account = targets.shift(); account; account = targets.shift()) {
+      queued.delete(account.id)
+      await refreshOne(account.id).catch(() => failed++)
+      refreshDone.value++
+    }
+  }
+  await Promise.all(Array.from({ length: refreshConcurrency }, worker))
+  const total = refreshTotal.value
+  refreshTotal.value = 0
   emit('refresh')
-  const failed = results.filter((result) => result.status === 'rejected').length
   emit(
     'notice',
     t('accounts.refreshedAll')
-      .replace('{count}', String(targets.length - failed))
+      .replace('{count}', String(total - failed))
       .replace('{failed}', String(failed)),
     failed === 0 ? 'success' : 'error',
   )
@@ -548,29 +726,42 @@ async function refreshAllAccounts(): Promise<void> {
 
 <template>
   <section class="flex min-h-0 flex-1 flex-col overflow-auto md:overflow-hidden">
-    <header class="flex flex-wrap items-center gap-3 border-b border-line px-4 py-4 md:px-8">
+    <header
+      class="flex flex-wrap items-center gap-3 border-b border-line px-4 py-4 md:px-[max(2rem,calc((100%_-_var(--container-6xl))/2_+_2rem))]"
+    >
       <div class="min-w-0 flex-[1_1_16rem]">
         <h2 class="text-xl font-semibold text-white">{{ t('section.accounts.title') }}</h2>
         <p class="mt-1 text-sm text-gray-500">{{ t('section.accounts.description') }}</p>
       </div>
       <div class="ml-auto flex flex-wrap justify-end gap-2">
         <button
-          class="flex items-center gap-2 rounded border border-line bg-raised px-4 py-2 text-sm font-medium text-gray-200 transition hover:bg-line disabled:opacity-50"
+          class="relative isolate flex items-center gap-2 overflow-hidden rounded border border-line bg-raised px-4 py-2 text-sm font-medium text-gray-200 transition hover:bg-line disabled:opacity-50"
           type="button"
-          :disabled="refreshingAll"
-          :aria-busy="refreshingAll"
+          :disabled="refreshTotal > 0"
+          :aria-busy="refreshTotal > 0"
           @click="refreshAllAccounts"
         >
-          <UiIcon name="refresh" :size="15" />
-          {{ t('accounts.refreshAll') }}
+          <span
+            v-if="refreshTotal > 0"
+            class="absolute inset-y-0 left-0 -z-10 bg-blue-500/20 transition-[width] duration-300"
+            :style="{ width: `${(refreshDone / refreshTotal) * 100}%` }"
+            aria-hidden="true"
+          ></span>
+          <UiIcon :name="refreshTotal > 0 ? 'spinner' : 'refresh'" :size="15" />
+          <span v-if="refreshTotal > 0" class="tabular-nums">{{
+            t('accounts.refreshingAll')
+              .replace('{done}', String(refreshDone))
+              .replace('{total}', String(refreshTotal))
+          }}</span>
+          <template v-else>{{ t('accounts.refreshAll') }}</template>
         </button>
         <DropdownMenuRoot :modal="false">
           <DropdownMenuTrigger
             class="flex items-center gap-2 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
             :disabled="pendingAction !== ''"
-            :aria-busy="pendingAction === 'pairing' || pendingAction === 'chrome-discover'"
+            :aria-busy="addPending"
           >
-            <UiIcon name="add" :size="15" />
+            <UiIcon :name="addPending ? 'spinner' : 'add'" :size="15" />
             {{ t('accounts.add') }}
             <UiIcon name="chevronDown" :size="14" />
           </DropdownMenuTrigger>
@@ -598,6 +789,45 @@ async function refreshAllAccounts(): Promise<void> {
       </div>
     </header>
     <div class="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col p-4 md:p-8">
+      <div class="mb-3 flex flex-wrap items-center gap-2">
+        <input
+          v-model="search"
+          type="search"
+          :aria-label="t('accounts.search')"
+          :placeholder="t('accounts.search')"
+          class="min-w-0 flex-[1_1_12rem] rounded-md border border-line bg-canvas px-3 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none"
+        />
+        <UiSelect
+          v-model="selectedState"
+          :aria-label="t('accounts.filterState')"
+          class="rounded-md border border-line bg-canvas px-2 py-1.5 text-xs text-gray-200"
+        >
+          <option value="">{{ t('accounts.allStates') }}</option>
+          <option v-for="state in states" :key="state" :value="state">
+            {{ t(stateKeys[state]) }}
+          </option>
+        </UiSelect>
+        <UiSelect
+          v-model="selectedTier"
+          :aria-label="t('accounts.filterTier')"
+          class="rounded-md border border-line bg-canvas px-2 py-1.5 text-xs text-gray-200"
+        >
+          <option value="">{{ t('accounts.allTiers') }}</option>
+          <option v-for="tier in tiers" :key="tier" :value="tier">
+            {{ tier === 'Unknown' ? t('accounts.tierUnknown') : tier }}
+          </option>
+        </UiSelect>
+        <UiSelect
+          v-model="selectedEgress"
+          :aria-label="t('accounts.filterEgress')"
+          class="max-w-60 rounded-md border border-line bg-canvas px-2 py-1.5 text-xs text-gray-200"
+        >
+          <option value="*">{{ t('accounts.allEgresses') }}</option>
+          <option v-for="egress in egresses" :key="egress" :value="egress">
+            {{ egress ? maskedProxy(egress) : t('accounts.direct') }}
+          </option>
+        </UiSelect>
+      </div>
       <div v-if="error" class="rounded border border-red-500/40 bg-red-500/10 p-4 text-red-300">
         {{ error }}
       </div>
@@ -612,11 +842,17 @@ async function refreshAllAccounts(): Promise<void> {
         <p class="text-xs">{{ t('accounts.emptyHint') }}</p>
       </div>
       <div
+        v-else-if="visibleAccounts.length === 0"
+        class="rounded border border-line bg-panel py-10 text-center text-sm text-gray-500"
+      >
+        {{ t('accounts.noMatches') }}
+      </div>
+      <div
         v-else
         class="min-h-0 flex-1 overflow-y-auto rounded-lg border border-line bg-panel max-md:max-h-[70vh]"
       >
         <div
-          v-for="account in accounts"
+          v-for="account in visibleAccounts"
           :key="account.id"
           class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-line/60 px-4 py-2.5"
           :class="{ 'opacity-60': !account.enabled }"
@@ -635,7 +871,7 @@ async function refreshAllAccounts(): Promise<void> {
             <div class="min-w-0">
               <span
                 v-tooltip.overflow="account.label"
-                class="block truncate font-mono text-sm text-white"
+                class="block truncate text-sm font-medium text-white"
                 >{{ account.label }}</span
               >
               <span
@@ -645,11 +881,11 @@ async function refreshAllAccounts(): Promise<void> {
               >
             </div>
           </div>
-          <span class="w-20 shrink-0 text-xs text-gray-500"
+          <span class="shrink-0 text-xs text-gray-500 md:w-20"
             >{{ t('accounts.models') }}
             {{ account.models.length === 0 ? '—' : account.models.length }}</span
           >
-          <div class="flex w-36 shrink-0 items-center gap-2">
+          <div class="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 md:w-36">
             <span
               class="text-xs font-medium uppercase"
               :class="{
@@ -667,29 +903,28 @@ async function refreshAllAccounts(): Promise<void> {
               v-if="account.message"
               type="button"
               class="rounded border border-red-900/50 bg-red-900/20 px-1.5 py-0.5 text-xs text-red-300 transition hover:bg-red-900/40"
-              @click="messageAccount = account"
+              @click="
+                reason = { account, kind: t(stateKeys[account.state]), text: account.message }
+              "
             >
               {{ t('accounts.reason') }}
             </button>
+            <button
+              v-else-if="refreshErrors.has(account.id)"
+              type="button"
+              class="rounded border border-red-900/50 bg-red-900/20 px-1.5 py-0.5 text-xs whitespace-nowrap text-red-300 transition hover:bg-red-900/40"
+              @click="
+                reason = {
+                  account,
+                  kind: t('accounts.refreshFailed'),
+                  text: refreshErrors.get(account.id) ?? '',
+                }
+              "
+            >
+              {{ t('accounts.refreshFailed') }}
+            </button>
           </div>
-          <div class="flex max-w-full flex-wrap justify-end gap-2">
-            <button
-              class="rounded border border-line bg-raised px-3 py-1 text-xs text-gray-300 transition hover:bg-line disabled:opacity-50"
-              type="button"
-              :disabled="pendingAction !== '' || refreshing.has(account.id)"
-              @click="beginEdit(account)"
-            >
-              {{ t('common.edit') }}
-            </button>
-            <button
-              class="rounded border border-line bg-raised px-3 py-1 text-xs text-gray-300 transition hover:bg-line disabled:opacity-50"
-              type="button"
-              :disabled="pendingAction !== '' || refreshing.has(account.id)"
-              :aria-busy="pendingAction === `toggle:${account.id}`"
-              @click="toggleAccount(account)"
-            >
-              {{ t(account.enabled ? 'common.disable' : 'common.enable') }}
-            </button>
+          <div class="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
             <button
               v-if="account.state === 'auth_required'"
               class="rounded bg-green-600 px-3 py-1 text-xs text-white transition hover:bg-green-500 disabled:opacity-50"
@@ -701,41 +936,90 @@ async function refreshAllAccounts(): Promise<void> {
               {{ t('common.relogin') }}
             </button>
             <button
-              class="rounded border border-line bg-raised px-3 py-1 text-xs text-gray-300 transition hover:bg-line disabled:opacity-50"
+              class="relative rounded border border-line bg-raised px-3 py-1 text-xs text-gray-300 transition hover:bg-line disabled:opacity-50"
               type="button"
               :disabled="
                 refreshing.has(account.id) ||
+                queued.has(account.id) ||
                 pendingAction === `login:${account.id}` ||
                 !account.enabled
               "
               :aria-busy="refreshing.has(account.id)"
               @click="refreshAccount(account)"
             >
-              {{ t('accounts.refresh') }}
+              <span class="grid" :class="{ 'opacity-0': refreshing.has(account.id) }">
+                <span class="[grid-area:1/1]" :class="{ invisible: queued.has(account.id) }">{{
+                  t('accounts.refresh')
+                }}</span>
+                <span class="[grid-area:1/1]" :class="{ invisible: !queued.has(account.id) }">{{
+                  t('accounts.queued')
+                }}</span>
+              </span>
+              <UiIcon
+                v-if="refreshing.has(account.id)"
+                name="spinner"
+                :size="14"
+                class="absolute inset-0 m-auto"
+              />
             </button>
-            <button
-              class="rounded border border-red-900/50 bg-red-900/30 px-3 py-1 text-xs text-red-400 transition hover:bg-red-900/50 disabled:opacity-50"
-              type="button"
-              :disabled="pendingAction !== '' || refreshing.has(account.id)"
-              @click="emit('delete', account)"
-            >
-              {{ t('common.delete') }}
-            </button>
+            <DropdownMenuRoot :modal="false">
+              <DropdownMenuTrigger
+                v-tooltip="t('pg.moreOptions')"
+                class="flex size-[26px] items-center justify-center rounded border border-line bg-raised text-gray-400 transition hover:bg-line hover:text-gray-200 disabled:opacity-50"
+                :disabled="
+                  pendingAction !== '' || refreshing.has(account.id) || toggling.has(account.id)
+                "
+                :aria-label="t('pg.moreOptions')"
+                :aria-busy="toggling.has(account.id)"
+              >
+                <UiIcon :name="toggling.has(account.id) ? 'spinner' : 'more'" :size="15" />
+              </DropdownMenuTrigger>
+              <DropdownMenuPortal>
+                <DropdownMenuContent
+                  align="end"
+                  :side-offset="4"
+                  class="z-[60] min-w-40 overflow-hidden rounded-lg border border-line bg-panel p-1 shadow-xl"
+                >
+                  <DropdownMenuItem
+                    class="flex cursor-pointer items-center gap-2.5 rounded-md px-3 py-2 text-sm outline-none data-[highlighted]:bg-raised text-gray-200"
+                    @select="beginEdit(account)"
+                  >
+                    <UiIcon name="edit" :size="15" />
+                    {{ t('common.edit') }}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    class="flex cursor-pointer items-center gap-2.5 rounded-md px-3 py-2 text-sm outline-none data-[highlighted]:bg-raised text-gray-200"
+                    @select="toggleAccount(account)"
+                  >
+                    <UiIcon :name="account.enabled ? 'disable' : 'success'" :size="15" />
+                    {{ t(account.enabled ? 'common.disable' : 'common.enable') }}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator class="my-1 h-px bg-line" />
+                  <DropdownMenuItem
+                    class="flex cursor-pointer items-center gap-2.5 rounded-md px-3 py-2 text-sm outline-none data-[highlighted]:bg-raised text-red-400 data-[highlighted]:bg-red-900/30"
+                    @select="emit('delete', account)"
+                  >
+                    <UiIcon name="trash" :size="15" />
+                    {{ t('common.delete') }}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenuPortal>
+            </DropdownMenuRoot>
           </div>
         </div>
       </div>
 
       <DetailDialog
-        :open="messageAccount !== null"
-        :title="messageAccount?.label ?? ''"
-        :description="messageAccount ? t(stateKeys[messageAccount.state]) : ''"
-        :copy-text="messageAccount?.message"
-        @close="messageAccount = null"
+        :open="reason !== null"
+        :title="reason?.account.label ?? ''"
+        :description="reason?.kind ?? ''"
+        :copy-text="reason?.text"
+        @close="reason = null"
       >
         <pre
-          v-if="messageAccount"
+          v-if="reason"
           class="rounded-md border border-line bg-canvas p-3 font-mono text-xs leading-5 whitespace-pre-wrap [overflow-wrap:anywhere] text-red-300"
-          >{{ messageAccount.message }}</pre>
+          >{{ logText(reason.text) }}</pre>
       </DetailDialog>
 
       <LoginViewer
@@ -752,7 +1036,7 @@ async function refreshAllAccounts(): Promise<void> {
       <Teleport to="body">
         <div v-if="showEditor" class="modal-overlay" @click.self="closeEditor">
           <form
-            class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
+            class="mx-4 w-full max-w-md rounded-lg border border-line bg-panel p-6 shadow-xl"
             @submit.prevent="saveAccount"
           >
             <div class="mb-4 flex items-center justify-between">
@@ -766,10 +1050,7 @@ async function refreshAllAccounts(): Promise<void> {
                 <UiIcon name="close" :size="16" />
               </button>
             </div>
-            <p
-              v-tooltip.overflow="draft.label"
-              class="mb-4 truncate font-mono text-sm text-gray-300"
-            >
+            <p v-tooltip.overflow="draft.label" class="mb-4 truncate text-sm text-gray-300">
               {{ draft.label }}
             </p>
             <div class="space-y-4">
@@ -777,20 +1058,7 @@ async function refreshAllAccounts(): Promise<void> {
                 <span class="text-sm font-medium text-gray-400">{{ t('common.enable') }}</span>
                 <input v-model="draft.enabled" class="h-4 w-4 accent-blue-600" type="checkbox" />
               </label>
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.proxy')
-                }}</span>
-                <input
-                  v-model.trim="draft.proxy"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                  placeholder="socks5://127.0.0.1:1080"
-                />
-              </label>
-              <AccountRegionFields
-                v-model:locale="draft.locale"
-                v-model:timezone="draft.timezone"
-              />
+              <AccountEnvironmentFields :model-value="draft" />
             </div>
             <div class="mt-6 flex gap-2">
               <button
@@ -814,7 +1082,7 @@ async function refreshAllAccounts(): Promise<void> {
 
         <div v-if="showBrowserLogin" class="modal-overlay" @click.self="closeBrowserLogin">
           <form
-            class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
+            class="mx-4 w-full max-w-md rounded-lg border border-line bg-panel p-6 shadow-xl"
             @submit.prevent="beginBrowserLogin"
           >
             <div class="mb-4 flex items-center justify-between">
@@ -830,20 +1098,7 @@ async function refreshAllAccounts(): Promise<void> {
               </button>
             </div>
             <div class="space-y-4">
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.proxy')
-                }}</span>
-                <input
-                  v-model.trim="accountEnvironment.proxy"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                  placeholder="socks5://127.0.0.1:1080"
-                />
-              </label>
-              <AccountRegionFields
-                v-model:locale="accountEnvironment.locale"
-                v-model:timezone="accountEnvironment.timezone"
-              />
+              <AccountEnvironmentFields :model-value="accountEnvironment" />
             </div>
             <div class="mt-6 flex gap-2">
               <button
@@ -868,7 +1123,7 @@ async function refreshAllAccounts(): Promise<void> {
 
         <div v-if="showChromeImport" class="modal-overlay" @click.self="closeChromeImport">
           <form
-            class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
+            class="mx-4 w-full max-w-lg rounded-lg border border-line bg-panel p-6 shadow-xl"
             @submit.prevent="importChromeAccounts"
           >
             <div class="mb-4 flex items-center justify-between">
@@ -884,20 +1139,7 @@ async function refreshAllAccounts(): Promise<void> {
               </button>
             </div>
             <div class="mb-4 space-y-4">
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.proxy')
-                }}</span>
-                <input
-                  v-model.trim="accountEnvironment.proxy"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                  placeholder="socks5://127.0.0.1:1080"
-                />
-              </label>
-              <AccountRegionFields
-                v-model:locale="accountEnvironment.locale"
-                v-model:timezone="accountEnvironment.timezone"
-              />
+              <AccountEnvironmentFields :model-value="accountEnvironment" />
             </div>
             <div v-if="chromeProfiles.length === 0" class="py-8 text-center text-sm text-gray-500">
               {{ t('accounts.chromeEmpty') }}
@@ -967,262 +1209,194 @@ async function refreshAllAccounts(): Promise<void> {
 
         <div v-if="showCookieImport" class="modal-overlay" @click.self="closeCookieImport">
           <form
-            class="cookie-import-dialog mx-3 flex max-h-[calc(100dvh-1.5rem)] min-w-0 w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-line bg-panel shadow-xl sm:mx-4 sm:max-h-[calc(100dvh-2rem)]"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="cookie-import-title"
-            aria-describedby="cookie-import-description"
-            autocomplete="off"
-            @submit.prevent="importCookieAccount"
-            @keydown.esc="closeCookieImport"
+            class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
+            @submit.prevent="importCookieAccount()"
           >
-            <div
-              class="flex shrink-0 items-start justify-between gap-3 border-b border-line p-4 sm:px-6 sm:py-5"
-            >
-              <div class="flex min-w-0 items-start gap-3">
-                <span
-                  class="flex size-10 shrink-0 items-center justify-center rounded-lg border border-blue-500/20 bg-blue-500/10 text-blue-400"
-                >
-                  <UiIcon name="cookie" :size="20" />
-                </span>
-                <div class="min-w-0">
-                  <h3 id="cookie-import-title" class="text-lg font-semibold leading-6 text-white">
-                    {{ t('accounts.pasteCookie') }}
-                  </h3>
-                  <p
-                    id="cookie-import-description"
-                    class="mt-1 hidden text-sm leading-5 text-gray-500 sm:block"
-                  >
-                    {{ t('accounts.pasteCookieHelp') }}
-                  </p>
-                </div>
-              </div>
+            <div class="mb-4 flex items-center justify-between">
+              <h3 class="text-lg font-bold text-white">{{ t('accounts.pasteCookie') }}</h3>
               <button
-                class="flex size-11 shrink-0 items-center justify-center rounded-lg text-gray-500 transition hover:bg-raised hover:text-white disabled:opacity-50"
+                class="rounded p-1 text-gray-500 hover:bg-line hover:text-white disabled:opacity-50"
                 type="button"
-                :disabled="pendingAction !== ''"
                 :aria-label="t('common.close')"
                 @click="closeCookieImport"
               >
-                <UiIcon name="close" :size="18" />
+                <UiIcon name="close" :size="16" />
               </button>
             </div>
-            <div class="min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6">
-              <details class="group mb-4 rounded-lg border border-line sm:hidden">
-                <summary
-                  class="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2 text-sm text-gray-400 hover:bg-raised"
+            <ol class="mb-5 list-decimal space-y-1 pl-5 text-sm leading-6 text-gray-300">
+              <li v-for="step in pasteSteps" :key="step">{{ t(step) }}</li>
+            </ol>
+            <div class="space-y-4">
+              <p class="text-xs leading-5 text-gray-400">{{ t('accounts.cookieHelp') }}</p>
+              <p class="text-xs leading-5 text-amber-200">{{ t('accounts.cookieSecurity') }}</p>
+              <div class="flex items-center gap-3">
+                <input
+                  ref="cookieFile"
+                  type="file"
+                  class="hidden"
+                  accept=".json,.txt,.cookies,text/plain,application/json"
+                  :disabled="pendingAction !== ''"
+                  @change="readCookieFile"
+                />
+                <button
+                  type="button"
+                  class="text-xs text-blue-400 disabled:opacity-50"
+                  :disabled="pendingAction !== ''"
+                  @click="cookieFile?.click()"
                 >
-                  {{ t('accounts.cookieInstructions') }}
+                  {{ t('accounts.cookieFile') }}
+                </button>
+                <button
+                  type="button"
+                  class="text-xs text-gray-400 hover:text-white"
+                  @click="clearCookieInput"
+                >
+                  {{ t('pg.reset') }}
+                </button>
+              </div>
+              <label class="block">
+                <span class="mb-1 block text-sm font-medium text-gray-300">{{
+                  t('accounts.cookies')
+                }}</span>
+                <textarea
+                  v-model="cookieText"
+                  class="h-36 w-full resize-y rounded border border-line bg-canvas px-3 py-2 font-mono text-xs text-white transition focus:border-blue-500 focus:outline-none"
+                  spellcheck="false"
+                  autocomplete="off"
+                  :placeholder="t('accounts.cookiePlaceholder')"
+                  :maxlength="maxCookieBytes"
+                  :readonly="pendingAction !== ''"
+                  required
+                  @input="resetCookieDiscovery"
+                />
+              </label>
+
+              <label class="block text-sm text-gray-300">
+                <span class="mb-1 block">{{ t('accounts.cookieMethod') }}</span>
+                <UiSelect
+                  v-model="cookieMethod"
+                  class="w-full rounded border border-line bg-canvas px-3 py-2"
+                  :disabled="pendingAction !== ''"
+                >
+                  <option value="browser">{{ t('accounts.cookieMethodBrowser') }}</option>
+                  <option value="http">{{ t('accounts.cookieMethodHttp') }}</option>
+                </UiSelect>
+              </label>
+              <p v-if="cookieMethod === 'http'" class="text-xs leading-5 text-gray-400">
+                {{ t('accounts.cookieMethodHttpHelp') }}
+              </p>
+              <p v-if="cookieImportError" role="alert" class="text-sm break-words text-red-300">
+                {{ cookieImportError }}
+              </p>
+
+              <div v-if="cookieCandidates.length > 0" class="space-y-2">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium text-gray-400">
+                    {{ t('accounts.cookieAccounts') }} ({{ cookieCandidates.length }})
+                  </span>
+                  <button
+                    class="text-xs text-blue-400 transition hover:text-blue-300"
+                    type="button"
+                    @click="toggleAllCookieCandidates"
+                  >
+                    {{
+                      allCookieCandidatesSelected
+                        ? t('accounts.deselectAll')
+                        : t('accounts.selectAll')
+                    }}
+                  </button>
+                </div>
+                <div class="max-h-[35vh] space-y-2 overflow-auto">
+                  <label
+                    v-for="candidate in cookieCandidates"
+                    :key="candidate.auth_user"
+                    class="flex items-center gap-3 rounded border border-line bg-canvas p-3 transition"
+                    :class="
+                      candidate.imported ? 'opacity-60' : 'cursor-pointer hover:border-gray-600'
+                    "
+                  >
+                    <input
+                      v-model="selectedCookieUsers"
+                      class="h-4 w-4 shrink-0 accent-blue-600"
+                      type="checkbox"
+                      :value="candidate.auth_user"
+                      :disabled="candidate.imported"
+                    />
+                    <span class="min-w-0 flex-1">
+                      <strong
+                        v-tooltip.overflow="candidate.email"
+                        class="block truncate text-sm text-white"
+                      >
+                        {{ candidate.email }}
+                      </strong>
+                      <span class="block truncate font-mono text-xs text-gray-400">
+                        u/{{ candidate.auth_user }}
+                      </span>
+                    </span>
+                    <span v-if="candidate.imported" class="shrink-0 text-xs text-gray-400">{{
+                      t('accounts.alreadyImported')
+                    }}</span>
+                  </label>
+                </div>
+              </div>
+
+              <details class="group rounded border border-line">
+                <summary
+                  class="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm text-gray-400 hover:text-gray-200"
+                >
                   <UiIcon
                     name="chevronRight"
                     :size="14"
                     class="transition-transform group-open:rotate-90"
                   />
+                  {{ t('accounts.moreSettings') }}
                 </summary>
-                <ol
-                  class="list-decimal space-y-2 border-t border-line py-3 pr-3 pl-8 text-xs leading-5 text-gray-400"
-                >
-                  <li v-for="step in pasteSteps" :key="step">{{ t(step) }}</li>
-                </ol>
-              </details>
-              <ol
-                class="mb-5 hidden gap-3 border-b border-line pb-5 sm:grid sm:grid-cols-2 sm:gap-5"
-              >
-                <li
-                  v-for="(step, index) in pasteSteps"
-                  :key="step"
-                  class="flex min-w-0 items-start gap-2.5"
-                >
-                  <span
-                    class="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-raised text-xs font-semibold text-gray-400"
-                    aria-hidden="true"
-                  >
-                    {{ index + 1 }}
-                  </span>
-                  <span class="text-xs leading-5 text-gray-400">{{ t(step) }}</span>
-                </li>
-              </ol>
-              <fieldset class="min-w-0 space-y-5" :disabled="pendingAction !== ''">
-                <div class="grid items-start gap-5 md:grid-cols-[minmax(0,1fr)_16rem] md:gap-6">
-                  <div class="min-w-0">
-                    <div class="mb-2 flex items-center justify-between gap-3">
-                      <label for="cookie-import-text" class="text-sm font-semibold text-white">
-                        {{ t('accounts.cookies') }}
-                      </label>
-                      <span
-                        class="rounded border border-line px-1.5 py-0.5 font-mono text-xs text-gray-500"
-                        >1 MiB</span
-                      >
-                    </div>
-                    <p id="cookie-import-help" class="mb-3 text-xs leading-5 text-gray-500">
-                      {{ t('accounts.cookieHelp') }}
-                    </p>
-                    <div
-                      class="overflow-hidden rounded-lg border border-line bg-canvas transition focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/10"
-                    >
-                      <textarea
-                        id="cookie-import-text"
-                        v-model="cookieText"
-                        class="block h-52 max-h-96 min-h-40 w-full resize-y bg-transparent p-3 font-mono text-xs leading-6 text-white placeholder:text-gray-600 focus:outline-none disabled:opacity-60 sm:p-4 md:h-72"
-                        spellcheck="false"
-                        autocomplete="off"
-                        autocapitalize="off"
-                        autocorrect="off"
-                        data-lpignore="true"
-                        data-1p-ignore
-                        maxlength="1048576"
-                        aria-describedby="cookie-import-help cookie-import-security"
-                        :placeholder="t('accounts.cookiePlaceholder')"
-                        required
-                      />
-                      <div class="border-t border-line p-3">
-                        <label
-                          for="cookie-import-file"
-                          class="mb-2 flex items-center gap-2 text-xs font-medium text-gray-400"
-                        >
-                          <UiIcon name="importAccounts" :size="14" />
-                          {{ t('accounts.cookieFile') }}
-                        </label>
-                        <input
-                          id="cookie-import-file"
-                          class="block min-w-0 w-full rounded text-xs text-gray-500 file:mr-3 file:cursor-pointer file:rounded file:border file:border-line file:bg-raised file:px-3 file:py-2 file:text-xs file:font-medium file:text-gray-300 file:transition hover:file:bg-line focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:opacity-60"
-                          type="file"
-                          accept=".json,.txt,.cookies,application/json,text/plain"
-                          aria-describedby="cookie-import-help"
-                          @change="readCookieFile"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                  <div class="min-w-0 space-y-4">
-                    <fieldset class="min-w-0">
-                      <legend class="mb-3 text-sm font-semibold text-white">
-                        {{ t('accounts.cookieMethod') }}
-                      </legend>
-                      <div class="grid gap-2.5 sm:grid-cols-2 md:grid-cols-1">
-                        <label
-                          class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition focus-within:ring-2 focus-within:ring-blue-500/20 has-disabled:cursor-not-allowed has-disabled:opacity-60"
-                          :class="
-                            cookieMethod === 'browser'
-                              ? 'border-blue-500/60 bg-blue-500/10'
-                              : 'border-line bg-canvas hover:border-line-strong'
-                          "
-                        >
-                          <input
-                            v-model="cookieMethod"
-                            class="mt-0.5 size-4 shrink-0 accent-blue-600"
-                            type="radio"
-                            name="cookie-import-method"
-                            value="browser"
-                          />
-                          <span class="min-w-0 text-sm font-medium leading-5 text-gray-300">{{
-                            t('accounts.cookieMethodBrowser')
-                          }}</span>
-                        </label>
-                        <label
-                          class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition focus-within:ring-2 focus-within:ring-blue-500/20 has-disabled:cursor-not-allowed has-disabled:opacity-60"
-                          :class="
-                            cookieMethod === 'http'
-                              ? 'border-blue-500/60 bg-blue-500/10'
-                              : 'border-line bg-canvas hover:border-line-strong'
-                          "
-                        >
-                          <input
-                            v-model="cookieMethod"
-                            class="mt-0.5 size-4 shrink-0 accent-blue-600"
-                            type="radio"
-                            name="cookie-import-method"
-                            value="http"
-                            aria-labelledby="cookie-import-http-label"
-                            aria-describedby="cookie-import-http-help"
-                          />
-                          <span class="min-w-0">
-                            <span
-                              id="cookie-import-http-label"
-                              class="block text-sm font-medium leading-5 text-gray-300"
-                              >{{ t('accounts.cookieMethodHttp') }}</span
-                            >
-                            <span
-                              id="cookie-import-http-help"
-                              class="mt-2 block text-xs leading-5 text-gray-500"
-                            >
-                              {{ t('accounts.cookieMethodHttpHelp') }}
-                            </span>
-                          </span>
-                        </label>
-                      </div>
-                    </fieldset>
-                    <div
-                      class="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-amber-200"
-                    >
-                      <UiIcon name="lock" :size="15" class="mt-0.5" />
-                      <p id="cookie-import-security" class="min-w-0 text-xs leading-5">
-                        {{ t('accounts.cookieSecurity') }}
-                      </p>
-                    </div>
-                  </div>
+                <div class="space-y-4 border-t border-line p-3">
+                  <AccountEnvironmentFields :model-value="accountEnvironment" />
                 </div>
-                <details class="group rounded-lg border border-line">
-                  <summary
-                    class="flex min-h-11 cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-sm text-gray-400 transition hover:bg-raised hover:text-gray-200"
-                  >
-                    <UiIcon name="options" :size="15" />
-                    {{ t('accounts.moreSettings') }}
-                    <UiIcon
-                      name="chevronRight"
-                      :size="14"
-                      class="ml-auto transition-transform group-open:rotate-90"
-                    />
-                  </summary>
-                  <div class="space-y-4 border-t border-line p-4">
-                    <label class="block">
-                      <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                        t('accounts.proxy')
-                      }}</span>
-                      <input
-                        v-model.trim="accountEnvironment.proxy"
-                        class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                        placeholder="socks5://127.0.0.1:1080"
-                      />
-                    </label>
-                    <AccountRegionFields
-                      v-model:locale="accountEnvironment.locale"
-                      v-model:timezone="accountEnvironment.timezone"
-                    />
-                  </div>
-                </details>
-              </fieldset>
+              </details>
             </div>
-            <div
-              class="flex shrink-0 justify-end gap-3 border-t border-line bg-panel px-4 py-3 sm:px-6 sm:py-4"
-            >
+            <div class="mt-6 flex gap-2">
               <button
-                class="min-h-11 flex-1 rounded-lg border border-line bg-raised px-5 py-2 text-sm font-medium text-gray-300 transition hover:bg-line disabled:opacity-50 sm:flex-none"
+                class="flex-1 rounded bg-raised py-2 text-sm text-gray-300 transition hover:bg-line disabled:opacity-50"
                 type="button"
-                :disabled="pendingAction !== ''"
                 @click="closeCookieImport"
               >
                 {{ t('common.cancel') }}
               </button>
               <button
-                class="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50 sm:min-w-28 sm:flex-none"
+                class="flex-1 rounded bg-blue-600 py-2 text-sm text-white transition hover:bg-blue-500 disabled:opacity-50"
                 type="submit"
-                :disabled="pendingAction !== '' || !cookieText.trim()"
-                :aria-busy="pendingAction === 'cookie-import'"
+                :disabled="
+                  pendingAction !== '' ||
+                  (cookieCandidates.length > 0 && selectedCookieUsers.length === 0)
+                "
+                :aria-busy="
+                  pendingAction === 'cookie-import' || pendingAction === 'cookie-discover'
+                "
               >
-                <UiIcon
-                  :name="pendingAction === 'cookie-import' ? 'spinner' : 'importAccounts'"
-                  :size="16"
-                />
                 {{
-                  t(
-                    pendingAction === 'cookie-import'
-                      ? 'accounts.cookieImporting'
-                      : 'accounts.import',
-                  )
+                  cookieCandidates.length > 0 ? t('accounts.importSelected') : t('accounts.import')
                 }}
               </button>
             </div>
+            <button
+              v-if="cookieCandidates.length === 0"
+              type="button"
+              class="mt-3 w-full text-xs text-blue-400 disabled:opacity-50"
+              :disabled="pendingAction !== '' || cookieText.trim() === ''"
+              @click="importCookieAccount(true)"
+            >
+              {{ t('accounts.import') }} ·
+              {{
+                t(
+                  cookieMethod === 'browser'
+                    ? 'accounts.cookieMethodBrowser'
+                    : 'accounts.cookieMethodHttp',
+                )
+              }}
+              · u/0
+            </button>
           </form>
         </div>
         <div v-if="showBrowserImport" class="modal-overlay" @click.self="closeBrowserImport">
@@ -1271,7 +1445,7 @@ async function refreshAllAccounts(): Promise<void> {
             <div v-else class="max-h-[50vh] space-y-2 overflow-auto">
               <label
                 v-for="browser in cookieBrowsers"
-                :key="browser.address"
+                :key="browserKey(browser)"
                 class="flex items-center gap-3 rounded border border-line bg-canvas p-3 transition"
                 :class="
                   browser.email && !browser.imported && !browser.error
@@ -1283,7 +1457,7 @@ async function refreshAllAccounts(): Promise<void> {
                   v-model="selectedBrowsers"
                   class="h-4 w-4 shrink-0 accent-blue-600"
                   type="checkbox"
-                  :value="browser.address"
+                  :value="browserKey(browser)"
                   :disabled="!browser.email || browser.imported || browser.error !== ''"
                 />
                 <span class="min-w-0 flex-1">
@@ -1349,7 +1523,7 @@ async function refreshAllAccounts(): Promise<void> {
         </div>
         <div v-if="pairing" class="modal-overlay" @click.self="pairing = null">
           <div
-            class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
+            class="mx-4 w-full max-w-lg rounded-lg border border-line bg-panel p-6 shadow-xl"
             role="dialog"
             aria-modal="true"
             aria-labelledby="pairing-title"
@@ -1431,18 +1605,3 @@ async function refreshAllAccounts(): Promise<void> {
     </div>
   </section>
 </template>
-
-<style scoped>
-/* Keep editor sizing independent of the shared unlayered form font reset. */
-.cookie-import-dialog textarea {
-  font-size: 0.8125rem;
-  line-height: 1.5rem;
-}
-
-@media (width < 40rem) {
-  .cookie-import-dialog textarea,
-  .cookie-import-dialog :deep(input:not([type='file'], [type='radio'])) {
-    font-size: 1rem;
-  }
-}
-</style>

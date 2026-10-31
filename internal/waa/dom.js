@@ -2,6 +2,7 @@
 (function installDOM(shape, profile, host) {
   'use strict';
   const g = globalThis;
+  const { Object, Function, Array, Boolean, Date, Number, String, RegExp, Error, TypeError, RangeError, Map, Set, WeakMap, Promise, Symbol, Reflect, JSON, Math, Uint8Array, Uint8ClampedArray, Int8Array, ArrayBuffer, DataView } = g;
   const markNative = host.markNative;
   const native = (fn, name, sourceName) => {
     Object.defineProperty(fn, 'name', { configurable: true, value: name });
@@ -45,15 +46,8 @@
     }
     throw new type(message);
   };
-  const isA = (iface, target) => {
-    for (let current = iface; current; current = parentOf[current]) if (current === target) return true;
-    return false;
-  };
-  const brandCheck = (self, iface) => {
-    if (self === undefined || self === null) self = g;
-    const brand = self !== null && (typeof self === 'object' || typeof self === 'function') ? brands.get(self) : undefined;
-    return brand && isA(brand.iface, iface) ? brand : null;
-  };
+  const isA = host.isA;
+  const brandCheck = host.brandCheck;
   const brandError = (iface, member) => {
     const error = new TypeError("'" + member + "' called on an object that does not implement interface " + iface + '.');
     return error;
@@ -63,13 +57,9 @@
     if (!brand) throw brandError(iface, member);
     return brand;
   };
-  const realmOfPath = path => {
-    if (path.startsWith('top.') && topRealm) return [topRealm, path.slice(4)];
-    return [api, path.replace(/^(frame|top)\./, '')];
-  };
   const resolveRef = path => {
-    const [target, key] = realmOfPath(path);
-    return target.singleton(key);
+    if (path.startsWith('top.')) return (topRealm || api).singleton(path.slice(4));
+    return api.singleton(path.startsWith('frame.') ? path.slice(6) : path);
   };
   const decode = encoded => {
     switch (encoded.t) {
@@ -107,18 +97,50 @@
     if (encoded.t === 'b') return Boolean(value);
     return value;
   };
+  // memberTables 是安装完成后按接口与成员名索引的特殊 getter 与方法表
+  let memberTables = null;
+  // memberTable 把以“接口.成员”为键的表转为按接口与成员名索引的两层表
+  const memberTable = table => {
+    const result = Object.create(null);
+    for (const key of Object.keys(table)) {
+      const dot = key.indexOf('.');
+      const iface = key.slice(0, dot);
+      (result[iface] || (result[iface] = Object.create(null)))[key.slice(dot + 1)] = table[key];
+    }
+    return result;
+  };
+  // lookupMember 按声明接口、实例接口与通配接口的顺序取成员实现
+  const lookupMember = (table, indexed, declared, iface, name) => {
+    if (indexed === null) return (declared && table[declared + '.' + name]) || table[iface + '.' + name] || table['*.' + name];
+    const own = declared && indexed[declared];
+    const exact = indexed[iface];
+    const any = indexed['*'];
+    return (own && own[name]) || (exact && exact[name]) || (any && any[name]);
+  };
   const readValue = (self, brand, name, declared) => {
-    if (Object.prototype.hasOwnProperty.call(brand.over, name)) return brand.over[name];
-    if (brand.cache.has(name)) return brand.cache.get(name);
-    const special = (declared && getters[declared + '.' + name]) || getters[brand.iface + '.' + name] || getters['*.' + name];
+    if (name in brand.over) return brand.over[name];
+    const cached = brand.cache.get(name);
+    if (cached !== undefined) return cached;
+    const special = lookupMember(getters, memberTables && memberTables.getters, declared, brand.iface, name);
     if (special) return special.call(self, brand);
     const encoded = Object.prototype.hasOwnProperty.call(brand.values, name) ? brand.values[name] : defaultFor(brand.iface, name);
     if (encoded === undefined) {
       return undefined;
     }
     const value = decode(encoded);
-    if (encoded.t === 'o' || encoded.t === 'a' || encoded.t === 'f') brand.cache.set(name, value);
+    if (encoded.t === 'o' || encoded.t === 'a' || encoded.t === 'f' || stableValue(encoded, name, value)) brand.cache.set(name, value);
     return value;
+  };
+  // stableValue 判断没有特殊 getter 的成员解码出的原始值或单例在之后的读取中不变
+  const stableValue = (encoded, name, value) => {
+    if (value === undefined || memberTables === null || name in memberTables.special) return false;
+    switch (encoded.t) {
+      case 's': case 'b': case 'n': case 'null': case 'bigint': return true;
+      case 'ref':
+        if (encoded.v.startsWith('top.')) return (topRealm || api).stableSingleton(encoded.v.slice(4));
+        return api.stableSingleton(encoded.v.startsWith('frame.') ? encoded.v.slice(6) : encoded.v);
+      default: return false;
+    }
   };
   const read = (self, brand, name, declared) => {
     const value = exposed(readValue(self, brand, name, declared));
@@ -134,7 +156,7 @@
     if (brand.owner) (brand.owner.attrs || (brand.owner.attrs = new Map())).set('style', inlineStyle(brand));
   };
   const invoke = (self, brand, iface, name, args) => {
-    const implementation = methods[iface + '.' + name] || methods['*.' + name];
+    const implementation = lookupMember(methods, memberTables && memberTables.methods, null, iface, name);
     const result = implementation ? implementation.call(self, brand, args) : undefined;
     return result;
   };
@@ -230,13 +252,7 @@
   };
   host.setTemplateResolver(templateProperty);
   let quietCreate = 0;
-  const exposed = value => {
-    if (host.resolveInterface && value !== null && typeof value === 'object') {
-      const brand = brands.get(value);
-      if (brand) host.resolveInterface(brand.iface);
-    }
-    return value;
-  };
+  const exposed = host.exposed;
   const create = (iface, values) => {
     const info = infos[iface];
     const proto = protos[iface] || Object.prototype;
@@ -300,6 +316,7 @@
       protos[info.n] = protos[info.cn];
     }
   }
+  host.interfaceParents(parentOf);
   const realmShape = shape[realmName];
   const windowValues = Object.assign({}, realmShape.windowValues);
   const profileWindow = (profile.window || {});
@@ -405,6 +422,8 @@
       }
       return object;
     },
+    // stableSingleton 判断已取得的单例在之后的 singleton 调用中保持同一对象；创建 document 时会替换先行创建的 document 子节点单例
+    stableSingleton: path => !path.startsWith('document.') || singletons.document !== undefined,
     ctor: name => ctors[name],
     proto: name => protos[name],
     pageOrigin: () => pageOrigin(),
@@ -561,10 +580,10 @@
     if (typeof handler !== 'function') return;
     if (name === 'error' && node === g && isA(eventBrand.iface, 'ErrorEvent')) {
       const field = key => readValue(event, eventBrand, key);
-      if (handler.call(node, field('message'), field('filename'), field('lineno'), field('colno'), field('error')) === true) cancelEvent(eventBrand);
+      if (host.callListener(handler, node, field('message'), field('filename'), field('lineno'), field('colno'), field('error')) === true) cancelEvent(eventBrand);
       return;
     }
-    if (handler.call(node, event) === false) cancelEvent(eventBrand);
+    if (host.callListener(handler, node, event) === false) cancelEvent(eventBrand);
   };
   let reporting = false;
   // reportException 按 Firefox 报告未捕获异常：在本 Realm 的 window 上派发 ErrorEvent 并调用 onerror
@@ -622,11 +641,11 @@
       try {
         const listener = entry.listener;
         if (entry.handler) callHandler(node, event, eventBrand, name);
-        else if (typeof listener === 'function') listener.call(node, event);
+        else if (typeof listener === 'function') host.callListener(listener, node, event);
         else if (listener !== null && typeof listener === 'object') {
           const handleEvent = listener.handleEvent;
           if (typeof handleEvent !== 'function') throw new TypeError("Property 'handleEvent' is not callable.");
-          handleEvent.call(listener, event);
+          host.callListener(handleEvent, listener, event);
         }
       } catch (error) {
         reportException(error);
@@ -1130,6 +1149,7 @@
     '*.childNodes': function (brand) { return liveCollection(this, 'childNodes', 'NodeList', () => childrenOf(brand).slice()); },
     'NodeList.length': brand => brand.items ? brand.items.length : 0,
     'HTMLCollection.length': brand => brand.items ? brand.items.length : 0,
+    'CharacterData.length': brand => dataOf(brand).length,
     '*.children': function (brand) { return liveCollection(this, 'children', 'HTMLCollection', () => childrenOf(brand).filter(isElement)); },
     '*.firstChild': brand => childrenOf(brand)[0] || null,
     '*.lastChild': brand => childrenOf(brand)[childrenOf(brand).length - 1] || null,
@@ -1898,208 +1918,8 @@
     },
   });
   const iteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
-  const intrinsicPaths = {
-    '%TypedArray%': () => Object.getPrototypeOf(g.Int8Array),
-    '%TypedArray%.prototype': () => Object.getPrototypeOf(g.Int8Array.prototype),
-    '%IteratorPrototype%': () => iteratorPrototype,
-    '%ArrayIteratorPrototype%': () => Object.getPrototypeOf([][Symbol.iterator]()),
-    '%MapIteratorPrototype%': () => Object.getPrototypeOf(new Map()[Symbol.iterator]()),
-    '%SetIteratorPrototype%': () => Object.getPrototypeOf(new Set()[Symbol.iterator]()),
-    '%StringIteratorPrototype%': () => Object.getPrototypeOf(''[Symbol.iterator]()),
-    '%RegExpStringIteratorPrototype%': () => Object.getPrototypeOf(/a/g[Symbol.matchAll]('')),
-    '%GeneratorFunction%': () => Object.getPrototypeOf(function* () {}).constructor,
-    '%GeneratorFunction.prototype%': () => Object.getPrototypeOf(function* () {}),
-    '%GeneratorPrototype%': () => Object.getPrototypeOf(function* () {}).prototype,
-    '%AsyncFunction%': () => Object.getPrototypeOf(async function () {}).constructor,
-    '%AsyncFunction.prototype%': () => Object.getPrototypeOf(async function () {}),
-  };
-  const resolveBuiltinPath = path => {
-    if (intrinsicPaths[path]) { try { return intrinsicPaths[path](); } catch (e) { return undefined; } }
-    let object = g;
-    for (const part of path.split('.')) {
-      if (object === undefined || object === null) return undefined;
-      const descriptor = Object.getOwnPropertyDescriptor(object, part);
-      object = descriptor && 'value' in descriptor ? descriptor.value : undefined;
-    }
-    return object;
-  };
-  const requireObjectCoercible = (value, name) => { if (value === undefined || value === null) throw new TypeError('String.prototype.' + name + ' called on null or undefined'); return value; };
-  const htmlMethod = (name, tag, attribute) => function (value) {
-    const text = String(requireObjectCoercible(this, name));
-    return '<' + tag + (attribute ? ' ' + attribute + '="' + String(value).replace(/"/g, '&quot;') + '"' : '') + '>' + text + '</' + tag + '>';
-  };
-  const loneSurrogate = (text, index) => {
-    const code = text.charCodeAt(index);
-    if (code >= 0xD800 && code <= 0xDBFF) { const next = text.charCodeAt(index + 1); return next >= 0xDC00 && next <= 0xDFFF ? 0 : 1; }
-    return code >= 0xDC00 && code <= 0xDFFF ? 1 : -1;
-  };
-  const float16Round = value => {
-    const number = Number(value);
-    if (!Number.isFinite(number) || number === 0) return number;
-    const sign = number < 0 ? -1 : 1;
-    const magnitude = Math.abs(number);
-    const exponent = Math.max(Math.floor(Math.log2(magnitude)), -14);
-    const quantum = Math.pow(2, exponent - 10);
-    const scaled = magnitude / quantum;
-    let rounded = Math.floor(scaled);
-    const remainder = scaled - rounded;
-    if (remainder > 0.5 || (remainder === 0.5 && rounded % 2 === 1)) rounded++;
-    const result = rounded * quantum;
-    return sign * (result > 65504 ? Infinity : result);
-  };
-  const setLike = other => ({ size: Number(other.size), has: value => other.has(value), keys: () => other.keys() });
-  const builtinImplementations = {
-    'String.prototype.anchor': htmlMethod('anchor', 'a', 'name'),
-    'String.prototype.big': htmlMethod('big', 'big'),
-    'String.prototype.blink': htmlMethod('blink', 'blink'),
-    'String.prototype.bold': htmlMethod('bold', 'b'),
-    'String.prototype.fixed': htmlMethod('fixed', 'tt'),
-    'String.prototype.fontcolor': htmlMethod('fontcolor', 'font', 'color'),
-    'String.prototype.fontsize': htmlMethod('fontsize', 'font', 'size'),
-    'String.prototype.italics': htmlMethod('italics', 'i'),
-    'String.prototype.link': htmlMethod('link', 'a', 'href'),
-    'String.prototype.small': htmlMethod('small', 'small'),
-    'String.prototype.strike': htmlMethod('strike', 'strike'),
-    'String.prototype.sub': htmlMethod('sub', 'sub'),
-    'String.prototype.sup': htmlMethod('sup', 'sup'),
-    'String.prototype.isWellFormed': function () {
-      const text = String(requireObjectCoercible(this, 'isWellFormed'));
-      for (let index = 0; index < text.length; index++) { const kind = loneSurrogate(text, index); if (kind === 1) return false; if (kind === 0) index++; }
-      return true;
-    },
-    'String.prototype.toWellFormed': function () {
-      const text = String(requireObjectCoercible(this, 'toWellFormed'));
-      let output = '';
-      for (let index = 0; index < text.length; index++) {
-        const kind = loneSurrogate(text, index);
-        if (kind === 1) { output += '�'; continue; }
-        if (kind === 0) { output += text[index] + text[index + 1]; index++; continue; }
-        output += text[index];
-      }
-      return output;
-    },
-    'Date.prototype.getYear': function () { const year = Date.prototype.getFullYear.call(this); return Number.isNaN(year) ? NaN : year - 1900; },
-    'Date.prototype.setYear': function (value) { let year = Number(value); if (Number.isNaN(year)) return Date.prototype.setTime.call(this, NaN); year = Math.trunc(year); if (year >= 0 && year <= 99) year += 1900; if (Number.isNaN(Date.prototype.getTime.call(this))) Date.prototype.setTime.call(this, 0); return Date.prototype.setFullYear.call(this, year); },
-    'Date.prototype.toGMTString': Date.prototype.toUTCString,
-    'Object.prototype.__defineGetter__': function (name, getter) { if (typeof getter !== 'function') throw new TypeError('invalid getter usage'); define(Object(this), name, { get: getter, enumerable: true, configurable: true }); },
-    'Object.prototype.__defineSetter__': function (name, setter) { if (typeof setter !== 'function') throw new TypeError('invalid setter usage'); define(Object(this), name, { set: setter, enumerable: true, configurable: true }); },
-    'Object.prototype.__lookupGetter__': function (name) { for (let object = Object(this); object; object = Object.getPrototypeOf(object)) { const descriptor = Object.getOwnPropertyDescriptor(object, name); if (descriptor) return descriptor.get; } return undefined; },
-    'Object.prototype.__lookupSetter__': function (name) { for (let object = Object(this); object; object = Object.getPrototypeOf(object)) { const descriptor = Object.getOwnPropertyDescriptor(object, name); if (descriptor) return descriptor.set; } return undefined; },
-    'Object.groupBy': (items, callback) => { const groups = Object.create(null); let index = 0; for (const item of items) { const key = callback(item, index++); const property = typeof key === 'symbol' ? key : String(key); (groups[property] || (groups[property] = [])).push(item); } return groups; },
-    'Map.groupBy': (items, callback) => { const groups = new Map(); let index = 0; for (const item of items) { const key = callback(item, index++); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(item); } return groups; },
-    'Array.fromAsync': items => Promise.resolve(Array.from(items)),
-    'ArrayBuffer.prototype.transfer': function (length) { return host.transferBuffer(this, length); },
-    'ArrayBuffer.prototype.transferToFixedLength': function (length) { return host.transferBuffer(this, length); },
-    'Promise.withResolvers': function () { let resolve; let reject; const promise = new this((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; },
-    'Promise.try': function (callback, ...args) { return new this(resolve => resolve(callback(...args))); },
-    'Error.captureStackTrace': object => { if (object === null || typeof object !== 'object') throw new TypeError('Error.captureStackTrace: Argument 1 is not an object.'); define(object, 'stack', { value: new Error().stack.split('\n').slice(1).join('\n'), writable: true, configurable: true }); },
-    'Math.f16round': float16Round,
-    'Math.sumPrecise': items => { let total = -0; for (const item of items) { if (typeof item !== 'number') throw new TypeError('Math.sumPrecise: value is not a number'); total += item; } return total; },
-    'Set.prototype.union': function (other) { const result = new Set(this); for (const value of setLike(other).keys()) result.add(value); return result; },
-    'Set.prototype.intersection': function (other) { const like = setLike(other); const result = new Set(); for (const value of this) if (like.has(value)) result.add(value); return result; },
-    'Set.prototype.difference': function (other) { const like = setLike(other); const result = new Set(); for (const value of this) if (!like.has(value)) result.add(value); return result; },
-    'Set.prototype.symmetricDifference': function (other) { const result = new Set(this); for (const value of setLike(other).keys()) { if (this.has(value)) result.delete(value); else result.add(value); } return result; },
-    'Set.prototype.isSubsetOf': function (other) { const like = setLike(other); for (const value of this) if (!like.has(value)) return false; return true; },
-    'Set.prototype.isSupersetOf': function (other) { for (const value of setLike(other).keys()) if (!this.has(value)) return false; return true; },
-    'Set.prototype.isDisjointFrom': function (other) { const like = setLike(other); for (const value of this) if (like.has(value)) return false; return true; },
-    'Map.prototype.getOrInsert': function (key, value) { if (!this.has(key)) this.set(key, value); return this.get(key); },
-    'Map.prototype.getOrInsertComputed': function (key, callback) { if (!this.has(key)) this.set(key, callback(key)); return this.get(key); },
-    'WeakMap.prototype.getOrInsert': function (key, value) { if (!this.has(key)) this.set(key, value); return this.get(key); },
-    'WeakMap.prototype.getOrInsertComputed': function (key, callback) { if (!this.has(key)) this.set(key, callback(key)); return this.get(key); },
-    'RegExp.escape': value => { if (typeof value !== 'string') throw new TypeError('RegExp.escape: Argument 1 is not a string.'); return value.replace(/[\\^$.*+?()[\]{}|\/]/g, '\\$&'); },
-    'Uint8Array.fromBase64': text => { const binary = g.atob(String(text).replace(/-/g, '+').replace(/_/g, '/')); const bytes = new Uint8Array(binary.length); for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index); return bytes; },
-    'Uint8Array.prototype.toBase64': function () { let binary = ''; for (let index = 0; index < this.length; index++) binary += String.fromCharCode(this[index]); return g.btoa(binary); },
-    'Atomics.isLockFree': size => [1, 2, 4, 8].includes(Number(size)),
-    'Atomics.load': (array, index) => array[index],
-    'Atomics.store': (array, index, value) => (array[index] = value, array[index]),
-    'Atomics.add': (array, index, value) => { const old = array[index]; array[index] = old + value; return old; },
-    'Atomics.sub': (array, index, value) => { const old = array[index]; array[index] = old - value; return old; },
-    'Atomics.and': (array, index, value) => { const old = array[index]; array[index] = old & value; return old; },
-    'Atomics.or': (array, index, value) => { const old = array[index]; array[index] = old | value; return old; },
-    'Atomics.xor': (array, index, value) => { const old = array[index]; array[index] = old ^ value; return old; },
-    'Atomics.exchange': (array, index, value) => { const old = array[index]; array[index] = value; return old; },
-    'Atomics.compareExchange': (array, index, expected, value) => { const old = array[index]; if (old === expected) array[index] = value; return old; },
-    'Atomics.notify': () => 0,
-    'Atomics.pause': () => undefined,
-    '%IteratorPrototype%.map': function* (mapper) { let index = 0; for (const value of { [Symbol.iterator]: () => this }) yield mapper(value, index++); },
-    '%IteratorPrototype%.filter': function* (predicate) { let index = 0; for (const value of { [Symbol.iterator]: () => this }) if (predicate(value, index++)) yield value; },
-    '%IteratorPrototype%.take': function* (limit) { let remaining = Number(limit); if (remaining <= 0) return; for (const value of { [Symbol.iterator]: () => this }) { yield value; if (--remaining <= 0) return; } },
-    '%IteratorPrototype%.drop': function* (limit) { let remaining = Number(limit); for (const value of { [Symbol.iterator]: () => this }) { if (remaining > 0) { remaining--; continue; } yield value; } },
-    '%IteratorPrototype%.flatMap': function* (mapper) { let index = 0; for (const value of { [Symbol.iterator]: () => this }) yield* mapper(value, index++); },
-    '%IteratorPrototype%.reduce': function (reducer, ...initial) { let index = 0; let accumulator = initial[0]; let first = initial.length === 0; for (const value of { [Symbol.iterator]: () => this }) { if (first) { accumulator = value; first = false; index++; continue; } accumulator = reducer(accumulator, value, index++); } if (first) throw new TypeError('reduce of empty iterator with no initial value'); return accumulator; },
-    '%IteratorPrototype%.toArray': function () { return Array.from({ [Symbol.iterator]: () => this }); },
-    '%IteratorPrototype%.forEach': function (callback) { let index = 0; for (const value of { [Symbol.iterator]: () => this }) callback(value, index++); },
-    '%IteratorPrototype%.some': function (predicate) { let index = 0; for (const value of { [Symbol.iterator]: () => this }) if (predicate(value, index++)) return true; return false; },
-    '%IteratorPrototype%.every': function (predicate) { let index = 0; for (const value of { [Symbol.iterator]: () => this }) if (!predicate(value, index++)) return false; return true; },
-    '%IteratorPrototype%.find': function (predicate) { let index = 0; for (const value of { [Symbol.iterator]: () => this }) if (predicate(value, index++)) return value; return undefined; },
-    '%IteratorPrototype%.@@dispose': function () { const close = this.return; if (close !== undefined) close.call(this); },
-  };
-  const builtinAccessors = {
-    '%IteratorPrototype%.constructor': [function () { return g.Iterator; }, function (value) { define(this, 'constructor', { value, writable: true, enumerable: false, configurable: true }); }],
-    '%IteratorPrototype%.@@toStringTag': [function () { return 'Iterator'; }, function (value) { define(this, Symbol.toStringTag, { value, writable: true, enumerable: false, configurable: true }); }],
-    'RegExp.prototype.hasIndices': [function () { if (this === RegExp.prototype) return undefined; if (!(this instanceof RegExp)) throw new TypeError('RegExp.prototype.hasIndices getter called on non-RegExp object'); return false; }, null],
-    'RegExp.prototype.unicodeSets': [function () { if (this === RegExp.prototype) return undefined; if (!(this instanceof RegExp)) throw new TypeError('RegExp.prototype.unicodeSets getter called on non-RegExp object'); return false; }, null],
-    'ArrayBuffer.prototype.maxByteLength': [function () { return this.byteLength; }, null],
-    'ArrayBuffer.prototype.resizable': [function () { return false; }, null],
-    'ArrayBuffer.prototype.detached': [function () { return host.bufferDetached(this); }, null],
-  };
-  const stubFunction = (entry, constructor) => {
-    const implementation = constructor ? function () {} : { [entry.fn || 'value']() { return undefined; } }[entry.fn || 'value'];
-    if (constructor) define(implementation, 'prototype', { value: Object.create(Object.prototype), writable: false, enumerable: false, configurable: false });
-    return implementation;
-  };
-  const alignBuiltinObject = (path, own) => {
-    const target = resolveBuiltinPath(path);
-    if (target === undefined || target === null) return;
-    const listed = new Set();
-    for (const entry of own) {
-      const key = entry.n.startsWith('@@') ? Symbol[entry.n.slice(2)] : entry.n;
-      if (key === undefined) continue;
-      listed.add(key);
-      if (Object.prototype.hasOwnProperty.call(target, key)) continue;
-      const fullName = path + '.' + entry.n;
-      const flags = entry.f || '';
-      if (entry.k === 'm') {
-        let value = builtinImplementations[fullName];
-        if (value === undefined) value = stubFunction(entry, entry.ctor);
-        if (!builtinImplementations[fullName] || builtinImplementations[fullName] !== Date.prototype.toUTCString) {
-          native(value, entry.fn, entry.fn);
-          setLength(value, entry.l || 0);
-        }
-        define(target, key, { value, writable: has(flags, 'w'), enumerable: has(flags, 'e'), configurable: has(flags, 'c') });
-      } else if (entry.k === 'a') {
-        const pair = builtinAccessors[fullName] || [entry.g ? function () { return undefined; } : null, entry.s ? function () {} : null];
-        const getter = entry.g ? native(pair[0] || function () { return undefined; }, entry.g, entry.g) : undefined;
-        const setter = entry.s ? native(pair[1] || function () {}, entry.s, entry.s) : undefined;
-        if (getter) setLength(getter, 0);
-        if (setter) setLength(setter, 1);
-        define(target, key, { get: getter, set: setter, enumerable: has(flags, 'e'), configurable: has(flags, 'c') });
-      } else if (entry.k === 'o') {
-        const value = {};
-        const tag = /^\[object (.*)\]$/.exec(entry.tag || '');
-        if (tag && tag[1] !== 'Object') define(value, Symbol.toStringTag, { value: tag[1], configurable: true });
-        define(target, key, { value, writable: has(flags, 'w'), enumerable: has(flags, 'e'), configurable: has(flags, 'c') });
-      } else if (entry.k === 'v') {
-        define(target, key, { value: decode(entry.v), writable: has(flags, 'w'), enumerable: has(flags, 'e'), configurable: has(flags, 'c') });
-      }
-    }
-    for (const key of Reflect.ownKeys(target)) {
-      if (listed.has(key)) continue;
-      const descriptor = Object.getOwnPropertyDescriptor(target, key);
-      if (descriptor && descriptor.configurable) delete target[key];
-    }
-    if (host.orderKeys) host.orderKeys(target, own.map(entry => entry.n).filter(name => !name.startsWith('@@')));
-  };
-  if (typeof g.Iterator === 'function' && g.Iterator.prototype !== iteratorPrototype) {
-    const Iterator = function Iterator() { if (new.target === undefined || new.target === Iterator) throw new TypeError('Iterator constructor can\'t be used directly'); };
-    native(Iterator, 'Iterator', 'Iterator');
-    define(Iterator, 'prototype', { value: iteratorPrototype, writable: false, enumerable: false, configurable: false });
-    define(g, 'Iterator', { value: Iterator, writable: true, enumerable: false, configurable: true });
-    ctors.Iterator = Iterator;
-    protos.Iterator = iteratorPrototype;
-  }
-  if (host.intl) host.intl(g.Intl, host.intlHost, { native, setLength, define });
-  for (const item of shape.builtins || []) alignBuiltinObject(item.path, item.own);
+  memberTables = { getters: memberTable(getters), methods: memberTable(methods), special: Object.create(null) };
+  for (const key of Object.keys(getters)) memberTables.special[key.slice(key.indexOf('.') + 1)] = true;
   host.onInstalled && host.onInstalled(api);
   return api;
 })

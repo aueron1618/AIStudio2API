@@ -132,6 +132,7 @@ func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 			account, err := admin.ImportCookieAccount(ctx, api.CookieImportInput{
 				Cookies: strings.Replace(header, "refreshed-secret", "original-secret", 1),
 				Label:   "forged@example.com", Locale: "zh-CN", Timezone: "Asia/Shanghai", Method: test.method,
+				AuthUser: 2,
 			})
 			if test.method == "http" {
 				if httpCalls != 1 || driver.calls != 0 {
@@ -139,6 +140,9 @@ func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 				}
 			} else if httpCalls != 0 || driver.calls != 1 {
 				t.Fatal("browser import unexpectedly used HTTP verification")
+			}
+			if test.method != "http" && driver.request.AuthUser != 2 {
+				t.Fatal("browser verification did not select the requested Google session")
 			}
 			if test.failWorker {
 				if err == nil || len(pool.Status()) != 0 || len(headers.accounts) != 0 {
@@ -182,7 +186,7 @@ func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 				t.Fatal("incorrect imported identity")
 			}
 			loaded, err := admin.store.Load()
-			if err != nil || len(loaded) != 1 || loaded[0].ID != account.ID {
+			if err != nil || len(loaded) != 1 || loaded[0].ID != account.ID || loaded[0].Config.AuthUser != 2 {
 				t.Fatal("cannot reload imported account")
 			}
 			if _, err := os.Stat(driver.request.Directory); !os.IsNotExist(err) {

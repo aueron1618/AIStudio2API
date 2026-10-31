@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	sentencepiece "github.com/eliben/go-sentencepiece"
+	sentencepiece "github.com/Mag1cFall/go-sentencepiece"
 )
 
 func TestTokenizerCacheIdleRelease(t *testing.T) {

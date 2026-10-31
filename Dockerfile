@@ -6,16 +6,26 @@ COPY web/ ./
 RUN npm run build
 
 FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
-ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
+ARG ZIG=0.16.0
+ARG SPIDERMONKEY=v152.0.4-aistudio2api.1
+RUN apt-get update && apt-get install -y --no-install-recommends xz-utils && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://ziglang.org/download/$ZIG/zig-$(uname -m)-linux-$ZIG.tar.xz | tar -xJ -C /opt \
+    && mv /opt/zig-* /opt/zig \
+    && mkdir /opt/spidermonkey \
+    && curl -fsSL https://github.com/Mag1cFall/firefox/releases/download/$SPIDERMONKEY/spidermonkey-$SPIDERMONKEY-linux-$TARGETARCH.tar.gz | tar -xz -C /opt/spidermonkey
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /src/internal/webui/dist internal/webui/dist
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -mod=readonly -trimpath \
-    -ldflags="-s -w -X $(go list -m)/internal/app.version=${VERSION}" -o /out/aistudio2api ./cmd/aistudio2api
+RUN target=$([ "$TARGETARCH" = arm64 ] && echo aarch64 || echo x86_64) \
+    && CGO_ENABLED=1 GOOS=linux GOARCH=$TARGETARCH \
+    CC="/opt/zig/zig cc -target $target-linux-musl" CXX="/opt/zig/zig c++ -target $target-linux-musl" \
+    CGO_CXXFLAGS=-I/opt/spidermonkey/include CGO_LDFLAGS=-L/opt/spidermonkey/lib \
+    go build -mod=readonly -trimpath -tags netgo,osusergo \
+    -ldflags="-s -w -X $(go list -m)/internal/app.version=${VERSION} -linkmode external -extldflags '-static -Wl,--strip-all'" -o /out/aistudio2api ./cmd/aistudio2api
 
 # Shared runtime settings, certificates and timezone data for both variants.
 FROM debian:bookworm-slim AS runtime-base

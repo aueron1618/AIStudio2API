@@ -57,41 +57,11 @@ type geminiVideoInlineData struct {
 	Data          string `json:"data"`
 }
 
-func (b *geminiVideoInlineData) MIME() string {
-	if b == nil {
-		return ""
-	}
-	if b.MIMEType != "" {
-		return b.MIMEType
-	}
-	return b.MIMETypeSnake
-}
-
 type geminiVideoFileData struct {
 	MIMEType      string `json:"mimeType"`
 	MIMETypeSnake string `json:"mime_type"`
 	FileURI       string `json:"fileUri"`
 	FileURISnake  string `json:"file_uri"`
-}
-
-func (f *geminiVideoFileData) MIME() string {
-	if f == nil {
-		return ""
-	}
-	if f.MIMEType != "" {
-		return f.MIMEType
-	}
-	return f.MIMETypeSnake
-}
-
-func (f *geminiVideoFileData) URI() string {
-	if f == nil {
-		return ""
-	}
-	if f.FileURI != "" {
-		return f.FileURI
-	}
-	return f.FileURISnake
 }
 
 type openAIVideoRequest struct {
@@ -134,7 +104,7 @@ func (s *server) handleGeminiVideoCreate(w http.ResponseWriter, r *http.Request,
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"name": "operations/" + strings.Join(ids, videoOperationSeparator)})
+	writeJSON(w, http.StatusOK, officialOrder("gemini", map[string]any{"name": "operations/" + strings.Join(ids, videoOperationSeparator)}))
 }
 
 // maxVideoCount 是 Gemini numberOfVideos 与 sampleCount 的上限
@@ -224,25 +194,25 @@ func geminiVideoImage(input *geminiVideoImageInput) (*aistudio.VideoImage, error
 		return nil, fmt.Errorf("image must contain exactly one of bytesBase64Encoded, inlineData or fileData")
 	}
 	if inline != nil {
-		mime := inline.MIME()
-		if mime == "" || inline.Data == "" {
+		mimeType := cmp.Or(inline.MIMEType, inline.MIMETypeSnake)
+		if mimeType == "" || inline.Data == "" {
 			return nil, fmt.Errorf("image requires mimeType and data")
 		}
 		data, err := decodeBase64Flexible(inline.Data)
 		if err != nil {
 			return nil, fmt.Errorf("image.inlineData.data: %w", err)
 		}
-		mimeType, data := normalizeImagePayload(mime, data)
+		mimeType, data = normalizeImagePayload(mimeType, data)
 		return &aistudio.VideoImage{InlineData: &aistudio.Blob{MIME: mimeType, Data: data}}, nil
 	}
 	if file != nil {
-		return &aistudio.VideoImage{File: &aistudio.FileRef{ID: file.URI(), MIME: file.MIME()}}, nil
+		return &aistudio.VideoImage{File: &aistudio.FileRef{ID: cmp.Or(file.FileURI, file.FileURISnake), MIME: cmp.Or(file.MIMEType, file.MIMETypeSnake)}}, nil
 	}
 	return nil, fmt.Errorf("image requires bytesBase64Encoded, inlineData or fileData")
 }
 
 func videoDuration(raw json.RawMessage) (int, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if !rawJSONConfigured(raw) {
 		return 0, nil
 	}
 	var value string
@@ -300,7 +270,7 @@ func (s *server) handleGeminiVideoOperation(w http.ResponseWriter, r *http.Reque
 	} else if done {
 		response["response"] = map[string]any{"generateVideoResponse": map[string]any{"generatedSamples": samples}}
 	}
-	writeJSON(w, http.StatusOK, response)
+	writeJSON(w, http.StatusOK, officialOrder("gemini", response))
 }
 
 func (s *server) handleOpenAIVideoCreate(w http.ResponseWriter, r *http.Request) {
@@ -337,7 +307,7 @@ func (s *server) handleOpenAIVideoCreate(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, openAIVideoObject(operation))
+	writeJSON(w, http.StatusOK, officialOrder("openai", openAIVideoObject(operation)))
 }
 
 func parseOpenAIVideoRequest(r *http.Request) (openAIVideoRequest, *aistudio.VideoImage, error) {
@@ -450,7 +420,7 @@ func (s *server) handleOpenAIVideoGet(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIVideoError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, openAIVideoObject(operation))
+	writeJSON(w, http.StatusOK, officialOrder("openai", openAIVideoObject(operation)))
 }
 
 // handleOpenAIVideoList 按 after、limit 与 order 分页列出视频，页内各对象经上游轮询返回当前状态
@@ -483,7 +453,7 @@ func (s *server) handleOpenAIVideoList(w http.ResponseWriter, r *http.Request) {
 	if len(page) > 0 {
 		body["first_id"], body["last_id"] = page[0].ID, page[len(page)-1].ID
 	}
-	writeJSON(w, http.StatusOK, body)
+	writeJSON(w, http.StatusOK, officialOrder("openai", body))
 }
 
 // handleOpenAIVideoDelete 删除已结束的视频任务及其结果文件
@@ -498,7 +468,7 @@ func (s *server) handleOpenAIVideoDelete(w http.ResponseWriter, r *http.Request)
 		writeOpenAIVideoError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": operationID, "object": "video.deleted", "deleted": true})
+	writeJSON(w, http.StatusOK, officialOrder("openai", map[string]any{"id": operationID, "object": "video.deleted", "deleted": true}))
 }
 
 // writeOpenAIVideoError 写入视频接口错误，视频任务不存在时返回 404
@@ -565,21 +535,9 @@ func (s *server) handleOpenAIVideoContent(w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
-	mimeType := media.MIME
-	if mimeType == "" {
-		mimeType = "video/mp4"
-	}
-	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Content-Type", cmp.Or(media.MIME, "video/mp4"))
 	w.Header().Set("Content-Disposition", `attachment; filename="video.mp4"`)
-	if media.Size >= 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(media.Size, 10))
-	}
-	w.WriteHeader(http.StatusOK)
-	_, copyErr := io.Copy(w, media.Body)
-	closeErr := media.Body.Close()
-	if requestErr := errors.Join(copyErr, closeErr); requestErr != nil {
-		SetAccessLogError(r.Context(), requestErr)
-	}
+	writeMediaStream(w, r, media.Body, media.Size)
 }
 
 func cleanOperationID(value string) string {
