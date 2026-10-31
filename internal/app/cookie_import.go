@@ -24,6 +24,9 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 	if method != "browser" && method != "http" {
 		return api.AdminAccount{}, invalidAccount(fmt.Errorf("Cookie 验证方式必须为 browser 或 http"))
 	}
+	if input.AuthUser < 0 || input.AuthUser > 9 {
+		return api.AdminAccount{}, invalidAccount(fmt.Errorf("账户 auth_user 无效: %d", input.AuthUser))
+	}
 	if len(input.Cookies) > aistudio.MaxCookieImportBytes {
 		return api.AdminAccount{}, invalidAccount(fmt.Errorf("Cookie 文本不能超过 1 MiB"))
 	}
@@ -47,6 +50,7 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 		return api.AdminAccount{}, invalidAccount(err)
 	}
 	accountConfig := aistudio.DefaultAccountConfig("")
+	accountConfig.AuthUser = input.AuthUser
 	accountConfig.Proxy = strings.TrimSpace(input.Proxy)
 	if locale := strings.TrimSpace(input.Locale); locale != "" {
 		accountConfig.Locale = locale
@@ -62,7 +66,9 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 	if method == "http" {
 		verify := admin.verifyCookies
 		if verify == nil {
-			verify = chromeauth.Verify
+			verify = func(ctx context.Context, state *aistudio.StorageState, proxy string) (chromeauth.Verification, error) {
+				return chromeauth.VerifyAuthUser(ctx, state, proxy, input.AuthUser)
+			}
 		}
 		timeout := admin.config.InitTimeout
 		if timeout <= 0 {
@@ -91,8 +97,8 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 		defer os.RemoveAll(directory)
 		admin.requests.log("auth", "INFO", "Cookie 导入 | 验证 AI Studio 登录状态 | method=browser")
 		result, err = importer.ImportCookies(ctx, aistudio.IsolatedLoginRequest{
-			AccountID: "new", Directory: directory, Proxy: admin.effectiveProxy(accountConfig.Proxy),
-			Locale: accountConfig.Locale, Timezone: accountConfig.Timezone,
+			Directory: directory, Proxy: admin.effectiveProxy(accountConfig.Proxy),
+			Locale: accountConfig.Locale, Timezone: accountConfig.Timezone, AuthUser: input.AuthUser,
 		}, state)
 	}
 	if err != nil {
@@ -126,15 +132,13 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 	if err := result.StorageState.Validate(); err != nil {
 		return api.AdminAccount{}, invalidAccount(fmt.Errorf("验证后的 Cookie 状态无效"))
 	}
-	if _, err := aistudio.NewSigner().Sign(result.StorageState); err != nil {
+	if _, err := aistudio.NewSigner().Authorization(result.StorageState); err != nil {
 		return api.AdminAccount{}, invalidAccount(fmt.Errorf("验证后的 Cookie 不完整或已过期"))
 	}
 	// 仅记录实际识别的身份，不保留导入文本可能伪造的扩展信息。
-	if err := result.StorageState.SetAuthExtension(aistudio.AuthExtension{
+	result.StorageState.SetAuthExtension(aistudio.AuthExtension{
 		Source: aistudio.AuthSource{Browser: "cookie", Email: accountConfig.Label},
-	}); err != nil {
-		return api.AdminAccount{}, err
-	}
+	})
 	for _, status := range admin.pool.Status() {
 		if strings.EqualFold(status.ID, accountConfig.Label) {
 			return api.AdminAccount{}, &adminOperationError{

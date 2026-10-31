@@ -101,7 +101,7 @@ func ParseCookieImport(raw string) (StorageState, error) {
 	if len(state.Cookies) == 0 {
 		return StorageState{}, fmt.Errorf("%w: 没有可导入的有效 Google Cookie", ErrLoginCookieMissing)
 	}
-	if _, err := NewSigner().Sign(state); err != nil {
+	if _, err := NewSigner().Authorization(state); err != nil {
 		return StorageState{}, fmt.Errorf("%w: 不完整或已过期，需要 SAPISID、__Secure-1PAPISID 和 __Secure-3PAPISID", ErrLoginCookieMissing)
 	}
 	return state, nil

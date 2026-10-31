@@ -36,7 +36,7 @@ func ImportCookies(ctx context.Context, options LoginOptions, storageStateJSON [
 	if err != nil {
 		return LoginResult{}, err
 	}
-	if isGoogleLoginURL(pageURL) {
+	if strings.HasPrefix(pageURL, "https://accounts.google.com/") {
 		return LoginResult{}, ErrAuthenticationRequired
 	}
 	if !strings.HasPrefix(pageURL, aiStudioOrigin+"/") {

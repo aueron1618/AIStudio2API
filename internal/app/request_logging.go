@@ -14,6 +14,7 @@ import (
 func requestLogData(entry api.AccessLog) *api.RequestLog {
 	data := &api.RequestLog{
 		ID: entry.RequestID, Model: entry.Model, Method: entry.Method, Path: entry.Path,
+		RequestedModel: entry.RequestedModel, ResponseModel: entry.ResponseModel,
 		Status: entry.Status, DurationMS: float64(entry.Latency) / float64(time.Millisecond),
 		ToolCalls: entry.ToolCalls, FinishReason: entry.FinishReason, Error: entry.Error,
 		InputMessages: entry.InputMessages, InputTextChars: entry.InputTextChars,

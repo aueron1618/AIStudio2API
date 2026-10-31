@@ -53,7 +53,7 @@ func TestAuthMiddlewarePriorityAndMatching(t *testing.T) {
 			name:       "all mismatched",
 			url:        "/v1beta/models/gemini?key=wrong-key",
 			headers:    map[string]string{"X-Goog-API-Key": "wrong-header"},
-			wantStatus: http.StatusUnauthorized,
+			wantStatus: http.StatusBadRequest,
 		},
 	}
 
@@ -96,6 +96,10 @@ func (ledger *modelLogLedger) SaveBody(body RequestBody) { ledger.body = body }
 type modelLogService struct {
 	aistudio.Service
 	err error
+}
+
+func (modelLogService) Models(context.Context) ([]aistudio.Model, error) {
+	return nil, nil
 }
 
 func (service modelLogService) Generate(ctx context.Context, request aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
@@ -241,7 +245,7 @@ func TestAccessLogResponseModelRequiresSuccessfulWrite(t *testing.T) {
 				} else {
 					writeJSON(writer, http.StatusOK, payload)
 				}
-				if model := metadata.snapshot().responseModel; model != "previous-model" {
+				if model := metadata.finished(http.StatusOK, false).ResponseModel; model != "previous-model" {
 					t.Fatalf("captured unwritten model %q", model)
 				}
 			})

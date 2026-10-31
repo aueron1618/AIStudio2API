@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { vTooltip } from '@/playground/ui/tooltip'
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -17,29 +16,34 @@ import AddImageButton from './AddImageButton.vue'
 import FrameButton from './FrameButton.vue'
 import ApiKeyButton from '../ApiKeyButton.vue'
 import CodeDialog from '../CodeDialog.vue'
+import SavePromptDialog from '../SavePromptDialog.vue'
 import MediaLayout from './MediaLayout.vue'
 import MediaPromptBox from './MediaPromptBox.vue'
 import PaidUsageZeroState, { type Suggestion } from './PaidUsageZeroState.vue'
 import VideoSettings from './VideoSettings.vue'
 import VideoResult from './VideoResult.vue'
 import { readImage } from './api'
+import { useRunningClock } from '../clock'
+import { dataURL } from '../protocols'
 import { mediaCodeOptions, videoCode, type MediaCodeLanguage } from './code'
 import { maxReferences, useVideo, type VideoData, type VideoFrame } from './video'
 import { useMediaQuery } from '../media-query'
+import perfumePreview from './assets/perfume_animated_v2_opt_288x162.webp'
+import leopardPreview from './assets/snow_leopard_animated_opt_288x162.webp'
+import vegetablesPreview from './assets/stir_fry_vegetables_animated_opt_288x162.webp'
 
 const props = defineProps<{
   promptId?: string
-  prompt?: { title: string; data: VideoData } | undefined
+  prompt?: { title: string; description: string; data: VideoData } | undefined
 }>()
 const route = useRoute()
 const router = useRouter()
-const { t } = useI18n()
+const { t, logText } = useI18n()
 const store = useConsole()
 const video = useVideo()
 const { state, currentModel } = video
 const codeOpen = ref(false)
 const editing = ref(false)
-const titleDraft = ref('')
 const confirmDelete = ref(false)
 // handset 与官网一致，768 px 及以下 Tools 只显示图标
 const handset = useMediaQuery('(max-width: 768px)')
@@ -47,35 +51,29 @@ const handset = useMediaQuery('(max-width: 768px)')
 // zeroState 是官网空态示例图片所在目录
 const zeroState = 'https://www.gstatic.com/aistudio/zero-state/'
 
-// suggestions 是官网视频页空态的三张示例卡片，reference 为作为起始图发送的图片
-const suggestions: Suggestion[] = [
+// suggestions 是当前界面语言的官网视频页空态三张示例卡片，reference 为作为起始图发送的图片
+const suggestions = computed<Suggestion[]>(() => [
   {
-    label: 'Animate an image',
-    caption: 'Animate an image',
+    label: t('zero.video.example1'),
+    caption: t('zero.video.example1'),
     prompt: '',
-    image: `${zeroState}perfume_animated_v2_opt_288x162.gif`,
+    image: perfumePreview,
     reference: `${zeroState}perfume_v2.png`,
   },
   {
-    label:
-      '“Create a video with an image: a cute creature with snow leopard-like fur is walking in a winter forest.”',
-    caption:
-      '“Create a video with an image: a cute creature with snow leopard-like fur is walking in a winter forest.”',
-    prompt:
-      'Create a video with an image: a cute creature with snow leopard-like fur is walking in a winter forest.',
-    image: `${zeroState}snow_leopard_animated_opt_288x162.gif`,
+    label: t('zero.video.example2'),
+    caption: t('zero.video.example2'),
+    prompt: t('zero.video.example2Prompt'),
+    image: leopardPreview,
     reference: `${zeroState}snow_leopard.png`,
   },
   {
-    label:
-      '“Create a video showing some hands first sprinkling salt into a pan of stir-fried vegetables...“',
-    caption:
-      '“Create a video showing some hands first sprinkling salt into a pan of stir-fried vegetables...“',
-    prompt:
-      'Create a video showing some hands first sprinkling salt into a pan of stir-fried vegetables on a stove and then mixing the vegetables with a large wooden spoon',
-    image: `${zeroState}stir_fry_vegetables_animated_opt_288x162.gif`,
+    label: t('zero.video.example3'),
+    caption: t('zero.video.example3'),
+    prompt: t('zero.video.example3Prompt'),
+    image: vegetablesPreview,
   },
-]
+])
 
 // hasImages 表示输入中有图片，官网此时提示 Veo 不支持含儿童的图片
 const hasImages = computed(
@@ -101,17 +99,7 @@ const imageDisabled = computed(
 )
 
 // now 在生成期间每 100 ms 刷新，用于显示已用时间
-const now = ref(performance.now())
-let ticker = 0
-watch(
-  () => state.running,
-  (running) => {
-    window.clearInterval(ticker)
-    if (running) ticker = window.setInterval(() => (now.value = performance.now()), 100)
-  },
-  { immediate: true },
-)
-onUnmounted(() => window.clearInterval(ticker))
+const now = useRunningClock(() => state.running)
 
 // elapsed 返回模型轮次的耗时文字
 function elapsed(index: number, duration: number | undefined): string {
@@ -139,28 +127,31 @@ async function setLastFrame(file: File): Promise<void> {
 async function addImages(files: File[]): Promise<void> {
   if (imageDisabled.value) return
   if (!referenceInputs.value) {
-    if (files[0]) await setStart(files[0])
+    await setStart(files[0]!)
     return
   }
   for (const file of files.slice(0, maxReferences - state.references.length))
     state.references.push(await toFrame(file, file.name))
 }
 
-// useSuggestion 与官网一样以示例的提示词与图片直接生成，图片作为起始图；没有模型时提示生成失败
+// suggestionPick 是最近一次点击示例的序号
+let suggestionPick = 0
+
+// useSuggestion 与官网一样以示例的提示词与图片直接生成，图片作为起始图；没有模型时提示生成失败，示例图片读取完成前又点了其他示例时放弃这次点击
 async function useSuggestion(item: Suggestion): Promise<void> {
+  const pick = ++suggestionPick
   if (currentModel.value === undefined) {
     store.showNotice(t('pg.videoFailed').replace('{error}', t('pg.selectModel')), 'error')
     return
   }
+  const start = item.reference
+    ? await toFrame(await (await fetch(item.reference)).blob(), item.reference.split('/').at(-1)!)
+    : undefined
+  if (pick !== suggestionPick) return
   state.draft = item.prompt
   state.references = []
   video.setLast(undefined)
-  state.start = item.reference
-    ? await toFrame(
-        await (await fetch(item.reference)).blob(),
-        item.reference.split('/').at(-1) ?? 'image',
-      )
-    : undefined
+  state.start = start
   void video.run()
 }
 
@@ -185,18 +176,6 @@ function newChat(): void {
   void router.push('/prompts/new_video')
 }
 
-// openRename 打开标题编辑框
-function openRename(): void {
-  titleDraft.value = state.title
-  editing.value = true
-}
-
-// saveTitle 保存编辑后的标题
-function saveTitle(): void {
-  editing.value = false
-  void video.rename(titleDraft.value)
-}
-
 // removePrompt 删除当前视频会话并回到新会话
 async function removePrompt(): Promise<void> {
   confirmDelete.value = false
@@ -207,7 +186,7 @@ async function removePrompt(): Promise<void> {
 watch(
   () => [props.promptId, props.prompt] as const,
   ([id, prompt]) => {
-    if (id && prompt) video.load(id, prompt.title, prompt.data)
+    if (id && prompt) video.load(id, prompt)
     else if (!id && state.id !== null) video.newSession()
   },
   { immediate: true },
@@ -234,7 +213,7 @@ watch(
         ms-button
         class="ms-button-borderless ms-button-icon ms-button-small"
         :aria-label="t('pg.editTitle')"
-        @click="openRename"
+        @click="editing = true"
       >
         <UiIcon name="edit" :size="18" />
       </button>
@@ -291,12 +270,8 @@ watch(
       </DropdownMenuRoot>
     </template>
 
-    <div v-if="state.loadError === 'not_found'" class="load-error">
-      <h2>{{ t('pg.notFoundTitle') }}</h2>
-      <p>{{ t('pg.notFoundBody') }}</p>
-    </div>
     <PaidUsageZeroState
-      v-else-if="state.turns.length === 0"
+      v-if="state.turns.length === 0"
       :title="t('pg.videoEmptyTitle').replace('{model}', currentModel?.name ?? 'Veo')"
       :subtitle="t('pg.videoEmptyDescription')"
       layout="single-row"
@@ -320,20 +295,21 @@ watch(
                   ].filter(Boolean)"
                   :key="frameIndex"
                   class="loaded-image"
-                  :src="`data:${frame!.mimeType};base64,${frame!.data}`"
+                  :src="dataURL(frame!)"
                   :alt="frame!.name"
                 />
               </div>
             </template>
             <template v-else>
               <span class="turn-role">{{ turn.model }} • {{ elapsed(index, turn.duration) }}</span>
-              <p v-if="turn.error" class="turn-error">{{ turn.error }}</p>
+              <p v-if="turn.stopped" class="turn-error">{{ t('pg.generationStopped') }}</p>
+              <p v-else-if="turn.error" class="turn-error">{{ logText(turn.error) }}</p>
               <div v-else class="gallery-container">
                 <VideoResult
                   v-for="(path, videoIndex) in turn.videos ?? ['']"
                   :key="videoIndex"
                   :path="path"
-                  :aspect-ratio="turn.aspectRatio ?? '16:9'"
+                  :aspect-ratio="turn.aspectRatio!"
                 />
               </div>
               <div v-if="index < state.turns.length - 1" class="turn-separator"></div>
@@ -374,11 +350,7 @@ watch(
         </template>
         <template v-if="!frameInputs && state.start" #media>
           <div class="reference">
-            <img
-              class="reference-image"
-              :src="`data:${state.start.mimeType};base64,${state.start.data}`"
-              :alt="state.start.name"
-            />
+            <img class="reference-image" :src="dataURL(state.start)" :alt="state.start.name" />
             <span class="reference-name">{{ state.start.name }}</span>
             <button
               type="button"
@@ -393,11 +365,7 @@ watch(
         </template>
         <template v-else-if="state.references.length" #media>
           <div v-for="(frame, index) in state.references" :key="index" class="reference">
-            <img
-              class="reference-image"
-              :src="`data:${frame.mimeType};base64,${frame.data}`"
-              :alt="frame.name"
-            />
+            <img class="reference-image" :src="dataURL(frame)" :alt="frame.name" />
             <span class="reference-name">{{ frame.name }}</span>
             <button
               type="button"
@@ -442,26 +410,18 @@ watch(
     </template>
   </MediaLayout>
   <CodeDialog v-model:open="codeOpen" :options="mediaCodeOptions" :code="code" />
-  <UiDialog v-model:open="editing" :title="t('pg.editTitle')" width="480px">
-    <label class="field-label" for="video-title">{{ t('pg.title') }}</label>
-    <input
-      id="video-title"
-      v-model="titleDraft"
-      ms-input
-      class="title-input"
-      maxlength="120"
-      @keydown.enter.prevent="saveTitle"
-    />
-    <template #actions>
-      <button type="button" ms-button class="ms-button-borderless" @click="editing = false">
-        {{ t('common.cancel') }}
-      </button>
-      <button type="button" ms-button class="ms-button-primary" @click="saveTitle">
-        {{ t('common.save') }}
-      </button>
-    </template>
-  </UiDialog>
-  <UiDialog v-model:open="confirmDelete" :title="t('pg.deleteTitle')" width="420px">
+  <SavePromptDialog
+    v-model:open="editing"
+    :title="state.title"
+    :description="state.description"
+    @save="(title, description) => video.rename(title, description)"
+  />
+  <UiDialog
+    v-model:open="confirmDelete"
+    :title="t('pg.deleteTitle')"
+    width="500px"
+    :closable="false"
+  >
     <p class="confirm-text">{{ t('pg.deleteBody') }}</p>
     <template #actions>
       <button type="button" ms-button class="ms-button-borderless" @click="confirmDelete = false">
@@ -475,19 +435,9 @@ watch(
 </template>
 
 <style scoped>
-.field-label {
-  display: block;
-  margin-bottom: 8px;
-  font-weight: 500;
-}
-
-.title-input {
-  width: 100%;
-}
-
 .confirm-text {
   margin: 0;
-  color: var(--color-v3-text-var);
+  line-height: 21px;
 }
 
 .video-panel {
@@ -561,7 +511,7 @@ watch(
   margin-top: 12px;
   margin-right: 140px;
   margin-left: 8px;
-  border-top: 1px solid var(--turn-separator-color, var(--color-v3-outline));
+  border-top: 1px solid var(--color-v3-outline);
 }
 
 .image-container {
@@ -643,16 +593,5 @@ watch(
   font-size: 12px;
   font-weight: 400;
   line-height: 18px;
-}
-
-.load-error {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 24px;
-  text-align: center;
 }
 </style>

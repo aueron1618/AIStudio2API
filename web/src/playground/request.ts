@@ -1,3 +1,4 @@
+import { jsonBody } from '@/api'
 import { useConsole } from '@/console'
 import type { Model } from '@/types'
 import { Capability, hasCode, toolCodes, type Tool } from './catalog'
@@ -21,7 +22,7 @@ const toolPayloads: Partial<Record<Tool, Record<string, unknown>>> = {
 }
 
 // parseJSON 解析编辑器中的 JSON 文本，空文本或无效 JSON 返回 undefined
-export function parseJSON(text: string): unknown {
+function parseJSON(text: string): unknown {
   if (text.trim() === '') return undefined
   try {
     return JSON.parse(text) as unknown
@@ -31,7 +32,7 @@ export function parseJSON(text: string): unknown {
 }
 
 // requestContents 把对话轮次写为 contents：去掉思考正文、出错的空轮次与附件的显示字段
-export function requestContents(turns: readonly Turn[]): GenerateRequest['contents'] {
+function requestContents(turns: readonly Turn[]): GenerateRequest['contents'] {
   return turns
     .map((turn) => ({
       role: turn.role,
@@ -42,22 +43,22 @@ export function requestContents(turns: readonly Turn[]): GenerateRequest['conten
     .filter((turn) => turn.parts.length > 0)
 }
 
-// apiPart 返回去掉试用页显示字段的片段
-export function apiPart({ fileName: _fileName, tokenCount: _tokenCount, ...part }: Part): Part {
-  return part
+// apiPart 返回去掉试用页显示字段的片段，内联附件的文件名写为 inlineData.displayName
+export function apiPart({ fileName, tokenCount: _tokenCount, ...part }: Part): Part {
+  if (fileName === undefined || part.inlineData === undefined) return part
+  return { ...part, inlineData: { ...part.inlineData, displayName: fileName } }
 }
 
-// buildRequest 按模型能力把运行设置写为 Gemini API 请求，模型不支持的设置不发送
+// buildRequest 按模型能力把运行设置写为 Gemini API 请求，模型不支持的设置不发送，采样参数按所设值发送
 export function buildRequest(
   settings: RunSettings,
   model: Model | undefined,
   turns: readonly Turn[],
 ): GenerateRequest {
   const config: Record<string, unknown> = {}
-  if (hasCode(model, Capability.Temperature) && settings.temperature !== null)
-    config.temperature = settings.temperature
-  if (hasCode(model, Capability.TopP) && settings.topP !== null) config.topP = settings.topP
-  if (hasCode(model, Capability.TopK) && settings.topK !== null) config.topK = settings.topK
+  if (settings.temperature !== null) config.temperature = settings.temperature
+  if (settings.topP !== null) config.topP = settings.topP
+  if (settings.topK !== null) config.topK = settings.topK
   if (hasCode(model, Capability.MaxOutputTokens) && settings.maxOutputTokens !== null)
     config.maxOutputTokens = settings.maxOutputTokens
   if (hasCode(model, Capability.StopSequences) && settings.stopSequences.length > 0)
@@ -145,30 +146,31 @@ export interface StreamUpdate {
   searchQueries?: string[]
 }
 
-// StreamError 是请求或流中返回的错误
-export class StreamError extends Error {
-  status: number
-
-  constructor(message: string, status: number) {
-    super(message)
-    this.name = 'StreamError'
-    this.status = status
-  }
+// failureText 返回请求失败的说明：未能连接服务时为 unreachable，其余为 failed，其中的 {detail} 换成错误原文
+export function failureText(error: unknown, unreachable: string, failed = '{detail}'): string {
+  const detail = error instanceof Error ? error.message : String(error)
+  return (error instanceof TypeError ? unreachable : failed).replace('{detail}', detail)
 }
 
 // apiKey 返回 Playground 请求使用的本服务 API key
 export function apiKey(): string {
-  return (useConsole().config.value?.proxy_api_key ?? '').split(',')[0]?.trim() ?? ''
+  return (useConsole().config.value?.proxy_api_key ?? '').split(',')[0]!.trim()
 }
 
 // Keep the playground and its snippets on the model's permitted fixed URL channel.
 export function publicAPIBase(modelID: string, model?: Model): '/v1' | '/build/v1' {
   const id = modelID.replace(/^models\//, '').replace(/\([^()]*\)$/, '')
-  const channels = (model ?? useConsole().models.value.find((item) => item.id === id))?.channels
+  const baseID = id.replace(/-search$/, '').replace(/\([^()]*\)$/, '')
+  const catalog = useConsole().models.value
+  const channels = (
+    model ??
+    catalog.find((item) => item.id === id) ??
+    catalog.find((item) => item.id === baseID)
+  )?.channels
   if (channels?.includes('assistant')) return '/build/v1'
   if (channels?.includes('playground')) return '/v1'
   if (channels?.includes('build')) return '/build/v1'
-  return id.endsWith('-build') ? '/build/v1' : '/v1'
+  return baseID.endsWith('-build') ? '/build/v1' : '/v1'
 }
 
 // errorMessage 读取 Gemini API 错误正文中的说明
@@ -270,11 +272,11 @@ export async function countTokens(
     method: 'POST',
     headers,
     signal,
-    body: JSON.stringify({
+    body: jsonBody({
       generateContentRequest: { model: `models/${modelID}`, ...request },
     }),
   })
-  if (!response.ok) throw new StreamError(await errorMessage(response), response.status)
+  if (!response.ok) throw new Error(await errorMessage(response))
   const value = (await response.json()) as { totalTokens?: number }
   return value.totalTokens ?? 0
 }

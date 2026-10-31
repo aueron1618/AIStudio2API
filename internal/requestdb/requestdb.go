@@ -1,13 +1,14 @@
-// Package requestdb 在本地 SQLite 中保存请求用量、小时与本地日汇总及可选的截断正文
+// Package requestdb 在本地 SQLite 中保存请求用量、小时与本地日汇总及可选的 gzip 压缩截断正文
 package requestdb
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -15,7 +16,8 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
-	_ "modernc.org/sqlite"
+	"github.com/Mag1cFall/AIStudio2API/internal/sqlitedb"
+	"github.com/klauspost/compress/gzip"
 )
 
 // usageRetention 是用量记录与汇总的保留时长
@@ -57,9 +59,9 @@ CREATE INDEX IF NOT EXISTS requests_account_time ON requests(account, time);
 CREATE INDEX IF NOT EXISTS requests_state_time ON requests(state, time);
 CREATE TABLE IF NOT EXISTS hours (` + rollupColumns + `) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS days (` + rollupColumns + `) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS bodies (
+CREATE TABLE IF NOT EXISTS request_bodies (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, time INTEGER NOT NULL,
- request TEXT NOT NULL, request_size INTEGER NOT NULL, response TEXT NOT NULL, response_size INTEGER NOT NULL);`
+ request BLOB NOT NULL, request_size INTEGER NOT NULL, response BLOB NOT NULL, response_size INTEGER NOT NULL);`
 
 // Row 是一次完成请求的用量记录
 type Row struct {
@@ -113,8 +115,7 @@ func Open(path string, log Logger) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	options := url.Values{"_pragma": {"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)"}}
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?"+options.Encode())
+	db, err := sqlitedb.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -135,6 +136,9 @@ func Open(path string, log Logger) (*Store, error) {
 	}
 	if err := addCachedTokens(db); err != nil {
 		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
+	}
+	if err := migrateBodies(db); err != nil {
+		return nil, errors.Join(fmt.Errorf("migrate request bodies: %w", err), db.Close())
 	}
 	store := &Store{db: db, writes: make(chan write, queueLimit), done: make(chan struct{}), log: log}
 	if err := store.alignDays(); err != nil {
@@ -160,11 +164,58 @@ func addCachedTokens(db *sql.DB) error {
 	return nil
 }
 
+// migrateBodies replaces the legacy plaintext table only after every body is copied.
+func migrateBodies(db *sql.DB) error {
+	var exists bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='bodies')`).Scan(&exists); err != nil || !exists {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var sequence int64
+	if err := tx.QueryRow(`SELECT COALESCE(MIN(seq),0) - (SELECT count(*) FROM bodies) FROM request_bodies`).Scan(&sequence); err != nil {
+		return err
+	}
+	rows, err := tx.Query(`SELECT id,time,request,request_size,response,response_size FROM bodies ORDER BY time,id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, request, response string
+		var at, requestSize, responseSize int64
+		if err := rows.Scan(&id, &at, &request, &requestSize, &response, &responseSize); err != nil {
+			return err
+		}
+		compressedRequest, err := compress(request)
+		if err != nil {
+			return err
+		}
+		compressedResponse, err := compress(response)
+		if err != nil {
+			return err
+		}
+		// Legacy bodies precede already-written native bodies in the retention order.
+		if _, err := tx.Exec(`INSERT INTO request_bodies (seq,id,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
+			sequence, id, at, compressedRequest, requestSize, compressedResponse, responseSize); err != nil {
+			return err
+		}
+		sequence++
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE bodies`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // Close 写完已排队的记录后关闭数据库
 func (store *Store) Close() error {
-	if store == nil {
-		return nil
-	}
 	store.mu.Lock()
 	if store.closed {
 		store.mu.Unlock()
@@ -336,8 +387,16 @@ func (store *Store) write(batch []write) (err error) {
 		}
 		if body := item.body; body != nil {
 			bodies = true
-			if _, err := tx.Exec(`INSERT OR REPLACE INTO bodies (id,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?)`,
-				body.ID, body.Time.UnixMilli(), body.Request, body.RequestSize, body.Response, body.ResponseSize); err != nil {
+			request, err := compress(body.Request)
+			if err != nil {
+				return err
+			}
+			response, err := compress(body.Response)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO request_bodies (id,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?)`,
+				body.ID, body.Time.UnixMilli(), request, body.RequestSize, response, body.ResponseSize); err != nil {
 				return err
 			}
 		}
@@ -353,7 +412,7 @@ func (store *Store) write(batch []write) (err error) {
 		}
 	}
 	if bodies {
-		if _, err := tx.Exec(`DELETE FROM bodies WHERE seq <= (SELECT MAX(seq) FROM bodies) - ?`, bodyRetention); err != nil {
+		if _, err := tx.Exec(`DELETE FROM request_bodies WHERE seq <= (SELECT MAX(seq) FROM request_bodies) - ?`, bodyRetention); err != nil {
 			return err
 		}
 	}
@@ -392,14 +451,15 @@ func mergeRollup(tx *sql.Tx, table string, key rollupKey, value *entry) error {
 	return err
 }
 
-// prune 删除超过保留期的数据，记录与汇总都从截止时间所在本地日的起点开始保留，使三层数据覆盖同一范围
+// prune 删除超过保留期的数据，记录与汇总都从截止时间所在本地日的起点开始保留
 func (store *Store) prune() {
 	day, _ := localDay(time.Now().Add(-usageRetention).UnixMilli())
 	hour := floorDiv(day, hourMS) * hourMS
 	_, requestsErr := store.db.Exec(`DELETE FROM requests WHERE time < ?`, hour)
 	_, hoursErr := store.db.Exec(`DELETE FROM hours WHERE start < ?`, hour)
 	_, daysErr := store.db.Exec(`DELETE FROM days WHERE start < ?`, day)
-	if err := errors.Join(requestsErr, hoursErr, daysErr); err != nil {
+	reclaimErr := sqlitedb.Reclaim(context.Background(), store.db)
+	if err := errors.Join(requestsErr, hoursErr, daysErr, reclaimErr); err != nil {
 		store.log("ERROR", fmt.Sprintf("请求账本清理失败 | 错误=%v", err))
 	}
 }
@@ -465,16 +525,51 @@ func (store *Store) alignDays() (err error) {
 func (store *Store) RequestBody(ctx context.Context, id string) (api.RequestBody, error) {
 	body := api.RequestBody{ID: id}
 	var at int64
-	err := store.db.QueryRowContext(ctx, `SELECT time,request,request_size,response,response_size FROM bodies WHERE id=?`, id).
-		Scan(&at, &body.Request, &body.RequestSize, &body.Response, &body.ResponseSize)
+	var request, response []byte
+	err := store.db.QueryRowContext(ctx, `SELECT time,request,request_size,response,response_size FROM request_bodies WHERE id=?`, id).
+		Scan(&at, &request, &body.RequestSize, &response, &body.ResponseSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		return api.RequestBody{}, api.ErrRequestBodyNotFound
 	}
 	if err != nil {
 		return api.RequestBody{}, err
 	}
+	if body.Request, err = decompress(request); err != nil {
+		return api.RequestBody{}, err
+	}
+	if body.Response, err = decompress(response); err != nil {
+		return api.RequestBody{}, err
+	}
 	body.Time = time.UnixMilli(at).UTC()
 	return body, nil
+}
+
+// gzipWriters 复用正文的 gzip 压缩器
+var gzipWriters = sync.Pool{New: func() any { return gzip.NewWriter(nil) }}
+
+// compress 以 gzip 压缩一段正文
+func compress(text string) ([]byte, error) {
+	var buffer bytes.Buffer
+	writer := gzipWriters.Get().(*gzip.Writer)
+	defer gzipWriters.Put(writer)
+	writer.Reset(&buffer)
+	if _, err := io.WriteString(writer, text); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+// decompress 还原 gzip 压缩的正文
+func decompress(data []byte) (string, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	text, err := io.ReadAll(reader)
+	return string(text), err
 }
 
 // floorDiv 返回向负无穷取整的整数除法结果

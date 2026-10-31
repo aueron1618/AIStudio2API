@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
@@ -24,23 +22,9 @@ var _ CookieLoginDriver = (*NativeLoginDriver)(nil)
 
 // NewNativeLoginDriver 创建纯 Go Camoufox 登录驱动
 func NewNativeLoginDriver(camoufoxPath string, timeout time.Duration) (*NativeLoginDriver, error) {
-	camoufoxPath = strings.TrimSpace(camoufoxPath)
-	if camoufoxPath == "" {
-		return nil, errors.New("缺少 Camoufox 路径")
-	}
 	absolute, err := filepath.Abs(camoufoxPath)
 	if err != nil {
 		return nil, fmt.Errorf("解析 Camoufox 路径: %w", err)
-	}
-	info, err := os.Stat(absolute)
-	if err != nil {
-		return nil, fmt.Errorf("读取 Camoufox: %w", err)
-	}
-	if info.IsDir() {
-		return nil, errors.New("Camoufox 路径是目录")
-	}
-	if timeout <= 0 {
-		return nil, errors.New("Camoufox 登录超时必须为正数")
 	}
 	return &NativeLoginDriver{camoufox: absolute, timeout: timeout}, nil
 }
@@ -85,11 +69,9 @@ func decodeNativeLoginResult(result camoufoxnative.LoginResult, source string) (
 	if err := state.Validate(); err != nil {
 		return IsolatedLoginResult{}, err
 	}
-	if err := state.SetAuthExtension(AuthExtension{
+	state.SetAuthExtension(AuthExtension{
 		Source: AuthSource{Browser: source, Email: result.Email},
-	}); err != nil {
-		return IsolatedLoginResult{}, err
-	}
+	})
 	return IsolatedLoginResult{
 		StorageState: state, Email: result.Email, VerifiedAt: result.VerifiedAt,
 		DriveError: result.DriveError, CloseError: result.CloseError,
@@ -102,6 +84,7 @@ func (driver *NativeLoginDriver) options(request IsolatedLoginRequest) camoufoxn
 		Directory:      request.Directory,
 		Locale:         request.Locale,
 		Timezone:       request.Timezone,
+		AuthUser:       request.AuthUser,
 		Proxy:          request.Proxy,
 		Timeout:        driver.timeout,
 		View:           request.View,

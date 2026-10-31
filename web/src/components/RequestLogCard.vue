@@ -2,11 +2,15 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { api, ApiError } from '@/api'
 import { channelLabelKey, useI18n, type TranslationKey } from '@/i18n'
-import { formatLogNumber, type LogRow } from '@/logs'
+import { byteLength, formatLogNumber, prettyBody, type LogRow } from '@/logs'
 import type { RequestBody } from '@/types'
+import LogCollapse from './LogCollapse.vue'
+import LogDisclosure from './LogDisclosure.vue'
 import UiIcon from './UiIcon.vue'
 
 const props = defineProps<{ row: LogRow }>()
+// open 是详情是否展开，由日志页按行保存
+const open = defineModel<boolean>('open', { required: true })
 const { t, locale, errorText, logText } = useI18n()
 const request = computed(() => props.row.entry.request!)
 const running = computed(() => request.value.state === 'running')
@@ -44,11 +48,47 @@ const currentStep = computed(() => {
 const body = ref<RequestBody | null>(null)
 const bodyState = ref<'idle' | 'loading' | 'missing' | 'error' | 'ready'>('idle')
 const bodyError = ref('')
-// Collapsed details release their rendered content and response bodies.
-const detailsRendered = ref(false)
-const jsonExpanded = ref(false)
-let bodyController: AbortController | null = null
-onUnmounted(() => bodyController?.abort())
+// jsonOpen 与 bodyOpen 是详情中 JSON 与正文两节是否展开
+const jsonOpen = ref(false)
+const bodyOpen = ref(false)
+let bodyController: AbortController | undefined
+
+function releaseBody(): void {
+  bodyController?.abort()
+  bodyController = undefined
+  body.value = null
+  bodyState.value = 'idle'
+  bodyError.value = ''
+  // Drop the computed formatted copies as well as the original body.
+  void bodyParts.value
+}
+
+watch(
+  open,
+  (value) => {
+    if (value) return
+    jsonOpen.value = false
+    bodyOpen.value = false
+    releaseBody()
+  },
+  { flush: 'sync' },
+)
+watch(
+  bodyOpen,
+  (value) => {
+    if (!value) releaseBody()
+  },
+  { flush: 'sync' },
+)
+watch(
+  () => request.value.id,
+  () => {
+    bodyOpen.value = false
+    releaseBody()
+  },
+  { flush: 'sync' },
+)
+onUnmounted(releaseBody)
 
 // finishKeys 是上游终止原因的显示文案键
 const finishKeys: Record<string, TranslationKey> = {
@@ -88,38 +128,20 @@ function number(value: number, digits = 0): string {
   return formatLogNumber(value, locale.value, digits)
 }
 
-function renderDetails(event: Event): void {
-  detailsRendered.value = (event.target as HTMLDetailsElement).open
-  if (!detailsRendered.value) {
-    bodyController?.abort()
-    bodyController = null
-    body.value = null
-    bodyState.value = 'idle'
-    jsonExpanded.value = false
-  }
-}
-
-// loadBody 在首次展开时读取账本保存的请求与响应正文
-async function loadBody(event: Event): Promise<void> {
-  if (!(event.target as HTMLDetailsElement).open) {
-    bodyController?.abort()
-    bodyController = null
-    body.value = null
-    bodyState.value = 'idle'
-    return
-  }
-  if (request.value.status === 401) return
-  if (bodyState.value === 'loading' || bodyState.value === 'ready') return
+// toggleBody 展开或收起正文一节，首次展开时读取账本保存的请求与响应正文
+async function toggleBody(): Promise<void> {
+  bodyOpen.value = !bodyOpen.value
+  if (!bodyOpen.value || bodyState.value === 'loading' || bodyState.value === 'ready') return
   const controller = new AbortController()
   bodyController = controller
   bodyState.value = 'loading'
   try {
     const value = await api.requestBody(request.value.id, controller.signal)
-    if (controller.signal.aborted) return
+    if (bodyController !== controller) return
     body.value = value
     bodyState.value = 'ready'
   } catch (reason) {
-    if (controller.signal.aborted) return
+    if (controller.signal.aborted || bodyController !== controller) return
     if (reason instanceof ApiError && reason.status === 404) {
       bodyState.value = 'missing'
       return
@@ -127,22 +149,13 @@ async function loadBody(event: Event): Promise<void> {
     bodyError.value = errorText(reason)
     bodyState.value = 'error'
   } finally {
-    if (bodyController === controller) bodyController = null
-  }
-}
-
-// pretty 缩进 JSON 正文，非 JSON 保持原文
-function pretty(text: string): string {
-  try {
-    return JSON.stringify(JSON.parse(text), null, 2)
-  } catch {
-    return text
+    if (bodyController === controller) bodyController = undefined
   }
 }
 
 // bodySize 显示保存字节数与原始字节数
 function bodySize(saved: string, total: number): string {
-  const bytes = new TextEncoder().encode(saved).length
+  const bytes = byteLength(saved)
   return bytes < total ? `${number(bytes)} / ${number(total)} B` : `${number(total)} B`
 }
 
@@ -152,12 +165,12 @@ const bodyParts = computed(() =>
     : [
         {
           label: t('logs.requestBody'),
-          text: pretty(body.value.request),
+          text: prettyBody(body.value.request),
           size: bodySize(body.value.request, body.value.request_size),
         },
         {
           label: t('logs.responseBody'),
-          text: pretty(body.value.response),
+          text: prettyBody(body.value.response),
           size: bodySize(body.value.response, body.value.response_size),
         },
       ],
@@ -167,12 +180,14 @@ const bodyParts = computed(() =>
 <template>
   <div class="request-log">
     <div class="request-heading">
+      <LogDisclosure v-model="open" />
       <span class="request-state" :class="`state-${request.state}`">{{
         request.status ?? t('logs.running')
       }}</span>
-      <strong v-if="request.status !== 401">{{
-        request.model || `${request.method} ${request.path}`
-      }}</strong>
+      <strong>{{ request.model || `${request.method} ${request.path}` }}</strong>
+      <span v-if="request.channel" class="request-channel">{{
+        t(channelLabelKey(request.channel))
+      }}</span>
       <span v-if="request.duration_ms !== undefined" class="request-duration"
         >{{ number(request.duration_ms / 1000, 2) }} s</span
       >
@@ -181,106 +196,110 @@ const bodyParts = computed(() =>
         >{{ t('logs.tools') }} {{ number(request.tool_calls) }}</span
       >
     </div>
-    <p v-if="request.status === 401" class="request-body-note">
-      {{ t('usage.unauthorizedNotice') }}
-    </p>
-    <template v-else>
-      <p v-if="running && currentStep" class="request-step">{{ currentStep }}</p>
-      <div v-if="request.usage" class="request-metrics">
-        <span
-          >{{ t('logs.reasoning') }} <b>{{ number(request.usage.reasoning_tokens) }}</b></span
-        >
-        <span
-          >{{ t('logs.reply') }} <b>{{ number(request.usage.reply_tokens) }}</b></span
-        >
-        <span
-          >{{ t('logs.outputTotal') }} <b>{{ number(request.usage.output_tokens) }}</b> tokens</span
-        >
-        <span
-          >{{ t('logs.averageSpeed') }}
-          <b>{{ number(request.usage.average_tokens_per_second, 1) }}</b> tokens/s</span
-        >
-        <span v-if="request.first_event_ms !== undefined"
-          >{{ t('logs.firstToken') }} <b>{{ number(request.first_event_ms / 1000, 1) }}</b> s</span
-        >
-      </div>
-      <p v-if="request.error" class="request-error">{{ request.error }}</p>
-      <p
-        v-else-if="request.state === 'blocked' || request.state === 'limited'"
-        class="request-error"
+    <p v-if="running && currentStep" class="request-step">{{ currentStep }}</p>
+    <div v-if="request.usage" class="request-metrics">
+      <span
+        >{{ t('logs.reasoning') }} <b>{{ number(request.usage.reasoning_tokens) }}</b></span
       >
-        {{ finishLabel }}
-      </p>
-      <details class="request-details" @toggle="renderDetails">
-        <summary>
-          <UiIcon class="request-disclosure-icon" name="chevronRight" :size="12" />
-          {{ t('logs.details') }}
-          <span class="request-summary-meta"
-            >{{ request.method }} · HTTP {{ request.status || '…'
-            }}<template v-if="request.channel">
-              · {{ t(channelLabelKey(request.channel)) }}</template
-            ></span
+      <span
+        >{{ t('logs.reply') }} <b>{{ number(request.usage.reply_tokens) }}</b></span
+      >
+      <span
+        >{{ t('logs.outputTotal') }} <b>{{ number(request.usage.output_tokens) }}</b> tokens</span
+      >
+      <span
+        >{{ t('logs.averageSpeed') }}
+        <b>{{ number(request.usage.average_tokens_per_second, 1) }}</b> tokens/s</span
+      >
+      <span v-if="request.first_event_ms !== undefined"
+        >{{ t('logs.firstToken') }} <b>{{ number(request.first_event_ms / 1000, 1) }}</b> s</span
+      >
+    </div>
+    <p v-if="request.error" class="request-error">{{ logText(request.error) }}</p>
+    <p v-else-if="request.state === 'blocked' || request.state === 'limited'" class="request-error">
+      {{ finishLabel }}
+    </p>
+    <LogCollapse :open="open">
+      <div class="request-details">
+        <dl>
+          <dt>ID</dt>
+          <dd>{{ request.id }}</dd>
+          <template v-if="request.requested_model">
+            <dt>{{ t('usage.requestedModel') }}</dt>
+            <dd>{{ request.requested_model }}</dd>
+          </template>
+          <template v-if="request.response_model">
+            <dt>{{ t('usage.responseModel') }}</dt>
+            <dd>{{ request.response_model }}</dd>
+          </template>
+          <dt>{{ t('logs.endpoint') }}</dt>
+          <dd>{{ request.method }} {{ request.path }}</dd>
+          <template v-if="request.status !== undefined">
+            <dt>HTTP</dt>
+            <dd>{{ request.status }}</dd>
+          </template>
+          <template v-if="request.channel">
+            <dt>{{ t('logs.channel') }}</dt>
+            <dd>{{ t(channelLabelKey(request.channel)) }}</dd>
+          </template>
+          <template v-if="request.usage">
+            <dt>{{ t('logs.inputTokens') }}</dt>
+            <dd>{{ number(request.usage.input_tokens) }} tokens</dd>
+            <template v-if="request.usage.cached_tokens">
+              <dt>{{ t('logs.cachedTokens') }}</dt>
+              <dd>{{ number(request.usage.cached_tokens) }} tokens</dd>
+            </template>
+            <dt>{{ t('logs.totalTokens') }}</dt>
+            <dd>{{ number(request.usage.total_tokens) }} tokens</dd>
+          </template>
+          <template v-if="request.input_messages">
+            <dt>{{ t('logs.inputMessages') }}</dt>
+            <dd>{{ number(request.input_messages) }}</dd>
+          </template>
+          <template v-if="request.finish_reason">
+            <dt>{{ t('logs.finishReason') }}</dt>
+            <dd>
+              {{ finishLabel
+              }}<span v-if="finishLabel !== request.finish_reason" class="text-gray-500">
+                · {{ request.finish_reason }}</span
+              >
+            </dd>
+          </template>
+        </dl>
+        <ol class="request-timeline">
+          <li v-for="(event, index) in row.events" :key="index">
+            <time>{{ new Date(event.time).toLocaleTimeString(locale, { hour12: false }) }}</time>
+            <span>{{ logText(event.message) }}</span>
+          </li>
+        </ol>
+        <section class="request-json">
+          <button
+            type="button"
+            class="request-section-toggle"
+            :aria-expanded="jsonOpen"
+            @click="jsonOpen = !jsonOpen"
           >
-        </summary>
-        <template v-if="detailsRendered">
-          <dl>
-            <dt>ID</dt>
-            <dd>{{ request.id }}</dd>
-            <dt>{{ t('logs.endpoint') }}</dt>
-            <dd>{{ request.method }} {{ request.path }}</dd>
-            <template v-if="request.channel">
-              <dt>{{ t('logs.channel') }}</dt>
-              <dd>{{ t(channelLabelKey(request.channel)) }}</dd>
-            </template>
-            <template v-if="request.usage">
-              <dt>{{ t('logs.inputTokens') }}</dt>
-              <dd>{{ number(request.usage.input_tokens) }} tokens</dd>
-              <template v-if="request.usage.cached_tokens">
-                <dt>{{ t('logs.cachedTokens') }}</dt>
-                <dd>{{ number(request.usage.cached_tokens) }} tokens</dd>
-              </template>
-              <dt>{{ t('logs.totalTokens') }}</dt>
-              <dd>{{ number(request.usage.total_tokens) }} tokens</dd>
-            </template>
-            <template v-if="request.input_messages">
-              <dt>{{ t('logs.inputMessages') }}</dt>
-              <dd>{{ number(request.input_messages) }}</dd>
-            </template>
-            <template v-if="request.finish_reason">
-              <dt>{{ t('logs.finishReason') }}</dt>
-              <dd>
-                {{ finishLabel
-                }}<span v-if="finishLabel !== request.finish_reason" class="text-gray-500">
-                  · {{ request.finish_reason }}</span
-                >
-              </dd>
-            </template>
-          </dl>
-          <ol class="request-timeline">
-            <li v-for="(event, index) in row.events" :key="index">
-              <time>{{ new Date(event.time).toLocaleTimeString(locale, { hour12: false }) }}</time>
-              <span>{{ logText(event.message) }}</span>
-            </li>
-          </ol>
-          <details
-            class="request-json"
-            @toggle="jsonExpanded = ($event.target as HTMLDetailsElement).open"
+            <UiIcon class="request-disclosure-icon" name="chevronRight" :size="12" />
+            JSON
+          </button>
+          <LogCollapse :open="jsonOpen">
+            <pre>{{ JSON.stringify(row.entry, null, 2) }}</pre>
+          </LogCollapse>
+        </section>
+        <section
+          v-if="request.state !== 'running' && request.method === 'POST' && request.status !== 401"
+          class="request-json"
+        >
+          <button
+            type="button"
+            class="request-section-toggle"
+            :aria-expanded="bodyOpen"
+            @click="toggleBody"
           >
-            <summary>
-              <UiIcon class="request-disclosure-icon" name="chevronRight" :size="12" />
-              JSON
-            </summary>
-            <pre v-if="jsonExpanded">{{ JSON.stringify(row.entry, null, 2) }}</pre>
-          </details>
-          <details
-            v-if="request.state !== 'running' && request.method === 'POST'"
-            class="request-json"
-            @toggle="loadBody"
-          >
-            <summary>
-              <UiIcon class="request-disclosure-icon" name="chevronRight" :size="12" />
-              {{ t('logs.body') }}
-            </summary>
+            <UiIcon class="request-disclosure-icon" name="chevronRight" :size="12" />
+            {{ t('logs.body') }}
+          </button>
+          <LogCollapse :open="bodyOpen">
             <p v-if="bodyState === 'loading'" class="request-body-note">
               {{ t('common.loading') }}
             </p>
@@ -297,22 +316,19 @@ const bodyParts = computed(() =>
               </div>
               <pre>{{ part.text }}</pre>
             </div>
-          </details>
-        </template>
-      </details>
-    </template>
+          </LogCollapse>
+        </section>
+      </div>
+    </LogCollapse>
   </div>
 </template>
 
 <style scoped>
-.request-log {
-  padding: 4px 0 6px;
-}
 .request-heading {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px 12px;
+  gap: 2px 10px;
 }
 .request-heading strong {
   color: var(--color-gray-200);
@@ -324,7 +340,8 @@ const bodyParts = computed(() =>
   border-radius: 4px;
   padding: 0 6px;
   font-size: 13px;
-  line-height: 19px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
 }
 .state-completed,
 .state-tool_calls {
@@ -343,13 +360,17 @@ const bodyParts = computed(() =>
 .request-error {
   color: var(--color-red-400);
 }
+.request-channel {
+  color: var(--color-gray-500);
+  font-size: 13px;
+}
 .request-duration {
   color: var(--color-fg);
   margin-left: auto;
   font-variant-numeric: tabular-nums;
 }
 .request-step {
-  margin: 4px 0 0;
+  margin: 2px 0 0;
   color: var(--color-gray-400);
   font-size: 13px;
   overflow-wrap: anywhere;
@@ -361,8 +382,8 @@ const bodyParts = computed(() =>
 .request-metrics {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 18px;
-  margin-top: 6px;
+  gap: 2px 18px;
+  margin-top: 2px;
   color: var(--color-gray-400);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
@@ -372,71 +393,23 @@ const bodyParts = computed(() =>
   font-weight: 500;
 }
 .request-error {
-  margin: 6px 0 0;
+  margin: 2px 0 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .request-details {
-  margin-top: 5px;
+  margin: 6px 0 4px;
+  padding: 8px 12px;
+  border-left: 1px solid var(--color-line);
+  background: color-mix(in oklab, var(--color-panel) 70%, transparent);
   color: var(--color-gray-400);
   font-size: 13px;
-}
-.request-details summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 6px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-  transition:
-    background-color 120ms ease,
-    color 120ms ease;
-}
-.request-details summary::-webkit-details-marker {
-  display: none;
-}
-.request-details summary:hover {
-  color: var(--color-fg);
-  background: color-mix(in oklab, var(--color-line) 40%, transparent);
-}
-.request-details summary:focus-visible {
-  outline: 1px solid var(--color-blue-400);
-  outline-offset: 2px;
-}
-.request-disclosure-icon {
-  color: var(--color-gray-500);
-  transition: transform 120ms ease;
-}
-details[open] > summary > .request-disclosure-icon {
-  transform: rotate(90deg);
-}
-.request-summary-meta {
-  min-width: 0;
-  margin-left: 6px;
-  color: var(--color-gray-500);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-@media (pointer: coarse) {
-  .request-details summary {
-    min-height: 40px;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .request-details summary,
-  .request-disclosure-icon {
-    transition: none;
-  }
 }
 .request-details dl {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   gap: 4px 16px;
-  margin: 10px 0;
+  margin: 0 0 8px;
 }
 .request-details dd {
   color: var(--color-fg);
@@ -445,7 +418,7 @@ details[open] > summary > .request-disclosure-icon {
 .request-timeline {
   border-left: 1px solid var(--color-line);
   padding-left: 12px;
-  margin: 10px 0;
+  margin: 8px 0;
 }
 .request-timeline li {
   display: flex;
@@ -457,14 +430,49 @@ details[open] > summary > .request-disclosure-icon {
   flex-shrink: 0;
   color: var(--color-gray-500);
 }
+.request-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% + 6px);
+  min-height: 28px;
+  padding: 4px 6px;
+  margin-left: -6px;
+  border-radius: 4px;
+  text-align: start;
+  user-select: none;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.request-section-toggle:hover {
+  color: var(--color-fg);
+  background: color-mix(in oklab, var(--color-line) 40%, transparent);
+}
+.request-section-toggle:focus-visible {
+  outline: 1px solid var(--color-blue-400);
+  outline-offset: 2px;
+}
+.request-disclosure-icon {
+  color: var(--color-gray-500);
+  transition: transform 120ms ease;
+}
+.request-section-toggle[aria-expanded='true'] > .request-disclosure-icon {
+  transform: rotate(90deg);
+}
+@media (pointer: coarse) {
+  .request-section-toggle {
+    min-height: 40px;
+  }
+}
 .request-json pre {
   overflow: auto;
   max-height: 320px;
   padding: 12px;
-  background: var(--color-panel);
+  background: var(--color-canvas);
   border: 1px solid var(--color-line);
   border-radius: 4px;
-  margin-top: 6px;
+  margin: 4px 0 6px;
   white-space: pre;
 }
 .request-body-note {
@@ -485,7 +493,7 @@ details[open] > summary > .request-disclosure-icon {
     margin-left: 0;
   }
   .request-metrics {
-    gap: 4px 12px;
+    gap: 2px 12px;
   }
 }
 </style>

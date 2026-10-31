@@ -24,9 +24,6 @@ func (p *AccountPool) generatedVideoModel(modelID string) (Model, bool) {
 		return Model{}, false
 	}
 	for _, account := range p.accounts {
-		if account == nil {
-			continue
-		}
 		for _, model := range account.Models {
 			if modelMatchesID(model, modelID) && IsVideoModel(model) {
 				return model, true
@@ -38,13 +35,13 @@ func (p *AccountPool) generatedVideoModel(modelID string) (Model, bool) {
 
 // VideoMethod 返回模型创建视频任务所用的上游方法：经 generateContent 输出视频的模型为 generateContent，其余为 predictLongRunning
 func (p *AccountPool) VideoMethod(modelID string) string {
-	if _, ok := p.generatedVideoModel(strings.TrimPrefix(strings.TrimSpace(modelID), "models/")); ok {
+	if _, ok := p.generatedVideoModel(modelID); ok {
 		return "generateContent"
 	}
 	return "predictLongRunning"
 }
 
-// generateOmniVideo 以 Omni 的 generateContent 视频输出完成长任务：优先选文件图片所属账户，该账户不能运行模型时选其他账户，绑定任务后立即返回，后台生成的 MP4 上传为该账户 Drive 中的视频并绑定为结果
+// generateOmniVideo 以 Omni 的 generateContent 视频输出完成长任务，绑定任务后立即返回，后台生成的 MP4 上传为账户 Drive 中的视频并绑定为结果
 func (s *PooledService) generateOmniVideo(ctx context.Context, request VideoRequest, model Model) (VideoOperation, error) {
 	generate, err := omniVideoGenerateRequest(request, model)
 	if err != nil {
@@ -93,7 +90,7 @@ func (s *PooledService) generateOmniVideo(ctx context.Context, request VideoRequ
 	return operation, nil
 }
 
-// omniVideoGenerateRequest 把视频长任务写为 Omni 的 generateContent 请求：参考图或起始图在提示词之前并选对应任务，模型目录列出的任务中没有所需任务时返回错误，负面提示词附在提示词后，设置取模型选项中最接近的取值
+// omniVideoGenerateRequest 把视频长任务写为 Omni 的 generateContent 请求，模型目录列出的任务中没有所需任务时返回错误
 func omniVideoGenerateRequest(request VideoRequest, model Model) (GenerateRequest, error) {
 	if request.LastImage != nil {
 		return GenerateRequest{}, fmt.Errorf("模型 %s 没有尾帧输入", model.ID)
@@ -149,7 +146,7 @@ func (s *PooledService) runOmniVideo(ctx context.Context, operationID string, ge
 	s.omniVideos.Delete(operationID)
 }
 
-// saveOmniVideo 把内联图片与其他账户的文件图片上传为任务账户的 Drive 文件后生成 Omni 视频，结束后删除这些文件，把 MP4 上传到任务所在账户的 Drive 并绑定为任务结果
+// saveOmniVideo 生成 Omni 视频并把 MP4 上传到任务所在账户的 Drive，绑定为任务结果
 func (s *PooledService) saveOmniVideo(ctx context.Context, operationID string, generate GenerateRequest) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -187,14 +184,14 @@ func (s *PooledService) saveOmniVideo(ctx context.Context, operationID string, g
 	if err != nil {
 		return err
 	}
-	var video *Media
+	var video *Blob
 	finish := ""
 	for event := range events {
 		switch {
 		case event.Err != nil:
 			return event.Err
-		case event.Kind == EventMedia && event.Media != nil && strings.HasPrefix(event.Media.MIME, "video/"):
-			video = event.Media
+		case event.Kind == EventMedia && event.InlineData != nil && strings.HasPrefix(event.InlineData.MIME, "video/"):
+			video = event.InlineData
 		case event.FinishReason != "":
 			finish = strings.TrimSpace(event.FinishReason + " " + event.FinishMessage)
 		}
@@ -209,7 +206,7 @@ func (s *PooledService) saveOmniVideo(ctx context.Context, operationID string, g
 	name, err := videoResultName(lease.Account(), time.Now())
 	if err == nil {
 		var file FileRef
-		file, err = s.client.UploadFile(ContextWithAccountLease(ctx, lease), UploadRequest{
+		file, _, err = s.client.uploadFile(ContextWithAccountLease(ctx, lease), UploadRequest{
 			AccountID: lease.Account().ID, Name: name, MIME: "video/mp4",
 			Size: int64(len(video.Data)), Reader: bytes.NewReader(video.Data),
 		})

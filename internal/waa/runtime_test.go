@@ -5,8 +5,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"github.com/Mag1cFall/goja"
 )
 
 func TestRuntimeCloseReleasesVM(t *testing.T) {
@@ -24,11 +22,11 @@ func TestRuntimeCloseReleasesVM(t *testing.T) {
 	}
 	vm.Close()
 	vm.Close()
-	if vm.vm != nil || vm.snapshot != nil || vm.shutdown != nil || vm.loop.afterTask != nil {
+	if vm.agent != nil || vm.snapshot != 0 || vm.shutdown != 0 || vm.loop.afterTask != nil || vm.results != nil {
 		t.Fatal("closed runtime retained JS state")
 	}
 	select {
-	case <-vm.loop.stopped:
+	case <-vm.loop.exited:
 	default:
 		t.Fatal("event loop has not exited")
 	}
@@ -38,15 +36,22 @@ func TestRuntimeCloseReleasesVM(t *testing.T) {
 }
 
 func TestRuntimeStopInterruptsScript(t *testing.T) {
-	vm := &Runtime{loop: newEventLoop(), vm: goja.New()}
+	vm, err := NewRuntime(t.Context(), Options{
+		Challenge:   Challenge{Program: "test", GlobalName: "fixture"},
+		Interpreter: `var fixture = {a(program, ready) { ready(callback => callback('!test'), () => {}); }};`,
+		Profile:     Profile{Locale: "en-US", TimeZone: "UTC"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	started := make(chan struct{})
 	vm.loop.post(func() {
 		close(started)
-		_, _ = vm.vm.RunString(`for (;;) {}`)
+		_, _ = vm.agent.evaluate(vm.agent.top.global, `for (;;) {}`, "test.js")
 	})
 	<-started
 	stopped := make(chan struct{})
-	go func() { vm.stopVM(context.Canceled); close(stopped) }()
+	go func() { vm.Close(); close(stopped) }()
 	select {
 	case <-stopped:
 	case <-time.After(5 * time.Second):

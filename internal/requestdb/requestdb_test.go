@@ -99,7 +99,7 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "requests.db")
-			db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+			db, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(path))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -160,6 +160,108 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 				t.Fatalf("old record=%+v", record)
 			}
 		})
+	}
+}
+
+const legacyBodiesSchema = `CREATE TABLE bodies (
+ id TEXT PRIMARY KEY, time INTEGER NOT NULL, request TEXT NOT NULL, request_size INTEGER NOT NULL,
+ response TEXT NOT NULL, response_size INTEGER NOT NULL)`
+
+func TestLegacyBodiesMigrationPreservesData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "requests.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(schema + ";" + legacyBodiesSchema); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for _, id := range []string{"legacy", "existing"} {
+		if _, err := db.Exec(`INSERT INTO bodies VALUES (?,?,?,?,?,?)`, id, now.UnixMilli(), "old request\n", 100, "old response", 200); err != nil {
+			t.Fatal(err)
+		}
+	}
+	compressedRequest, err := compress("new request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressedResponse, err := compress("new response")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO request_bodies (id,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?)`, "existing", now.UnixMilli(), compressedRequest, 300, compressedResponse, 400); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		store, err := Open(path, func(string, string) {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		legacy, err := store.RequestBody(t.Context(), "legacy")
+		if err != nil || legacy.Request != "old request\n" || legacy.Response != "old response" || legacy.RequestSize != 100 || legacy.ResponseSize != 200 || !legacy.Time.Equal(now) {
+			t.Fatalf("legacy body changed: %+v, %v", legacy, err)
+		}
+		existing, err := store.RequestBody(t.Context(), "existing")
+		if err != nil || existing.Request != "new request" || existing.Response != "new response" || existing.RequestSize != 300 || existing.ResponseSize != 400 {
+			t.Fatalf("newer body overwritten: %+v, %v", existing, err)
+		}
+		var legacyFirst bool
+		if err := store.db.QueryRow(`SELECT (SELECT seq FROM request_bodies WHERE id='legacy') < (SELECT seq FROM request_bodies WHERE id='existing')`).Scan(&legacyFirst); err != nil || !legacyFirst {
+			t.Fatalf("legacy body would evict newer native bodies: %v, %v", legacyFirst, err)
+		}
+		var legacyTables int
+		if err := store.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='bodies'`).Scan(&legacyTables); err != nil || legacyTables != 0 {
+			t.Fatalf("legacy table not retired: %d, %v", legacyTables, err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestLegacyBodiesMigrationRollsBackOnFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "requests.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(schema + ";" + legacyBodiesSchema + `;
+ INSERT INTO bodies VALUES ('first',1,'first request',13,'response',8),('bad',2,'second request',14,'response',8);
+ CREATE TRIGGER reject_legacy BEFORE INSERT ON request_bodies WHEN NEW.id='bad'
+ BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := Open(path, func(string, string) {}); err == nil {
+		store.Close()
+		t.Fatal("migration unexpectedly succeeded")
+	}
+	var legacy, migrated int
+	if err := db.QueryRow(`SELECT count(*) FROM bodies`).Scan(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM request_bodies`).Scan(&migrated); err != nil || legacy != 2 || migrated != 0 {
+		t.Fatalf("migration was not atomic: legacy=%d migrated=%d error=%v", legacy, migrated, err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER reject_legacy`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path, func(string, string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if body, err := store.RequestBody(t.Context(), "bad"); err != nil || body.Request != "second request" {
+		t.Fatalf("retry lost the legacy body: %+v, %v", body, err)
 	}
 }
 

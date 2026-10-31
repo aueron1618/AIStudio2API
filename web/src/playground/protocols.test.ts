@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
 import type { Model } from '@/types'
-import { generateCode, type CodeInput } from './code'
+import { generateCode } from './code'
 import { openLiveSocket } from './media/live-socket'
 import { protocolCall } from './protocols'
 import { apiKey, publicAPIBase } from './request'
+
+vi.mock('@/desktop', () => ({ keepPage: () => {} }))
 
 vi.mock('@/console', () => ({
   useConsole: () => ({
@@ -19,7 +21,7 @@ const model: Model = {
   channels: ['playground', 'build'],
 }
 const buildModel: Model = { ...model, id: 'build-only', channels: ['build'] }
-const input: CodeInput = {
+const input: Parameters<typeof generateCode>[1] = {
   model: buildModel,
   modelID: buildModel.id,
   baseURL: 'https://example.test',
@@ -38,6 +40,8 @@ describe('fixed public channel URLs', () => {
     expect(publicAPIBase(buildModel.id, buildModel)).toBe('/build/v1')
     expect(publicAPIBase('build-only')).toBe('/build/v1')
     expect(publicAPIBase('models/gemini-test-build(high)')).toBe('/build/v1')
+    expect(publicAPIBase('models/gemini-test-build-search(high)')).toBe('/build/v1')
+    expect(publicAPIBase('models/gemini-test-build(high)-search')).toBe('/build/v1')
     expect(publicAPIBase('assistant', { ...model, channels: ['assistant'] })).toBe('/build/v1')
     expect(publicAPIBase('alias-build', { ...model, channels: ['playground'] })).toBe('/v1')
   })

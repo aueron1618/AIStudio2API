@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import { vTooltip } from '@/playground/ui/tooltip'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from '@/i18n'
 import UiIcon from '@/playground/ui/UiIcon.vue'
 import MediaViewDialog from './MediaViewDialog.vue'
+import { failureText } from '../request'
 import { downloadMedia } from './api'
 
 // path 是服务端视频结果的下载路径，src 是已有的视频地址，aspectRatio 是视频加载前占位框的宽高比
 const props = defineProps<{ path?: string; src?: string; aspectRatio?: string }>()
-const { t } = useI18n()
+const { t, logText } = useI18n()
 const element = ref<HTMLVideoElement>()
 const downloaded = ref('')
 const error = ref('')
@@ -29,7 +29,7 @@ watch(
     try {
       downloaded.value = URL.createObjectURL(await downloadMedia(path))
     } catch (reason) {
-      error.value = reason instanceof Error ? reason.message : String(reason)
+      error.value = failureText(reason, t('pg.videoDownloadUnreachable'))
     }
   },
   { immediate: true },
@@ -40,15 +40,14 @@ onUnmounted(() => {
 
 // toggle 播放或暂停
 function toggle(): void {
-  const video = element.value
-  if (video === undefined) return
+  const video = element.value!
   if (video.paused) void video.play()
   else video.pause()
 }
 
 // openLargeView 暂停预览并在对话框中打开大图查看
 function openLargeView(): void {
-  element.value?.pause()
+  element.value!.pause()
   largeView.value = true
 }
 
@@ -63,7 +62,7 @@ function save(): void {
 
 <template>
   <div class="gallery-video" :class="portrait ? 'nine-by-sixteen' : 'sixteen-by-nine'">
-    <p v-if="error" class="video-error">{{ error }}</p>
+    <p v-if="error" class="video-error">{{ logText(error) }}</p>
     <div v-else class="video-container" :class="{ pending: !source }">
       <div v-if="!source" class="video-placeholder"></div>
       <template v-else>
@@ -177,16 +176,6 @@ function save(): void {
     var(--color-loading-background) 60%
   );
   background-size: 800px;
-}
-
-@keyframes moving-gradient {
-  0% {
-    background-position: -400px 0;
-  }
-
-  to {
-    background-position: 400px 0;
-  }
 }
 
 .bottom-controls-container {

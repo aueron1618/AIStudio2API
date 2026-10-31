@@ -6,11 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/Mag1cFall/goja"
+	"github.com/Mag1cFall/AIStudio2API/internal/waa/mozjs"
 )
 
 func TestHeadlessMemoryPreferences(t *testing.T) {
@@ -82,18 +83,41 @@ func TestProtectedBodyReleasesBuffer(t *testing.T) {
 
 // mockProtectedXHR executes the production scripts with explicit XHR progress.
 // The encoder implements the standard encodeInto contract, including byte limits.
-func mockProtectedXHR(t *testing.T) *goja.Runtime {
+type protectedTestVM struct {
+	cx     *mozjs.Context
+	global mozjs.Handle
+}
+
+func mockProtectedXHR(t *testing.T) *protectedTestVM {
 	t.Helper()
-	vm := goja.New()
-	if err := vm.Set("btoa", func(value string) string {
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+	cx, err := mozjs.NewContext(mozjs.Options{HeapBytes: 64 << 20, Locale: "en-US"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cx.Close)
+	global, err := cx.NewGlobal(0, "UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vm := &protectedTestVM{cx: cx, global: global}
+	btoa, err := cx.NewFunction(global, "btoa", 1, func(call *mozjs.Call) error {
+		value := call.ArgString(0)
 		data := make([]byte, 0, len(value))
 		for _, ch := range value {
 			data = append(data, byte(ch))
 		}
-		return base64.StdEncoding.EncodeToString(data)
-	}); err != nil {
+		call.Return(mozjs.String(base64.StdEncoding.EncodeToString(data)))
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+	if err := cx.Set(global, "btoa", mozjs.Object(btoa)); err != nil {
+		t.Fatal(err)
+	}
+	cx.Release(btoa)
 	runProtectedJS(t, vm, `
 var page = {}, xhr, request, messages = [], sendError = false;
 var TextEncoder = class {
@@ -137,17 +161,19 @@ var advance = (text, done) => {
   if (done) xhr.onload?.();
 };
 `)
-	runProtectedJS(t, vm, "("+protectedSend+")(page, 'test', 'https://example.test', '[[\"Content-Type\",\"application/json\"]]', 'body', value => messages.push(value))")
+	runProtectedJS(t, vm, "("+protectedSend+")(page, 'test', 'https://example.test', '[[\"Content-Type\",\"application/json\"]]', 'body', '', value => messages.push(value))")
 	runProtectedJS(t, vm, `request = page.requests.get('test')`)
 	return vm
 }
 
-func runProtectedJS(t *testing.T, vm *goja.Runtime, source string) goja.Value {
+func runProtectedJS(t *testing.T, vm *protectedTestVM, source string) mozjs.Value {
 	t.Helper()
-	value, err := vm.RunString(source)
+	value, err := vm.cx.Evaluate(vm.global, source, "memory_test.js", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	vm.cx.RunJobs()
+	vm.cx.ReleaseValue(value)
 	return value
 }
 
@@ -158,20 +184,20 @@ func TestProtectedXHRBoundsLargeChunks(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			vm := mockProtectedXHR(t)
-			if err := vm.Set("input", input); err != nil {
+			if err := vm.cx.Set(vm.global, "input", mozjs.String(input)); err != nil {
 				t.Fatal(err)
 			}
 			runProtectedJS(t, vm, `advance(input, true)`)
-			if n := runProtectedJS(t, vm, `messages.filter(value => !value.startsWith('{')).length`).ToInteger(); n != 8 {
-				t.Fatalf("backpressure queue = %d, want 8", n)
+			if n := runProtectedJS(t, vm, `messages.filter(value => !value.startsWith('{')).length`).Number; n != 8 {
+				t.Fatalf("backpressure queue = %g, want 8", n)
 			}
-			if !runProtectedJS(t, vm, `request.credit === 0 && xhr.withCredentials && xhr.method === 'POST' && xhr.body === 'body'`).ToBoolean() {
+			if !runProtectedJS(t, vm, `request.credit === 0 && xhr.withCredentials && xhr.method === 'POST' && xhr.body === 'body'`).Bool {
 				t.Fatal("request lost XHR semantics or flow control")
 			}
 			var output []byte
 			done := false
 			for range 10 {
-				raw := runProtectedJS(t, vm, `JSON.stringify(messages.splice(0))`).String()
+				raw := runProtectedJS(t, vm, `JSON.stringify(messages.splice(0))`).String
 				var messages []string
 				if err := json.Unmarshal([]byte(raw), &messages); err != nil {
 					t.Fatal(err)
@@ -204,7 +230,7 @@ func TestProtectedXHRBoundsLargeChunks(t *testing.T) {
 			if !done || !bytes.Equal(output, []byte(input)) {
 				t.Fatalf("stream truncated or corrupted: %d of %d bytes", len(output), len(input))
 			}
-			if !runProtectedJS(t, vm, `page.requests.size === 0 && request.xhr === null && xhr.responseText === '' && xhr.onprogress === null`).ToBoolean() {
+			if !runProtectedJS(t, vm, `page.requests.size === 0 && request.xhr === null && xhr.responseText === '' && xhr.onprogress === null`).Bool {
 				t.Fatal("completed stream retained XHR data or callbacks")
 			}
 		})
@@ -218,11 +244,11 @@ func TestProtectedXHRAbortWhileBackpressured(t *testing.T) {
 			runProtectedJS(t, vm, `advance('x'.repeat(9 * 65536), `+strconv.FormatBool(loaded)+`)`)
 			runProtectedJS(t, vm, `messages.length = 0`)
 			runProtectedJS(t, vm, "("+protectedCancel+")(page, 'test')")
-			if !runProtectedJS(t, vm, `page.requests.size === 0 && request.xhr === null && request.resume === null && xhr.responseText === '' && messages.length === 1 && JSON.parse(messages[0]).error.includes('AbortError')`).ToBoolean() {
+			if !runProtectedJS(t, vm, `page.requests.size === 0 && request.xhr === null && request.resume === null && xhr.responseText === '' && messages.length === 1 && JSON.parse(messages[0]).error.includes('AbortError')`).Bool {
 				t.Fatal("aborted XHR retained data or kept producing")
 			}
 			runProtectedJS(t, vm, "("+protectedGrant+")(page, 'test', '8')")
-			if runProtectedJS(t, vm, `messages.length`).ToInteger() != 1 {
+			if runProtectedJS(t, vm, `messages.length`).Number != 1 {
 				t.Fatal("grant revived an aborted XHR")
 			}
 		})
@@ -232,11 +258,11 @@ func TestProtectedXHRAbortWhileBackpressured(t *testing.T) {
 func TestProtectedXHRNetworkErrorWhileBackpressured(t *testing.T) {
 	vm := mockProtectedXHR(t)
 	runProtectedJS(t, vm, `advance('x'.repeat(9 * 65536), false)`)
-	if runProtectedJS(t, vm, `request.credit`).ToInteger() != 0 {
+	if runProtectedJS(t, vm, `request.credit`).Number != 0 {
 		t.Fatal("test requires an XHR suspended on credit")
 	}
 	runProtectedJS(t, vm, `messages.length = 0; xhr.onerror()`)
-	if !runProtectedJS(t, vm, `page.requests.size === 0 && xhr.responseText === '' && messages.length === 1 && JSON.parse(messages[0]).error.includes('NetworkError')`).ToBoolean() {
+	if !runProtectedJS(t, vm, `page.requests.size === 0 && xhr.responseText === '' && messages.length === 1 && JSON.parse(messages[0]).error.includes('NetworkError')`).Bool {
 		t.Fatal("network failure left a suspended XHR")
 	}
 }
@@ -245,7 +271,7 @@ func TestProtectedXHRPreservesSplitSurrogate(t *testing.T) {
 	vm := mockProtectedXHR(t)
 	runProtectedJS(t, vm, `advance('a\ud840', false)`)
 	runProtectedJS(t, vm, `advance('\udc00b', true)`)
-	raw := runProtectedJS(t, vm, `JSON.stringify(messages.filter(value => !value.startsWith('{')))`).String()
+	raw := runProtectedJS(t, vm, `JSON.stringify(messages.filter(value => !value.startsWith('{')))`).String
 	var chunks []string
 	if err := json.Unmarshal([]byte(raw), &chunks); err != nil {
 		t.Fatal(err)

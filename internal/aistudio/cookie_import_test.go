@@ -48,7 +48,7 @@ func TestParseCookieImportFormats(t *testing.T) {
 			if value, ok := state.CookieValue("SAPISID", aiStudioOrigin, time.Now()); !ok || value != "test-secret==" {
 				t.Fatal("lost cookie value")
 			}
-			if _, err := NewSigner().Sign(state); err != nil {
+			if _, err := NewSigner().Authorization(state); err != nil {
 				t.Fatal(err)
 			}
 			if name == "netscape" && (!state.Cookies[0].HTTPOnly || state.Cookies[0].Expires != -1) {
@@ -65,7 +65,7 @@ func TestParseCookieImportFormats(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := NewSigner().Sign(reloaded); err != nil {
+			if _, err := NewSigner().Authorization(reloaded); err != nil {
 				t.Fatal(err)
 			}
 		})

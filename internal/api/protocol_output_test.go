@@ -21,6 +21,13 @@ type generationTestService struct {
 	generate func(context.Context, aistudio.GenerateRequest) (<-chan aistudio.Event, error)
 }
 
+func (s generationTestService) Models(ctx context.Context) ([]aistudio.Model, error) {
+	if s.Service != nil {
+		return s.Service.Models(ctx)
+	}
+	return nil, nil
+}
+
 func (s generationTestService) Generate(ctx context.Context, request aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
 	return s.generate(ctx, request)
 }
@@ -147,10 +154,7 @@ func TestExplicitThinkingOutput(t *testing.T) {
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/%s/stream=%t", tc.protocol, tc.name, stream), func(t *testing.T) {
 				transport := &protocolFixtureTransport{catalog: catalog, output: output, requests: make(chan aistudio.GenerateRequest, 1)}
-				client, err := aistudio.NewClient(aistudio.ClientOptions{Transport: transport, Protected: transport})
-				if err != nil {
-					t.Fatal(err)
-				}
+				client := aistudio.NewClient(aistudio.ClientOptions{Transport: transport, Protected: transport})
 				path, body, usage := "", "", ""
 				switch tc.protocol {
 				case "gemini":
@@ -170,7 +174,7 @@ func TestExplicitThinkingOutput(t *testing.T) {
 					body = `{"model":"test","input":"hi","include":["reasoning.encrypted_content"],"tools":[{"type":"function","name":"lookup"}]` + tc.config + fmt.Sprintf(`,"stream":%t}`, stream)
 					usage = `"reasoning_tokens":3`
 				}
-				response, raw := protocolTestRequest(t, newProtocolTestServer(t, client), http.MethodPost, path, body, nil)
+				response, raw := protocolTestRequest(t, newProtocolTestServer(t, generationTestService{generate: client.Generate}), http.MethodPost, path, body, nil)
 				if response.StatusCode != http.StatusOK {
 					t.Fatalf("status=%d: %s", response.StatusCode, raw)
 				}
@@ -203,7 +207,7 @@ func TestChatLegacyFunctions(t *testing.T) {
 			call := aistudio.FunctionCall{ID: "call_new", Name: "lookup", Arguments: json.RawMessage(`{"query":"now"}`)}
 			service := generationTestService{generate: func(_ context.Context, request aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
 				requests <- request
-				return testEventStream(aistudio.Event{Kind: aistudio.EventToolCall, ToolCall: &call}, aistudio.Event{Kind: aistudio.EventFinish, FinishReason: "other"}), nil
+				return testEventStream(aistudio.Event{Kind: aistudio.EventToolCall, FunctionCall: &call}, aistudio.Event{Kind: aistudio.EventFinish, FinishReason: "other"}), nil
 			}}
 			body := `{"model":"test","functions":[{"name":"lookup","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}],"function_call":{"name":"lookup"},"parallel_tool_calls":true,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":null,"function_call":{"name":"lookup","arguments":"{\"query\":\"before\"}"}},{"role":"function","name":"lookup","content":"old result"}]` + fmt.Sprintf(`,"stream":%t}`, stream)
 			response, raw := protocolTestRequest(t, newProtocolTestServer(t, service), http.MethodPost, "/v1/chat/completions", body, nil)
@@ -283,19 +287,19 @@ func TestChatLegacyFunctions(t *testing.T) {
 }
 
 func TestProtocolFinishReasons(t *testing.T) {
+	// The protocol layer receives the decoder's canonical lowercase reasons.
 	for _, tc := range []struct {
 		reasons, chat, anthropic, incomplete string
 	}{
-		{"stop,unspecified,other,language,malformed_function_call,unexpected_tool_call,too_many_tool_calls,image_other,no_image,missing_thought_signature,unrecognized_name", "stop", "end_turn", ""},
-		{"safety,content_filter,blocked,recitation,blocklist,prohibited_content,spii,image_safety,image_prohibited_content,image_recitation,provider_42", "content_filter", "refusal", "content_filter"},
-		{"max_tokens,max_output_tokens,length", "length", "max_tokens", "max_output_tokens"},
+		{"stop,unspecified,other,language,malformed_function_call,unexpected_tool_call,too_many_tool_calls,image_other,no_image,missing_thought_signature,unrecognized_name,pause_turn", "stop", "end_turn", ""},
+		{"safety,recitation,blocklist,prohibited_content,spii,image_safety,image_prohibited_content,image_recitation,malformed_response,provider_42", "content_filter", "refusal", "content_filter"},
+		{"max_tokens,continuation", "length", "max_tokens", "max_output_tokens"},
 		{"stop_sequence", "stop", "stop_sequence", ""},
-		{"pause_turn", "stop", "pause_turn", ""},
 	} {
 		for _, reason := range strings.Split(tc.reasons, ",") {
 			for _, hasTools := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/tools=%t", reason, hasTools), func(t *testing.T) {
-					result := generationResult{finishReason: " " + strings.ToUpper(reason) + " ", stopSequence: "END"}
+					result := generationResult{finishReason: reason, stopSequence: "END"}
 					if hasTools {
 						result.toolCalls = []aistudio.FunctionCall{{ID: "call", Name: "lookup", Arguments: json.RawMessage(`{}`)}}
 					}
@@ -313,8 +317,11 @@ func TestProtocolFinishReasons(t *testing.T) {
 					if message["stop_reason"] != anthropic {
 						t.Errorf("anthropic=%v want=%s", message["stop_reason"], anthropic)
 					}
-					if reason == "stop_sequence" && *message["stop_sequence"].(*string) != "END" {
-						t.Error("stop sequence was lost")
+					if reason == "stop_sequence" {
+						sequence, ok := message["stop_sequence"].(*string)
+						if !ok || sequence == nil || *sequence != "END" {
+							t.Error("stop sequence was lost")
+						}
 					}
 					response, err := buildResponsesObject("test", 0, responsesRequest{}, result, nil)
 					if err != nil {

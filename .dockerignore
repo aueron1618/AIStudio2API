@@ -14,3 +14,4 @@ dev.ps1
 web/vite.local.config.ts
 docs/windows-development.local.md
 cookie.json
+spidermonkey/

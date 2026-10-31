@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '@/api'
+import { keepPage } from '@/desktop'
 import { channelLabelKey, useI18n, type TranslationKey } from '@/i18n'
 import type { IconName } from '@/icons'
 import { maskedProxy } from '@/proxy'
-import type { ServiceConfig, UpstreamChannel } from '@/types'
+import type { FirstEventLatency, ServiceConfig, UpstreamChannel } from '@/types'
 import { useQueryParam } from '@/url'
 import SettingRow from './SettingRow.vue'
 import UiIcon from './UiIcon.vue'
@@ -22,49 +24,12 @@ const emit = defineEmits<{
   notice: [message: string, tone: 'success' | 'error']
 }>()
 
-const { t, errorText } = useI18n()
+const { t, locale, errorText } = useI18n()
 const saving = ref(false)
 const revealKey = ref(false)
 const adminPassword = ref('')
-const form = reactive<ServiceConfig>({
-  auto_start: false,
-  request_body_log: false,
-  log_file: true,
-  log_max_total_mb: 500,
-  admin_auth_enabled: false,
-  admin_username: 'admin',
-  admin_password_set: false,
-  build_native_nonstream: true,
-  nonstream_keepalive: true,
-  fake_stream: false,
-  youtube_links: false,
-  auth_states: 'auth',
-  listen_addr: '127.0.0.1:2048',
-  preview_listen_addr: '127.0.0.1:2050',
-  proxy_api_key: '',
-  active_listen_addr: '127.0.0.1:2048',
-  active_preview_listen_addr: '127.0.0.1:2050',
-  active_proxy_api_key: '',
-  management_restart_required: false,
-  service_restart_required: false,
-  proxy: '',
-  active_proxy: '',
-  proxy_pool: [],
-  init_timeout: '2m',
-  request_timeout: '30m',
-  warm_worker_limit: 0,
-  max_active_workers: 1,
-  warm_startup_concurrency: 1,
-  per_account_concurrency: 1,
-  routing_strategy: 'round-robin',
-  upstream_channels: ['playground', 'build'],
-  model_mapping: '',
-  model_channels: '',
-  waa_backend: 'go',
-  temporary_chat: false,
-  media_output: 'inline',
-  media_base_url: '',
-})
+// form 是编辑中的配置，读到 props.config 后由 resetForm 填入，表单只在读到配置后显示
+const form = reactive({} as ServiceConfig)
 
 type SectionID = 'service' | 'capacity' | 'upstream' | 'network' | 'security'
 
@@ -117,10 +82,15 @@ const sections: {
       'nonstream_keepalive',
       'fake_stream',
       'youtube_links',
+      'search_model_aliases',
+      'google_search',
+      'continuation_rewrite',
+      'continuation_prompt',
       'waa_backend',
       'temporary_chat',
       'init_timeout',
       'request_timeout',
+      'first_event_hedge',
     ],
   },
   {
@@ -149,11 +119,11 @@ const section = useQueryParam<SectionID>(
   sections.map((item) => item.id),
   'service',
 )
-const current = computed(() => sections.find((item) => item.id === section.value) ?? sections[0]!)
+const current = computed(() => sections.find((item) => item.id === section.value)!)
 
 const upstreamChannelOptions: UpstreamChannel[] = ['playground', 'build']
 const inputClass =
-  'min-w-0 w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm text-white transition focus:border-blue-500 focus:outline-none'
+  'w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm text-white transition focus:border-blue-500 focus:outline-none'
 
 // changedFields 返回表单中与已保存配置不同的字段
 const changedFields = computed(() => {
@@ -167,19 +137,55 @@ const changedFields = computed(() => {
 const changedCount = computed(() => changedFields.value.size + (adminPassword.value ? 1 : 0))
 
 // sectionChanged 判断分组是否有未保存的修改
-function sectionChanged(id: SectionID): boolean {
-  const target = sections.find((item) => item.id === id)
-  if (id === 'security' && adminPassword.value) return true
-  return target?.fields.some((field) => changedFields.value.has(field)) ?? false
+function sectionChanged(item: (typeof sections)[number]): boolean {
+  if (item.id === 'security' && adminPassword.value) return true
+  return item.fields.some((field) => changedFields.value.has(field))
 }
 
-// toggleUpstreamChannel 切换通道并保持配置顺序，至少保留一个通道
+// toggleUpstreamChannel 切换通道并保持配置顺序
 function toggleUpstreamChannel(channel: UpstreamChannel, enabled: boolean): void {
   const selected = new Set(form.upstream_channels)
   if (enabled) selected.add(channel)
-  else if (selected.size > 1) selected.delete(channel)
+  else selected.delete(channel)
   form.upstream_channels = upstreamChannelOptions.filter((option) => selected.has(option))
 }
+
+// latencies 是各模型与通道近期原请求首事件等待的 p95
+const latencies = ref<FirstEventLatency[]>([])
+// busiest 是近期样本最多的模型与通道
+const busiest = computed(() =>
+  latencies.value.reduce<FirstEventLatency | undefined>(
+    (best, item) => (best === undefined || item.samples > best.samples ? item : best),
+    undefined,
+  ),
+)
+// suggestedSeconds 是 busiest 的 p95 向上取整的秒数，没有样本时为 60
+const suggestedSeconds = computed(() =>
+  busiest.value === undefined ? 60 : Math.max(1, Math.ceil(busiest.value.p95_ms / 1000)),
+)
+// hedgeMode 是首字超时备用请求的方式，选自定义时填入建议的秒数
+const hedgeMode = computed({
+  get: () =>
+    form.first_event_hedge === 'off' || form.first_event_hedge === 'auto'
+      ? form.first_event_hedge
+      : 'custom',
+  set: (mode: string) => {
+    form.first_event_hedge = mode === 'custom' ? String(suggestedSeconds.value) : mode
+  },
+})
+
+// hedgeHint 是所选方式的说明：自动时写取值规则，自定义时给出 busiest 的近期 p95 作参考
+const hedgeHint = computed(() => {
+  if (hedgeMode.value === 'auto') return t('settings.firstEventHedgeAutoHint')
+  const item = busiest.value
+  if (hedgeMode.value !== 'custom' || item === undefined) return ''
+  return t('settings.firstEventHedgeCustomHint')
+    .replace('{model}', item.model)
+    .replace(
+      '{seconds}',
+      new Intl.NumberFormat(locale.value, { maximumFractionDigits: 1 }).format(item.p95_ms / 1000),
+    )
+})
 
 // resetForm 用已保存配置覆盖表单
 function resetForm(config: ServiceConfig): void {
@@ -200,8 +206,31 @@ function warnUnsaved(event: BeforeUnloadEvent): void {
   if (changedCount.value > 0) event.preventDefault()
 }
 
-onMounted(() => window.addEventListener('beforeunload', warnUnsaved))
-onUnmounted(() => window.removeEventListener('beforeunload', warnUnsaved))
+// releasePage 撤销关闭桌面窗口时为未保存修改保留页面的登记
+const releasePage = keepPage(() => changedCount.value > 0)
+
+// removeLeaveGuard 撤销离开管理端时对未保存修改的确认，确认离开时放弃修改
+const removeLeaveGuard = useRouter().beforeEach((to) => {
+  if (to.name === 'console' || changedCount.value === 0) return true
+  if (!window.confirm(t('settings.leaveUnsaved'))) return false
+  if (props.config !== null) resetForm(props.config)
+  return true
+})
+
+onMounted(() => {
+  window.addEventListener('beforeunload', warnUnsaved)
+  void api
+    .firstEventLatency()
+    .then((items) => {
+      latencies.value = items
+    })
+    .catch(() => undefined)
+})
+onUnmounted(() => {
+  window.removeEventListener('beforeunload', warnUnsaved)
+  releasePage()
+  removeLeaveGuard()
+})
 
 // saveConfig 原子保存全局配置
 async function saveConfig(): Promise<void> {
@@ -230,8 +259,10 @@ async function saveConfig(): Promise<void> {
 </script>
 
 <template>
-  <section class="flex min-h-0 flex-1 flex-col overflow-auto lg:overflow-visible">
-    <header class="shrink-0 border-b border-line px-4 py-4 md:px-8">
+  <section class="flex min-h-0 flex-1 flex-col">
+    <header
+      class="border-b border-line px-4 py-4 md:px-[max(2rem,calc((100%_-_var(--container-4xl)_-_14rem)/2_+_2rem))]"
+    >
       <h2 class="text-xl font-semibold text-white">{{ t('section.settings.title') }}</h2>
       <p class="mt-1 text-sm text-gray-500">{{ t('section.settings.description') }}</p>
     </header>
@@ -248,40 +279,42 @@ async function saveConfig(): Promise<void> {
     </div>
     <form
       v-else
-      class="flex min-w-0 shrink-0 flex-col lg:min-h-0 lg:flex-1 lg:flex-row"
+      class="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable_both-edges]"
       novalidate
       @submit.prevent="saveConfig"
     >
-      <nav
-        class="flex min-w-0 shrink-0 gap-1 overflow-x-auto border-b border-line p-2 lg:w-56 lg:flex-col lg:border-r lg:border-b-0 lg:p-4"
-        :aria-label="t('section.settings.title')"
+      <div
+        class="mx-auto flex w-full max-w-[calc(var(--container-4xl)_+_14rem)] flex-col md:flex-row"
       >
-        <button
-          v-for="item in sections"
-          :key="item.id"
-          type="button"
-          class="flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-left text-sm whitespace-nowrap transition-colors md:whitespace-normal"
-          :class="
-            section === item.id
-              ? 'bg-raised text-white'
-              : 'text-gray-400 hover:bg-raised/60 hover:text-gray-200'
-          "
-          :aria-current="section === item.id ? 'page' : undefined"
-          @click="section = item.id"
+        <nav
+          class="sticky top-0 z-10 flex shrink-0 gap-1 overflow-x-auto border-b border-line bg-canvas p-2 md:w-56 md:flex-col md:self-start md:border-b-0 md:p-4 md:pl-5"
+          :aria-label="t('section.settings.title')"
         >
-          <UiIcon :name="item.icon" :size="15" />
-          <span class="flex-1">{{ t(item.label) }}</span>
-          <span
-            v-if="sectionChanged(item.id)"
-            v-tooltip="t('settings.unsavedSection')"
-            class="h-1.5 w-1.5 rounded-full bg-amber-400"
-            ><span class="sr-only">{{ t('settings.unsavedSection') }}</span></span
+          <button
+            v-for="item in sections"
+            :key="item.id"
+            type="button"
+            class="flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-left text-sm whitespace-nowrap transition-colors md:whitespace-normal"
+            :class="
+              section === item.id
+                ? 'bg-raised text-white'
+                : 'text-gray-400 hover:bg-raised/60 hover:text-gray-200'
+            "
+            :aria-current="section === item.id ? 'page' : undefined"
+            @click="section = item.id"
           >
-        </button>
-      </nav>
+            <UiIcon :name="item.icon" :size="15" />
+            <span class="flex-1">{{ t(item.label) }}</span>
+            <span
+              v-if="sectionChanged(item)"
+              v-tooltip="t('settings.unsavedSection')"
+              class="h-1.5 w-1.5 rounded-full bg-amber-400"
+              ><span class="sr-only">{{ t('settings.unsavedSection') }}</span></span
+            >
+          </button>
+        </nav>
 
-      <div class="min-w-0 lg:min-h-0 lg:flex-1 lg:overflow-auto">
-        <div class="mx-auto max-w-4xl px-4 pt-4 pb-28 md:px-8 md:pt-6">
+        <div class="min-w-0 flex-1 px-4 pt-4 pb-28 md:px-8 md:pt-6">
           <div
             v-if="config.service_restart_required"
             class="mb-3 rounded-md border border-blue-500/30 bg-blue-500/10 px-4 py-2.5 text-sm text-blue-200"
@@ -505,9 +538,6 @@ async function saveConfig(): Promise<void> {
           </template>
 
           <template v-else-if="section === 'upstream'">
-            <p class="rounded-md border border-line bg-canvas p-3 text-xs leading-5 text-gray-400">
-              {{ t('settings.fixedChannelHelp') }}
-            </p>
             <SettingRow
               :label="t('settings.upstreamChannels')"
               group-id="setting-channels"
@@ -518,12 +548,17 @@ async function saveConfig(): Promise<void> {
               <div
                 role="group"
                 aria-labelledby="setting-channels-label"
-                class="flex flex-wrap gap-4 pt-1"
+                class="grid grid-cols-2 gap-2"
               >
                 <label
                   v-for="channel in upstreamChannelOptions"
                   :key="channel"
-                  class="flex items-center gap-2 text-sm text-gray-300"
+                  class="flex h-9 cursor-pointer items-center gap-2.5 rounded-md border px-3 text-sm transition-colors has-[:disabled]:cursor-default"
+                  :class="
+                    form.upstream_channels.includes(channel)
+                      ? 'border-blue-500/60 bg-blue-500/10 text-gray-100'
+                      : 'border-line bg-canvas text-gray-400 hover:border-gray-600 hover:text-gray-200'
+                  "
                 >
                   <input
                     type="checkbox"
@@ -609,6 +644,49 @@ async function saveConfig(): Promise<void> {
               <UiSwitch id="setting-youtube-links" v-model="form.youtube_links" />
             </SettingRow>
             <SettingRow
+              :label="t('settings.searchModelAliases')"
+              control-id="setting-search-model-aliases"
+              :description="t('settings.searchModelAliasesHelp')"
+              effect="service"
+              :changed="changedFields.has('search_model_aliases')"
+            >
+              <UiSwitch id="setting-search-model-aliases" v-model="form.search_model_aliases" />
+            </SettingRow>
+            <SettingRow
+              :label="t('settings.googleSearch')"
+              control-id="setting-google-search"
+              :description="t('settings.googleSearchHelp')"
+              effect="service"
+              :changed="changedFields.has('google_search')"
+            >
+              <UiSwitch id="setting-google-search" v-model="form.google_search" />
+            </SettingRow>
+            <SettingRow
+              :label="t('settings.continuationRewrite')"
+              control-id="setting-continuation-rewrite"
+              :description="t('settings.continuationRewriteHelp')"
+              effect="service"
+              :changed="changedFields.has('continuation_rewrite')"
+            >
+              <UiSwitch id="setting-continuation-rewrite" v-model="form.continuation_rewrite" />
+            </SettingRow>
+            <SettingRow
+              :label="t('settings.continuationPrompt')"
+              control-id="setting-continuation-prompt"
+              :description="t('settings.continuationPromptHelp')"
+              effect="service"
+              :changed="changedFields.has('continuation_prompt')"
+            >
+              <textarea
+                id="setting-continuation-prompt"
+                v-model.trim="form.continuation_prompt"
+                :class="[inputClass, 'resize-y disabled:cursor-not-allowed disabled:opacity-50']"
+                :disabled="!form.continuation_rewrite"
+                rows="4"
+                spellcheck="false"
+              />
+            </SettingRow>
+            <SettingRow
               :label="t('settings.waaBackend')"
               control-id="setting-waa-backend"
               :description="t('settings.waaBackendHelp')"
@@ -617,7 +695,7 @@ async function saveConfig(): Promise<void> {
             >
               <UiSelect id="setting-waa-backend" v-model="form.waa_backend" :class="inputClass">
                 <option value="camoufox">{{ t('settings.waaBackendCamoufox') }}</option>
-                <option value="go">{{ t('settings.waaBackendGo') }}</option>
+                <option value="spidermonkey">{{ t('settings.waaBackendSpiderMonkey') }}</option>
               </UiSelect>
             </SettingRow>
             <SettingRow
@@ -659,6 +737,33 @@ async function saveConfig(): Promise<void> {
                 spellcheck="false"
               />
             </SettingRow>
+            <SettingRow
+              :label="t('settings.firstEventHedge')"
+              control-id="setting-first-event-hedge"
+              :description="t('settings.firstEventHedgeHelp')"
+              effect="service"
+              :changed="changedFields.has('first_event_hedge')"
+            >
+              <UiSelect id="setting-first-event-hedge" v-model="hedgeMode" :class="inputClass">
+                <option value="off">{{ t('settings.firstEventHedgeOff') }}</option>
+                <option value="auto">{{ t('settings.firstEventHedgeAuto') }}</option>
+                <option value="custom">{{ t('settings.firstEventHedgeCustom') }}</option>
+              </UiSelect>
+              <div v-if="hedgeMode === 'custom'" class="mt-2 flex items-center gap-2">
+                <input
+                  id="setting-first-event-hedge-seconds"
+                  v-model.trim="form.first_event_hedge"
+                  :class="inputClass"
+                  :aria-label="t('settings.firstEventHedgeSeconds')"
+                  inputmode="numeric"
+                  autocomplete="off"
+                />
+                <span class="shrink-0 text-sm text-gray-400">{{
+                  t('settings.firstEventHedgeUnit')
+                }}</span>
+              </div>
+              <p v-if="hedgeHint" class="mt-2 text-xs leading-5 text-gray-500">{{ hedgeHint }}</p>
+            </SettingRow>
           </template>
 
           <template v-else-if="section === 'network'">
@@ -692,7 +797,7 @@ async function saveConfig(): Promise<void> {
                   >
                     <span class="break-all text-gray-300">{{ maskedProxy(entry.proxy) }}</span>
                     <span
-                      v-tooltip="entry.error || ''"
+                      v-tooltip="entry.error"
                       :class="entry.available ? 'text-green-400' : 'text-red-400'"
                     >
                       {{
@@ -792,12 +897,12 @@ async function saveConfig(): Promise<void> {
       <Transition name="notice">
         <div
           v-if="changedCount > 0"
-          class="fixed right-4 bottom-4 left-4 z-40 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-overlay px-4 py-3 shadow-2xl shadow-black/50 md:left-auto md:min-w-[26rem]"
+          class="fixed right-4 bottom-4 left-4 z-40 flex items-center gap-3 rounded-lg border border-line bg-overlay px-4 py-3 shadow-2xl shadow-black/50 md:left-auto md:min-w-[26rem]"
           role="region"
           :aria-label="t('settings.unsavedBar')"
         >
           <span class="h-2 w-2 shrink-0 rounded-full bg-amber-400"></span>
-          <span class="min-w-0 flex-1 text-sm text-gray-300">
+          <span class="flex-1 text-sm text-gray-300">
             {{
               t(changedCount === 1 ? 'settings.unsavedCountOne' : 'settings.unsavedCount').replace(
                 '{count}',
@@ -807,14 +912,14 @@ async function saveConfig(): Promise<void> {
           </span>
           <button
             type="button"
-            class="shrink-0 rounded-md px-3 py-1.5 text-sm whitespace-nowrap text-gray-400 transition hover:bg-raised hover:text-white"
+            class="rounded-md px-3 py-1.5 text-sm text-gray-400 transition hover:bg-raised hover:text-white"
             :disabled="saving"
             @click="resetForm(config)"
           >
             {{ t('settings.discard') }}
           </button>
           <button
-            class="flex shrink-0 items-center gap-2 rounded-md bg-blue-600 px-4 py-1.5 text-sm font-medium whitespace-nowrap text-white transition hover:bg-blue-500 disabled:opacity-50"
+            class="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
             type="submit"
             :disabled="saving"
           >
