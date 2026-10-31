@@ -10,10 +10,16 @@ export const messages = {
   'accounts.cookieHelp':
     '支持 Cookie 请求头、多行文本、扩展 JSON、storage-state JSON 和 Netscape 文件，UTF-8 最多 1 MiB。请复制完整 Cookie，document.cookie 会遗漏 HttpOnly 字段。',
   'accounts.cookieSecurity':
-    'Cookie 等同登录凭据。仅导入自己的账户，通过 HTTPS 或 SSH 隧道访问，勿分享或提交到版本库。导入会无头验证真实邮箱，不覆盖已有账户，也不会取得 Chrome 续签材料或交互式 Drive 授权。',
+    'Cookie 等同登录凭据。仅导入自己的账户，通过 HTTPS 或 SSH 隧道访问，勿分享或提交到版本库。导入会验证真实邮箱，不覆盖已有账户，也不会取得 Chrome 续签材料或交互式 Drive 授权。',
+  'accounts.cookieInstructions': '如何获取 Cookie',
   'accounts.cookieFile': '读取 Cookie 文件',
   'accounts.cookieTooLarge': 'Cookie 内容不能超过 1 MiB（UTF-8）',
   'accounts.cookieImporting': '正在验证并导入',
+  'accounts.cookieMethod': '验证方式',
+  'accounts.cookieMethodBrowser': '浏览器验证（默认）',
+  'accounts.cookieMethodHttp': 'HTTP（无浏览器后备）',
+  'accounts.cookieMethodHttpHelp':
+    'HTTP 后备导入仍会验证真实邮箱与模型目录，不会启动或下载无头浏览器。',
   'usage.requestedModel': '请求模型',
   'usage.responseModel': '响应模型',
   'usage.loadBody': '按需加载正文',
@@ -1096,6 +1102,7 @@ export const messages = {
   'error.account_busy': '账户正在处理请求，请稍后再试',
   'error.account_exists': '账户已存在',
   'error.signed_out': 'Cookie 未登录 AI Studio 或已失效',
+  'error.cookie_import_http_failed': 'Cookie HTTP 验证失败：{detail}',
   'error.account_required': '没有可用账户，请先添加或启用账户',
   'error.request_not_found': '请求不存在或已结束',
   'error.admin_login_required': '请先登录管理控制台',

@@ -1221,7 +1221,7 @@ server content 的 index `0/1/2/4/5/6` 分别为 model content、turn complete�
 | `GET /api/events` | 200 SSE | `{"type":"<TYPE>","data":<DTO>}` |
 
 - `POST /api/pairing/accounts` 的令牌无效或过期时返回 401 `pairing_token_invalid`，账户已存在时返回 409 `account_exists`
-- `POST /api/accounts/import/cookies` 的 Cookie 无法解析或缺少登录 Cookie 时返回 400 `invalid_cookies`，调试地址连接或读取失败时返回 502 `cdp_unavailable`，账户已存在时返回 409 `account_exists`
+- `POST /api/accounts/import/cookies` 的验证方式无效、Cookie 无法解析或缺少登录 Cookie 时返回 400 `invalid_account`，调试地址连接或读取失败时返回 502 `cdp_unavailable`，账户已存在时返回 409 `account_exists`。验证超时或取消返回 504 `cookie_import_timeout`，其他 HTTP 验证失败返回 502 `cookie_import_http_failed`，不会自动改为浏览器验证或跳过验证
 - `GET /api/requests/{id}/body` 在没有保存正文时返回 404 `request_body_not_found`
 - `POST /api/accounts` 与 `POST /api/accounts/{id}/login` 的 body 可带 `view`，即管理页面为本次登录生成的登录窗口 ID；`POST /api/accounts/{id}/login` 也接受空 body。服务器没有图形界面，或请求来自非回环地址、带 `Forwarded` 或 `X-Forwarded-For` 时，登录画面经同一 ID 的 `GET /api/login-view/{view}` 传递，请求在登录结束后返回
 - `GET /api/login-view/{view}` 推送 `{"type":"status","status":"starting|waiting|saving"}`、`{"type":"dialog","dialog":{"kind","message","value"}|null}`，以及 `{"type":"frame","context","url","title","width","height","scale"}` 后紧跟一条 JPEG 二进制消息；客户端发送 `{"type":"pointer","action":"move|down|up","x","y","button","context"}`、`{"type":"wheel","x","y","dx","dy","context"}`、`{"type":"key","action":"down|up","key","context"}`、`{"type":"text","text","context"}` 与 `{"type":"dialog","accept","text"}`，坐标与宽高为页面 CSS 像素，`key` 为 `KeyboardEvent.key`
@@ -1237,7 +1237,7 @@ server content 的 index `0/1/2/4/5/6` 分别为 model content、turn complete�
 | `AccountInput` | `label`、`enabled`、`proxy`、`locale`、`timezone` |
 | `ChromeImportProfile` | `id`、`profile`、`display_name`、`email`、`locale` |
 | `ChromeImportInput` | `account_ids`、`proxy`、`locale`、`timezone` |
-| `CookieImportInput` | `label`、`cookies` 或 `cdp`、`proxy`、`locale`、`timezone`；`cdp` 导入时 `locale`、`timezone` 为空则取该浏览器页面的语言与时区 |
+| `CookieImportInput` | `label`、`cookies` 或 `cdp`、可选 `method`（`browser` 默认，`http` 无浏览器后备验证）、`proxy`、`locale`、`timezone`；`cdp` 导入时 `locale`、`timezone` 为空则取该浏览器页面的语言与时区 |
 | `CookieBrowser` | `address`、`browser`、`email`、`locale`、`timezone`、`imported`、`signed_out`、`error` |
 | `PairingToken` | `token`、`expires_at` |
 | `AccountStateInput` | `label`、`locale`、`timezone`、`storage_state`、可选 `fingerprint` |
@@ -1279,7 +1279,7 @@ Chrome 导入列表按 `Preferences.account_info` 中的 Gaia ID 与邮箱逐个
 
 - `AccountCreateInput` 启动隔离 Camoufox 登录，邮箱由 AI Studio 页面读取
 - `ChromeImportInput.account_ids` 可一次选择多个账号
-- `CookieImportInput.cookies` 接受扩展/storage-state JSON、Netscape 文件、单行请求头或多行文本，UTF-8 上限 1 MiB；仅此 POST 管理接口允许 8 MiB JSON envelope，以容纳转义。只保留 Google Cookie，不信任上传身份/OAuth 扩展；`label` 不作为可信邮箱。`cdp` 非空时读取未分区 Cookie，并在无头浏览器中验证真实邮箱与轮换会话，已有账户 409 不覆盖
+- `CookieImportInput.cookies` 接受扩展/storage-state JSON、Netscape 文件、单行请求头或多行文本，UTF-8 上限 1 MiB；仅此 POST 管理接口允许 8 MiB JSON envelope，以容纳转义。只保留 Google Cookie，不信任上传身份/OAuth 扩展；`label` 不作为可信邮箱。`cdp` 非空时先读取未分区 Cookie。`method` 省略、为空或为 `browser` 时在无头浏览器中验证；`http` 通过 HTTPS 页面中的当前账户字段识别邮箱，再使用 Cookie 和 SAPISID 授权验证非空 `ListModels`，受 `INIT_TIMEOUT` 限制，不启动浏览器或 WAA VM。两种方式均保存验证后的轮换 Cookie，验证失败不发布账户，已有账户 409 不覆盖；HTTP 导入成功不代表 WAA、生成请求或 Drive 授权也已验证
 - `AccountInput.label` 必须与不可变的 Google 邮箱 ID 一致，`locale` 与 `timezone` 必须非空；`proxy` 使用 HTTP、HTTPS 或 SOCKS5 origin，可带 `user:password@`，不含 path、query 或 fragment
 
 新增、导入、登录和验证成功后立即刷新该账户模型目录，并发布最新账户与模型事件。

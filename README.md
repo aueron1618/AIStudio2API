@@ -109,6 +109,8 @@ go build -tags desktop,production -ldflags="-H windowsgui" -o aistudio2api.exe .
 
 保留的 `start.bat` 仅启动同目录已构建的 `aistudio2api.exe`，不自动安装依赖或构建。它会等待退出并原样转发参数，例如 `start.bat setup --cookie-file cookies.txt`、`start.bat -open-ui=false`；不替代桌面窗口、托盘或在线更新。
 
+日常 Windows 开发可在项目根目录运行 `./dev.bat`，启动独立的本地开发后端；另开终端运行 `./dev.bat -Mode Frontend`，使用前端热更新。开发数据保存在 `data/dev/`，不读取根目录 `.env` 或自动导入正式账户。端口、参数和测试步骤见 [Windows 开发服务器](docs/development.md#windows-开发服务器)。
+
 选择 Camoufox 后端或使用浏览器登录、Cookie 验证时，才按需下载版本匹配的 Camoufox 到 `runtime/camoufox/`：
 
 - 下载经 `PROXY` 的第一个代理发出，未设置时使用系统代理
@@ -185,15 +187,42 @@ docker compose up -d
 
 镜像支持 linux/amd64 与 linux/arm64，服务在容器内监听 `0.0.0.0:2048`。Compose 显式开启管理登录，并把同目录 `.env`（或宿主机环境变量）中的管理员凭据与 API 密钥传入容器；未设置 `ADMIN_PASSWORD` 或 `PROXY_API_KEY` 时拒绝启动。这里的 `.env` 用于 Compose 变量替换，不会自动整份传入容器。
 
-镜像在构建时已打包对应架构、版本匹配的完整 Camoufox，以及 Windows 字体、fontconfig、Xvfb 和软件 GL 运行库。路径为 `/opt/camoufox/camoufox-bin`，通过镜像内 `CAMOUFOX_PATH` 指定；Cookie 导入、登录及 Camoufox 后端无需运行时再下载。默认仍是 Go 后端和零热池，不会因预装浏览器而常驻浏览器进程。构建需要访问 GitHub Releases，镜像包含完整浏览器体积。
+提供两种镜像，均默认使用 Go 后端和零热池：
 
-CI 在本仓库 `main` 与 `v*` tag 推送时发布 `ghcr.io/aueron1618/aistudio2api` 的双架构镜像。`latest` 跟随稳定发行版；需要 main 构建时把 Compose 镜像标签改为 `main`。HTML 预览另使用 `2050` 端口。
+| 版本 | 稳定版标签 | main 构建标签 | 固定版本标签 |
+| --- | --- | --- | --- |
+| 内置浏览器（默认） | `latest` | `main` | `vX.Y.Z`、`X.Y.Z` |
+| 无浏览器 | `latest-no-browser` | `main-no-browser` | `vX.Y.Z-no-browser`、`X.Y.Z-no-browser` |
 
-`data/` 保存程序配置 `.env`、`auth/` 与 `runtime/`；浏览器位于 `/data` 挂载之外，更新镜像即可更新配套浏览器，不需要迁移旧的 `data/runtime/camoufox/`。迁移已有安装时把这三项复制到 `data/`，并将管理员凭据与 API 密钥配置到 Compose 同目录的 `.env`。容器环境变量优先于 `data/.env`，因此通过面板或 `data/.env` 修改这些已注入的配置不会覆盖 Compose 配置。容器以 root 运行，服务写入 `data/` 的文件属于 root，Linux 宿主机上用 `sudo` 编辑。
+内置浏览器版在构建时打包对应架构、版本匹配的完整 Camoufox，以及 Windows 字体、fontconfig、Xvfb 和软件 GL 运行库。路径为 `/opt/camoufox/camoufox-bin`，通过镜像内 `CAMOUFOX_PATH` 指定；浏览器 Cookie 验证、登录及 Camoufox 后端无需运行时再下载，也不会因预装浏览器而常驻浏览器进程。该版本构建需要访问 GitHub Releases，镜像包含完整浏览器体积。
+
+无浏览器版仅保留应用、系统证书与时区数据，不包含 Camoufox、配套字体或 GTK/Xvfb/GL 依赖，构建时也不下载浏览器。请保持 `WAA_BACKEND=go`，通过 Cookie **HTTP 验证**、已有登录态文件或远程添加导入账户。浏览器登录、默认 Cookie 浏览器验证及 `WAA_BACKEND=camoufox` 需要内置浏览器版；无浏览器版没有改变应用的按需下载机制，不应在该版本触发这些浏览器功能。
+
+CI 在本仓库 `main` 与 `v*` tag 推送时，为两种版本分别构建并发布 `ghcr.io/aueron1618/aistudio2api` 的双架构镜像。`latest` 与 `latest-no-browser` 跟随稳定发行版，预发布不会覆盖它们。现有无后缀标签和 Compose 默认行为保持不变。HTML 预览另使用 `2050` 端口。
+
+使用无浏览器版时，将已有 Compose 服务的 `image` 和 `build` 字段改为以下内容，其余配置保持不变；`build.target` 确保使用 `--build` 时不会构建成内置浏览器版：
+
+```yaml
+image: ghcr.io/aueron1618/aistudio2api:latest-no-browser
+build:
+  context: .
+  target: no-browser
+```
+
+从源码分别构建两种版本：
+
+```bash
+docker build --target browser -t aistudio2api:browser .
+docker build --target no-browser -t aistudio2api:no-browser .
+```
+
+不指定 `--target` 时仍构建内置浏览器版。
+
+`data/` 保存程序配置 `.env`、`auth/` 与 `runtime/`；内置浏览器版的浏览器位于 `/data` 挂载之外，更新镜像即可更新配套浏览器，不需要迁移旧的 `data/runtime/camoufox/`。迁移已有安装时把这三项复制到 `data/`，并将管理员凭据与 API 密钥配置到 Compose 同目录的 `.env`。容器环境变量优先于 `data/.env`，因此通过面板或 `data/.env` 修改这些已注入的配置不会覆盖 Compose 配置。容器以 root 运行，服务写入 `data/` 的文件属于 root，Linux 宿主机上用 `sudo` 编辑。
 
 - 打开 `http://服务器IP:2048/login`，使用管理员账号密码登录后访问面板，用户名默认为 `admin`；`PROXY_API_KEY` 独立用于生成 API。公网部署应使用 HTTPS 反向代理，并保留原始 `Host`、设置 `X-Forwarded-Proto: https`
 - 添加账户：把能登录 Google 的电脑上的 `auth/<Google 邮箱>/` 复制到 `data/auth/`；或在管理页面账户页点击“远程添加”取得配对令牌，经 SSH 隧道 `ssh -L 2048:127.0.0.1:2048 <服务器>` 后在该电脑运行 `setup --remote http://127.0.0.1:2048`
-- 添加账户：在管理页面“添加账户”中选择“浏览器登录”，在管理页面打开的登录窗口中登录 Google；也可以粘贴 Cookie，或把能登录 Google 的电脑上的 `auth/<Google 邮箱>/` 复制到 `data/auth/`
+- 添加账户：内置浏览器版可在“添加账户”中选择“浏览器登录”，在管理页面打开的登录窗口中登录 Google；两种版本均可粘贴 Cookie 并选择 HTTP 验证，或把能登录 Google 的电脑上的 `auth/<Google 邮箱>/` 复制到 `data/auth/`
 - `PROXY` 与账户代理从容器内访问，代理运行在宿主机时填写宿主机的局域网地址，并允许代理接受局域网连接
 - 修改 Compose 同目录的 `.env` 或 `docker-compose.yml` 后执行 `docker compose up -d --force-recreate`，仅 `restart` 不会更新容器环境变量；修改 `data/.env` 中未被环境变量覆盖的配置后可执行 `docker compose restart`。更新镜像执行 `docker compose pull && docker compose up -d`；在源码目录中执行 `docker compose up -d --build` 从源码构建
 

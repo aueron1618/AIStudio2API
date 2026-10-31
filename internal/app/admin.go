@@ -23,18 +23,19 @@ import (
 
 // runtimeAdmin 投影运行时权威状态
 type runtimeAdmin struct {
-	lifecycle   context.Context
-	pool        *aistudio.AccountPool
-	store       *aistudio.AccountStore
-	service     *trackedService
-	requests    *requestRegistry
-	login       aistudio.IsolatedLoginDriver
-	workers     *accountWorkerManager
-	headers     *accountHeaderProvider
-	configPath  string
-	config      config.Config
-	proxies     *aistudio.ProxyPool
-	globalProxy string
+	lifecycle     context.Context
+	pool          *aistudio.AccountPool
+	store         *aistudio.AccountStore
+	service       *trackedService
+	requests      *requestRegistry
+	login         aistudio.IsolatedLoginDriver
+	verifyCookies func(context.Context, *aistudio.StorageState, string) (chromeauth.Verification, error)
+	workers       *accountWorkerManager
+	headers       *accountHeaderProvider
+	configPath    string
+	config        config.Config
+	proxies       *aistudio.ProxyPool
+	globalProxy   string
 }
 
 // requestRegistry 保存活动请求与事件订阅

@@ -185,15 +185,42 @@ docker compose up -d
 
 The image supports linux/amd64 and linux/arm64, and the service listens on `0.0.0.0:2048` inside the container. Compose explicitly enables console login and passes administrator credentials and the API key from the adjacent `.env` file (or host environment variables) into the container. Startup is rejected if `ADMIN_PASSWORD` or `PROXY_API_KEY` is missing. This `.env` file supplies Compose interpolation values; its entire contents are not automatically passed into the container.
 
-The image bundles the complete matching Camoufox for the target architecture, Windows fonts, fontconfig, Xvfb and software GL libraries at build time. `CAMOUFOX_PATH=/opt/camoufox/camoufox-bin` avoids runtime downloads for sign-in, cookie verification and the browser backend. Pure Go and the zero warm pool remain the defaults; bundling the browser does not launch it. Building requires GitHub Releases access and includes the full browser size.
+Two image variants are available. Both default to pure Go and a zero warm pool:
 
-Pushes to this repository's `main` and `v*` tags publish multi-architecture images at `ghcr.io/aueron1618/aistudio2api`. `latest` follows stable releases; use the `main` image tag for branch builds. HTML previews also use port `2050`.
+| Variant | Stable tag | Main branch tag | Pinned version tags |
+| --- | --- | --- | --- |
+| Bundled browser (default) | `latest` | `main` | `vX.Y.Z`, `X.Y.Z` |
+| No browser | `latest-no-browser` | `main-no-browser` | `vX.Y.Z-no-browser`, `X.Y.Z-no-browser` |
 
-`data/` holds the application's `.env`, `auth/`, and `runtime/`. The browser is outside the `/data` mount and is updated with the image; the old `data/runtime/camoufox/` browser directory does not need to be migrated. To migrate an existing installation, copy these three items into `data/` and configure administrator credentials and the API key in the `.env` next to the Compose file. Container environment variables take precedence over `data/.env`, so editing these injected settings in the console or `data/.env` does not override Compose. The container runs as root, so files the service writes in `data/` are owned by root; edit them with `sudo` on Linux hosts.
+The browser variant bundles the complete matching Camoufox for the target architecture, Windows fonts, fontconfig, Xvfb and software GL libraries at build time. `CAMOUFOX_PATH=/opt/camoufox/camoufox-bin` avoids runtime downloads for sign-in, browser-based cookie verification and the browser backend. Bundling the browser does not launch it. This variant requires GitHub Releases access during the build and includes the full browser size.
+
+The no-browser variant contains the application, system certificates and timezone data, without Camoufox, its fonts or GTK/Xvfb/GL dependencies. Its build does not download a browser. Keep `WAA_BACKEND=go` and add accounts through **HTTP cookie verification**, existing authentication files or remote pairing. Browser sign-in, default browser-based cookie verification and `WAA_BACKEND=camoufox` require the bundled-browser variant. The no-browser image does not disable the application's on-demand downloader; do not invoke those browser features in this variant.
+
+Pushes to this repository's `main` and `v*` tags build and publish separate multi-architecture images for both variants at `ghcr.io/aueron1618/aistudio2api`. `latest` and `latest-no-browser` follow stable releases; prereleases do not replace them. Existing unsuffixed tags and the Compose default remain unchanged. HTML previews also use port `2050`.
+
+To select the no-browser variant, change the existing Compose service's `image` and `build` fields as follows, leaving its other settings unchanged. `build.target` also selects the correct variant when using `--build`:
+
+```yaml
+image: ghcr.io/aueron1618/aistudio2api:latest-no-browser
+build:
+  context: .
+  target: no-browser
+```
+
+Build each variant from source:
+
+```bash
+docker build --target browser -t aistudio2api:browser .
+docker build --target no-browser -t aistudio2api:no-browser .
+```
+
+Omitting `--target` still builds the bundled-browser variant.
+
+`data/` holds the application's `.env`, `auth/`, and `runtime/`. In the bundled-browser variant, the browser is outside the `/data` mount and is updated with the image; the old `data/runtime/camoufox/` browser directory does not need to be migrated. To migrate an existing installation, copy these three items into `data/` and configure administrator credentials and the API key in the `.env` next to the Compose file. Container environment variables take precedence over `data/.env`, so editing these injected settings in the console or `data/.env` does not override Compose. The container runs as root, so files the service writes in `data/` are owned by root; edit them with `sudo` on Linux hosts.
 
 - Open `http://server-ip:2048/login` and sign in with the administrator credentials to access the console; the default username is `admin`. `PROXY_API_KEY` separately protects generation APIs. Use an HTTPS reverse proxy for public deployments, preserving the original `Host` and setting `X-Forwarded-Proto: https`.
 - Add accounts: copy `auth/<Google email>/` from a computer that can sign in to Google into `data/auth/`, or click "Add remotely" on the console Accounts page to get a pairing token, open an SSH tunnel with `ssh -L 2048:127.0.0.1:2048 <server>`, and run `setup --remote http://127.0.0.1:2048` on that computer.
-- Add accounts: choose "Sign in with browser" in "Add account" on the console and sign in to Google in the sign-in window that opens in the console; you can also paste cookies, or copy `auth/<Google email>/` from a computer that can sign in to Google into `data/auth/`.
+- Add accounts: the bundled-browser variant supports "Sign in with browser" in the console. Both variants support pasting cookies with HTTP verification, or copying `auth/<Google email>/` from a computer that can sign in to Google into `data/auth/`.
 - `PROXY` and account proxies are reached from inside the container; when the proxy runs on the host, use the host's LAN address and allow LAN connections on the proxy.
 - After editing the `.env` next to the Compose file or `docker-compose.yml`, run `docker compose up -d --force-recreate`; `restart` alone does not update container environment variables. Use `docker compose restart` after editing settings in `data/.env` that are not overridden by environment variables. Run `docker compose pull && docker compose up -d` to update the image, and `docker compose up -d --build` in the source directory to build from source.
 

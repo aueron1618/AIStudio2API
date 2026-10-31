@@ -83,6 +83,7 @@ export interface CookieImportInput extends AccountLoginInput {
   label: string
   cookies: string
   cdp: string
+  method?: 'browser' | 'http'
 }
 
 export interface CookieBrowser {

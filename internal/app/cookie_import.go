@@ -17,6 +17,13 @@ import (
 
 // ImportCookieAccount 先验证 Cookie 和实际邮箱，再发布账户；失败不留下账户目录。
 func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.CookieImportInput) (api.AdminAccount, error) {
+	method := strings.ToLower(strings.TrimSpace(input.Method))
+	if method == "" {
+		method = "browser"
+	}
+	if method != "browser" && method != "http" {
+		return api.AdminAccount{}, invalidAccount(fmt.Errorf("Cookie 验证方式必须为 browser 或 http"))
+	}
 	if len(input.Cookies) > aistudio.MaxCookieImportBytes {
 		return api.AdminAccount{}, invalidAccount(fmt.Errorf("Cookie 文本不能超过 1 MiB"))
 	}
@@ -50,33 +57,60 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 	if err := config.ValidateProxy(accountConfig.Proxy); err != nil {
 		return api.AdminAccount{}, invalidAccount(err)
 	}
-	importer, ok := admin.login.(aistudio.CookieLoginDriver)
-	if !ok {
-		return api.AdminAccount{}, &adminOperationError{
-			status: http.StatusNotImplemented, code: "cookie_import_unavailable", message: "当前登录驱动不支持 Cookie 导入",
+	var result aistudio.IsolatedLoginResult
+	var directory string
+	if method == "http" {
+		verify := admin.verifyCookies
+		if verify == nil {
+			verify = chromeauth.Verify
 		}
+		timeout := admin.config.InitTimeout
+		if timeout <= 0 {
+			timeout = config.Default().InitTimeout
+		}
+		verifyCtx, cancel := context.WithTimeout(ctx, timeout)
+		admin.requests.log("auth", "INFO", "Cookie 导入 | 验证 AI Studio 登录状态 | method=http")
+		var verification chromeauth.Verification
+		verification, err = verify(verifyCtx, &state, admin.effectiveProxy(accountConfig.Proxy))
+		if err == nil {
+			err = verifyCtx.Err()
+		}
+		cancel()
+		result = aistudio.IsolatedLoginResult{Email: verification.Email, StorageState: state}
+	} else {
+		importer, ok := admin.login.(aistudio.CookieLoginDriver)
+		if !ok {
+			return api.AdminAccount{}, &adminOperationError{
+				status: http.StatusNotImplemented, code: "cookie_import_unavailable", message: "当前登录驱动不支持 Cookie 导入",
+			}
+		}
+		directory, err = os.MkdirTemp("", "aistudio2api-cookie-import-*")
+		if err != nil {
+			return api.AdminAccount{}, fmt.Errorf("创建 Cookie 导入目录: %w", err)
+		}
+		defer os.RemoveAll(directory)
+		admin.requests.log("auth", "INFO", "Cookie 导入 | 验证 AI Studio 登录状态 | method=browser")
+		result, err = importer.ImportCookies(ctx, aistudio.IsolatedLoginRequest{
+			AccountID: "new", Directory: directory, Proxy: admin.effectiveProxy(accountConfig.Proxy),
+			Locale: accountConfig.Locale, Timezone: accountConfig.Timezone,
+		}, state)
 	}
-	directory, err := os.MkdirTemp("", "aistudio2api-cookie-import-*")
 	if err != nil {
-		return api.AdminAccount{}, fmt.Errorf("创建 Cookie 导入目录: %w", err)
-	}
-	defer os.RemoveAll(directory)
-	admin.requests.log("auth", "INFO", "Cookie 导入 | 验证 AI Studio 登录状态")
-	result, err := importer.ImportCookies(ctx, aistudio.IsolatedLoginRequest{
-		AccountID: "new", Directory: directory, Proxy: admin.effectiveProxy(accountConfig.Proxy),
-		Locale: accountConfig.Locale, Timezone: accountConfig.Timezone,
-	}, state)
-	if err != nil {
-		// 浏览器协议错误可能包含注入的 Cookie 参数，不向日志或调用方回传原文。
+		// 浏览器协议或 HTTP 错误可能包含凭据，不向日志或调用方回传原文。
 		admin.requests.log("auth", "WARN", "Cookie 导入失败 | 未保存账户")
 		switch {
-		case errors.Is(err, camoufoxnative.ErrAuthenticationRequired):
+		case errors.Is(err, camoufoxnative.ErrAuthenticationRequired), errors.Is(err, chromeauth.ErrSignedOut):
 			return api.AdminAccount{}, invalidAccount(fmt.Errorf("Cookie 登录已失效，请重新导出完整 Cookie"))
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 			return api.AdminAccount{}, &adminOperationError{
 				status: http.StatusGatewayTimeout, code: "cookie_import_timeout", message: "Cookie 验证已取消或超时，请检查网络、代理和登录状态",
 			}
 		default:
+			if method == "http" {
+				return api.AdminAccount{}, &adminOperationError{
+					status: http.StatusBadGateway, code: "cookie_import_http_failed", message: "无法通过 HTTP 验证 Cookie 或识别邮箱，请检查代理和 AI Studio 登录状态，或改用浏览器验证",
+				}
+			}
 			return api.AdminAccount{}, &adminOperationError{
 				status: http.StatusBadGateway, code: "cookie_import_failed", message: "无法验证 Cookie 或识别邮箱，请检查 Camoufox、代理及 AI Studio 登录状态",
 			}

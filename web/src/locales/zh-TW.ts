@@ -13,9 +13,15 @@ export const messages: Record<TranslationKey, string> = {
     '支援 Cookie 請求標頭、多行文字、擴充套件 JSON、storage-state JSON 與 Netscape 檔案，UTF-8 最多 1 MiB。請複製完整 Cookie，document.cookie 會遺漏 HttpOnly 欄位。',
   'accounts.cookieSecurity':
     'Cookie 等同登入憑證。僅匯入自己的帳戶，透過 HTTPS 或 SSH 通道存取，勿分享或提交至版本庫。匯入會驗證真實信箱，不覆寫既有帳戶，也不取得 Chrome 續簽資料或互動式 Drive 授權。',
+  'accounts.cookieInstructions': '如何取得 Cookie',
   'accounts.cookieFile': '讀取 Cookie 檔案',
   'accounts.cookieTooLarge': 'Cookie 內容不得超過 1 MiB（UTF-8）',
   'accounts.cookieImporting': '正在驗證並匯入',
+  'accounts.cookieMethod': '驗證方式',
+  'accounts.cookieMethodBrowser': '瀏覽器驗證（預設）',
+  'accounts.cookieMethodHttp': 'HTTP（無瀏覽器備援）',
+  'accounts.cookieMethodHttpHelp':
+    'HTTP 備援匯入仍會驗證真實信箱與模型目錄，不會啟動或下載無頭瀏覽器。',
   'usage.requestedModel': '請求模型',
   'usage.responseModel': '回應模型',
   'usage.loadBody': '按需載入本文',
@@ -1099,6 +1105,7 @@ export const messages: Record<TranslationKey, string> = {
   'error.account_busy': '帳號正在處理請求，請稍後再試',
   'error.account_exists': '帳號已存在',
   'error.signed_out': 'Cookie 未登入 AI Studio 或已失效',
+  'error.cookie_import_http_failed': 'Cookie HTTP 驗證失敗：{detail}',
   'error.account_required': '沒有可用的帳號，請先新增或啟用帳號',
   'error.request_not_found': '請求不存在或已結束',
   'error.admin_login_required': '請先登入主控台',

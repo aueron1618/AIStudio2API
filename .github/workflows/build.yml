@@ -215,7 +215,10 @@ jobs:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: build
     strategy:
+      fail-fast: false
       matrix:
+        variant: [browser, no-browser]
+        platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
             runner: ubuntu-24.04
@@ -241,6 +244,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           flavor: |
             latest=auto
+            ${{ matrix.variant == 'no-browser' && 'suffix=-no-browser,onlatest=true' || '' }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{raw}}
@@ -249,12 +253,44 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: ${{ matrix.variant }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.platform }}
+      - name: Smoke Test Image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          docker run --rm --network none --read-only --entrypoint /bin/sh "$IMAGE@$DIGEST" -ec '
+            test -x /usr/local/bin/aistudio2api
+            LOG_FILE=false aistudio2api -h
+            test -s /etc/ssl/certs/ca-certificates.crt
+            test -d /usr/share/zoneinfo
+            case "$1" in
+              browser)
+                test -x "$CAMOUFOX_PATH"
+                test -f /opt/camoufox/fontconfig/windows/fonts.conf
+                test -d /opt/camoufox/fonts/windows
+                command -v Xvfb
+                ;;
+              no-browser)
+                test -z "${CAMOUFOX_PATH:-}"
+                test ! -e /opt/camoufox
+                for package in libgtk-3-0 xvfb libgl1-mesa-dri; do
+                  if dpkg-query -s "$package" >/dev/null 2>&1; then
+                    echo "Unexpected browser dependency: $package" >&2
+                    exit 1
+                  fi
+                done
+                ;;
+              *) exit 1 ;;
+            esac
+          ' -- "$VARIANT"
       - run: |
           mkdir -p digests
           touch "digests/${DIGEST#sha256:}"
@@ -262,12 +298,16 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
       - uses: actions/upload-artifact@v7
         with:
-          name: digest-${{ matrix.runner }}
+          name: digest-${{ matrix.variant }}-${{ matrix.runner }}
           path: digests/*
           retention-days: 1
 
   docker-manifest:
     needs: docker
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [browser, no-browser]
     runs-on: ubuntu-24.04
     permissions:
       packages: write
@@ -275,7 +315,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: digests
-          pattern: digest-*
+          pattern: digest-${{ matrix.variant }}-*
           merge-multiple: true
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -291,11 +331,29 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           flavor: |
             latest=auto
+            ${{ matrix.variant == 'no-browser' && 'suffix=-no-browser,onlatest=true' || '' }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{raw}}
             type=semver,pattern={{version}}
-      - working-directory: digests
-        run: docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") $(printf "${IMAGE}@sha256:%s " *)
+      - name: Publish Variant Manifest
+        working-directory: digests
+        shell: bash
+        run: |
+          shopt -s nullglob
+          digests=(*)
+          if (( ${#digests[@]} != 2 )); then
+            echo "Expected exactly two architecture digests" >&2
+            exit 1
+          fi
+          mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          if (( ${#tags[@]} == 0 )); then
+            echo "No image tags were generated" >&2
+            exit 1
+          fi
+          args=()
+          for tag in "${tags[@]}"; do args+=(--tag "$tag"); done
+          for digest in "${digests[@]}"; do args+=("$IMAGE@sha256:$digest"); done
+          docker buildx imagetools create "${args[@]}"
         env:
           IMAGE: ${{ steps.image.outputs.name }}

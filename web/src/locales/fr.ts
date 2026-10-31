@@ -13,9 +13,15 @@ export const messages: Record<TranslationKey, string> = {
     'Accepte les en-têtes Cookie, le texte multiligne, le JSON des extensions, le JSON storage-state et les fichiers Netscape, au maximum 1 MiB en UTF-8. Copiez l’en-tête complet : document.cookie omet les cookies HttpOnly.',
   'accounts.cookieSecurity':
     'Les cookies sont des identifiants de connexion. Importez uniquement vos comptes via HTTPS ou un tunnel SSH, sans les partager ni les committer. L’adresse réelle est vérifiée et les comptes existants ne sont pas écrasés. Aucun identifiant de renouvellement Chrome ni autorisation Drive interactive n’est obtenu.',
+  'accounts.cookieInstructions': 'Comment obtenir les cookies',
   'accounts.cookieFile': 'Lire un fichier de cookies',
   'accounts.cookieTooLarge': 'Les cookies ne doivent pas dépasser 1 MiB (UTF-8)',
   'accounts.cookieImporting': 'Vérification et importation',
+  'accounts.cookieMethod': 'Méthode de vérification',
+  'accounts.cookieMethodBrowser': 'Vérification par navigateur (par défaut)',
+  'accounts.cookieMethodHttp': 'HTTP (solution de secours sans navigateur)',
+  'accounts.cookieMethodHttpHelp':
+    'L’importation de secours par HTTP vérifie l’adresse e-mail réelle et le catalogue de modèles, sans lancer ni télécharger de navigateur sans interface graphique.',
   'usage.requestedModel': 'Modèle demandé',
   'usage.responseModel': 'Modèle de réponse',
   'usage.loadBody': 'Charger les corps à la demande',
@@ -1185,6 +1191,7 @@ export const messages: Record<TranslationKey, string> = {
   'error.account_busy': 'Le compte traite une requête. Réessayez dans un instant',
   'error.account_exists': 'Ce compte existe déjà',
   'error.signed_out': 'Les cookies ne sont pas connectés à AI Studio ou ont expiré',
+  'error.cookie_import_http_failed': 'Échec de la vérification HTTP des cookies : {detail}',
   'error.account_required': 'Aucun compte utilisable. Ajoutez ou activez d’abord un compte',
   'error.request_not_found': 'La requête n’existe pas ou est déjà terminée',
   'error.admin_login_required': 'Connectez-vous d’abord à la console',

@@ -15,6 +15,7 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
+	"github.com/Mag1cFall/AIStudio2API/internal/chromeauth"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 	"github.com/gorilla/websocket"
 )
@@ -71,12 +72,16 @@ func (catalog *cookieCatalogStub) RefreshAccountState(ctx context.Context, id st
 func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 	for _, test := range []struct {
 		name       string
+		method     string
 		failWorker bool
 		closeError string
 	}{
-		{"publish", false, ""},
-		{"rollback", true, ""},
-		{"cleanup-warning", false, "cookie-secret cleanup failed"},
+		{"publish", "", false, ""},
+		{"explicit-browser", "browser", false, ""},
+		{"rollback", "", true, ""},
+		{"cleanup-warning", "", false, "cookie-secret cleanup failed"},
+		{"http-publish", "http", false, ""},
+		{"http-rollback", "http", true, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -109,10 +114,32 @@ func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 			}
 			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), login: driver,
 				requests: registry, headers: headers, workers: workers, service: service}
+			httpCalls := 0
+			admin.verifyCookies = func(ctx context.Context, pending *aistudio.StorageState, proxy string) (chromeauth.Verification, error) {
+				httpCalls++
+				if _, ok := ctx.Deadline(); !ok {
+					t.Fatal("HTTP verification has no deadline")
+				}
+				if _, exists, _ := pending.AuthExtension(); exists || len(pending.Origins) != 0 {
+					t.Fatal("HTTP verification received untrusted identity or localStorage")
+				}
+				*pending = driver.result.StorageState
+				return chromeauth.Verification{Email: driver.result.Email, ModelCount: 1}, nil
+			}
+			if test.method == "http" {
+				admin.login = nil // HTTP 导入不能依赖登录驱动是否存在。
+			}
 			account, err := admin.ImportCookieAccount(ctx, api.CookieImportInput{
 				Cookies: strings.Replace(header, "refreshed-secret", "original-secret", 1),
-				Label:   "forged@example.com", Locale: "zh-CN", Timezone: "Asia/Shanghai",
+				Label:   "forged@example.com", Locale: "zh-CN", Timezone: "Asia/Shanghai", Method: test.method,
 			})
+			if test.method == "http" {
+				if httpCalls != 1 || driver.calls != 0 {
+					t.Fatal("HTTP import used the browser login path")
+				}
+			} else if httpCalls != 0 || driver.calls != 1 {
+				t.Fatal("browser import unexpectedly used HTTP verification")
+			}
 			if test.failWorker {
 				if err == nil || len(pool.Status()) != 0 || len(headers.accounts) != 0 {
 					t.Fatal("failed publication was not rolled back")
@@ -132,7 +159,7 @@ func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || account.ID != "new@example.com" || len(account.Models) != 1 {
+			if err != nil || account.ID != "new@example.com" || len(account.Models) != 1 || account.Locale != "zh-CN" || account.Timezone != "Asia/Shanghai" {
 				t.Fatalf("published account = %+v, error = %v", account, err)
 			}
 			stored, err := aistudio.LoadStorageState(filepath.Join(root, account.ID, "storage-state.json"))
@@ -140,10 +167,14 @@ func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 				t.Fatal(err)
 			}
 			if value, _ := stored.CookieValue("SAPISID", "https://aistudio.google.com", time.Now()); value != "refreshed-secret" {
-				t.Fatal("did not persist refreshed browser cookies")
+				t.Fatal("did not persist verified refreshed cookies")
 			}
 			fingerprint, err := os.ReadFile(filepath.Join(root, account.ID, "camoufox-fingerprint.json"))
-			if err != nil || !strings.Contains(string(fingerprint), "verified-fingerprint") {
+			if test.method == "http" {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("HTTP import created a browser fingerprint")
+				}
+			} else if err != nil || !strings.Contains(string(fingerprint), "verified-fingerprint") {
 				t.Fatal("verified browser fingerprint was not persisted")
 			}
 			extension, exists, err := stored.AuthExtension()
@@ -169,7 +200,7 @@ func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 			if test.closeError != "" && !warned {
 				t.Fatal("cleanup failure was silently ignored")
 			}
-			_, err = admin.ImportCookieAccount(ctx, api.CookieImportInput{Cookies: header, Label: "different@example.com"})
+			_, err = admin.ImportCookieAccount(ctx, api.CookieImportInput{Cookies: header, Label: "different@example.com", Method: test.method})
 			var conflict interface{ HTTPStatus() int }
 			if !errors.As(err, &conflict) || conflict.HTTPStatus() != http.StatusConflict || len(pool.Status()) != 1 {
 				t.Fatal("a forged label allowed an existing account to be replaced")
@@ -212,6 +243,10 @@ func TestAdminCookieImportValidation(t *testing.T) {
 			cfg := config.Default()
 			cfg.Proxy = "http://127.0.0.1:1234"
 			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), login: driver, requests: newRequestRegistry(ctx), config: cfg, globalProxy: cfg.Proxy}
+			admin.verifyCookies = func(context.Context, *aistudio.StorageState, string) (chromeauth.Verification, error) {
+				t.Fatal("browser import silently fell back to HTTP")
+				return chromeauth.Verification{}, nil
+			}
 			_, err := admin.ImportCookieAccount(ctx, api.CookieImportInput{Cookies: test.cookies, Proxy: test.proxy, Locale: "zh-CN", Timezone: "Asia/Shanghai"})
 			var status interface{ HTTPStatus() int }
 			if !errors.As(err, &status) || status.HTTPStatus() != test.status {
@@ -247,6 +282,96 @@ func TestAdminCookieImportValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAdminHTTPCookieImportValidation(t *testing.T) {
+	const header = "SAPISID=cookie-secret; __Secure-1PAPISID=one; __Secure-3PAPISID=three"
+	for _, test := range []struct {
+		name         string
+		proxy        string
+		email        string
+		err          error
+		invalidState bool
+		waitDeadline bool
+		status       int
+	}{
+		{name: "signed-out", err: chromeauth.ErrSignedOut, status: http.StatusBadRequest},
+		{name: "missing-cookie", err: camoufoxnative.ErrAuthenticationRequired, status: http.StatusBadRequest},
+		{name: "deadline", waitDeadline: true, status: http.StatusGatewayTimeout},
+		{name: "canceled", err: context.Canceled, status: http.StatusGatewayTimeout},
+		{name: "redacted", err: errors.New("HTTP response with cookie-secret"), status: http.StatusBadGateway},
+		{name: "identity", email: "not-an-email", status: http.StatusBadRequest},
+		{name: "invalid-result", email: "new@example.com", invalidState: true, status: http.StatusBadRequest},
+		{name: "duplicate-global-proxy", email: "Existing@Example.com", status: http.StatusConflict},
+		{name: "duplicate-account-proxy", email: "Existing@Example.com", proxy: "http://127.0.0.1:4321", status: http.StatusConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			root := t.TempDir()
+			pool := aistudio.NewAccountPool([]*aistudio.Account{{ID: "existing@example.com", Config: aistudio.DefaultAccountConfig("existing@example.com")}}, 1)
+			cfg := config.Default()
+			cfg.InitTimeout = time.Minute
+			if test.waitDeadline {
+				cfg.InitTimeout = time.Millisecond
+			}
+			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), requests: newRequestRegistry(ctx), config: cfg, globalProxy: "http://127.0.0.1:1234"}
+			calls := 0
+			admin.verifyCookies = func(ctx context.Context, pending *aistudio.StorageState, proxy string) (chromeauth.Verification, error) {
+				calls++
+				wantProxy := admin.globalProxy
+				if test.proxy != "" {
+					wantProxy = test.proxy
+				}
+				if proxy != wantProxy {
+					t.Fatal("HTTP verification lost the effective proxy")
+				}
+				if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > cfg.InitTimeout {
+					t.Fatal("HTTP verification lost the configured timeout")
+				}
+				pending.Cookies[0].Value = "rotated-secret"
+				if test.invalidState {
+					*pending = aistudio.StorageState{}
+				}
+				if test.waitDeadline {
+					<-ctx.Done()
+				}
+				return chromeauth.Verification{Email: test.email, ModelCount: 1}, test.err
+			}
+			_, err := admin.ImportCookieAccount(ctx, api.CookieImportInput{Cookies: header, Method: " HTTP ", Label: "forged@example.com", Proxy: test.proxy})
+			var operation *adminOperationError
+			if !errors.As(err, &operation) || operation.status != test.status || calls != 1 {
+				t.Fatalf("HTTP verification error = %v, calls = %d", err, calls)
+			}
+			if test.status == http.StatusBadGateway && operation.code != "cookie_import_http_failed" {
+				t.Fatalf("HTTP verification error code = %s", operation.code)
+			}
+			if strings.Contains(err.Error(), "cookie-secret") || strings.Contains(err.Error(), "rotated-secret") {
+				t.Fatal("HTTP verification error leaked credentials")
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 0 || len(pool.Status()) != 1 {
+				t.Fatal("failed HTTP verification published an account or pending cookie rotation")
+			}
+			admin.requests.mu.Lock()
+			defer admin.requests.mu.Unlock()
+			for _, log := range admin.requests.logs {
+				if strings.Contains(log.Message, "cookie-secret") || strings.Contains(log.Message, "rotated-secret") {
+					t.Fatal("HTTP verification log leaked credentials")
+				}
+			}
+		})
+	}
+}
+
+func TestAdminCookieImportRejectsUnknownMethod(t *testing.T) {
+	driver := &cookieLoginStub{}
+	admin := &runtimeAdmin{login: driver}
+	_, err := admin.ImportCookieAccount(t.Context(), api.CookieImportInput{Method: "none", CDP: "127.0.0.1:1"})
+	var operation *adminOperationError
+	if !errors.As(err, &operation) || operation.status != http.StatusBadRequest || driver.calls != 0 {
+		t.Fatalf("unknown verification method was not rejected before reading credentials: %v", err)
 	}
 }
 

@@ -17,6 +17,7 @@ import type {
   AccountState,
   ChromeImportProfile,
   CookieBrowser,
+  CookieImportInput,
   PairingToken,
 } from '@/types'
 import type { IconName } from '@/icons'
@@ -43,6 +44,7 @@ const showBrowserLogin = ref(false)
 const showChromeImport = ref(false)
 const showCookieImport = ref(false)
 const cookieText = ref('')
+const cookieMethod = ref<NonNullable<CookieImportInput['method']>>('browser')
 const showBrowserImport = ref(false)
 // cookieBrowsers 是本机找到的调试浏览器与其中登录 AI Studio 的账户
 const cookieBrowsers = ref<CookieBrowser[]>([])
@@ -287,6 +289,7 @@ function closeCookieImport(): void {
   if (pendingAction.value !== '') return
   showCookieImport.value = false
   cookieText.value = ''
+  cookieMethod.value = 'browser'
 }
 
 async function readCookieFile(event: Event): Promise<void> {
@@ -294,7 +297,6 @@ async function readCookieFile(event: Event): Promise<void> {
   const file = input.files?.[0]
   if (!file) return
   pendingAction.value = 'cookie-file'
-  cookieText.value = ''
   try {
     if (file.size > 1024 * 1024) throw new Error(t('accounts.cookieTooLarge'))
     const text = await file.text()
@@ -440,6 +442,7 @@ async function importCookieAccount(): Promise<void> {
       label: '',
       cookies: cookieText.value,
       cdp: '',
+      method: cookieMethod.value,
       ...accountEnvironment,
     })
     pendingAction.value = ''
@@ -964,99 +967,237 @@ async function refreshAllAccounts(): Promise<void> {
 
         <div v-if="showCookieImport" class="modal-overlay" @click.self="closeCookieImport">
           <form
-            class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
+            class="cookie-import-dialog mx-3 flex max-h-[calc(100dvh-1.5rem)] min-w-0 w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-line bg-panel shadow-xl sm:mx-4 sm:max-h-[calc(100dvh-2rem)]"
             role="dialog"
             aria-modal="true"
             aria-labelledby="cookie-import-title"
+            aria-describedby="cookie-import-description"
             autocomplete="off"
             @submit.prevent="importCookieAccount"
             @keydown.esc="closeCookieImport"
           >
-            <div class="mb-4 flex items-center justify-between">
-              <h3 id="cookie-import-title" class="text-lg font-bold text-white">
-                {{ t('accounts.pasteCookie') }}
-              </h3>
+            <div
+              class="flex shrink-0 items-start justify-between gap-3 border-b border-line p-4 sm:px-6 sm:py-5"
+            >
+              <div class="flex min-w-0 items-start gap-3">
+                <span
+                  class="flex size-10 shrink-0 items-center justify-center rounded-lg border border-blue-500/20 bg-blue-500/10 text-blue-400"
+                >
+                  <UiIcon name="cookie" :size="20" />
+                </span>
+                <div class="min-w-0">
+                  <h3 id="cookie-import-title" class="text-lg font-semibold leading-6 text-white">
+                    {{ t('accounts.pasteCookie') }}
+                  </h3>
+                  <p
+                    id="cookie-import-description"
+                    class="mt-1 hidden text-sm leading-5 text-gray-500 sm:block"
+                  >
+                    {{ t('accounts.pasteCookieHelp') }}
+                  </p>
+                </div>
+              </div>
               <button
-                class="rounded p-1 text-gray-500 hover:bg-line hover:text-white disabled:opacity-50"
+                class="flex size-11 shrink-0 items-center justify-center rounded-lg text-gray-500 transition hover:bg-raised hover:text-white disabled:opacity-50"
                 type="button"
                 :disabled="pendingAction !== ''"
                 :aria-label="t('common.close')"
                 @click="closeCookieImport"
               >
-                <UiIcon name="close" :size="16" />
+                <UiIcon name="close" :size="18" />
               </button>
             </div>
-            <ol class="mb-5 list-decimal space-y-1 pl-5 text-sm leading-6 text-gray-300">
-              <li v-for="step in pasteSteps" :key="step">{{ t(step) }}</li>
-            </ol>
-            <p class="mb-3 text-sm leading-6 text-gray-400">{{ t('accounts.cookieHelp') }}</p>
-            <p
-              class="mb-4 rounded border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-5 text-amber-200"
-            >
-              {{ t('accounts.cookieSecurity') }}
-            </p>
-            <fieldset class="space-y-4" :disabled="pendingAction !== ''">
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                  t('accounts.cookieFile')
-                }}</span>
-                <input
-                  class="w-full text-sm text-gray-400"
-                  type="file"
-                  accept=".json,.txt,.cookies,application/json,text/plain"
-                  @change="readCookieFile"
-                />
-              </label>
-              <label class="block">
-                <span class="mb-1 block text-sm font-medium text-gray-300">{{
-                  t('accounts.cookies')
-                }}</span>
-                <textarea
-                  v-model="cookieText"
-                  class="h-36 w-full resize-y rounded border border-line bg-canvas px-3 py-2 font-mono text-xs text-white transition focus:border-blue-500 focus:outline-none"
-                  spellcheck="false"
-                  autocomplete="off"
-                  autocapitalize="off"
-                  autocorrect="off"
-                  data-lpignore="true"
-                  data-1p-ignore
-                  maxlength="1048576"
-                  :placeholder="t('accounts.cookiePlaceholder')"
-                  required
-                />
-              </label>
-              <details class="group rounded border border-line">
+            <div class="min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6">
+              <details class="group mb-4 rounded-lg border border-line sm:hidden">
                 <summary
-                  class="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm text-gray-400 hover:text-gray-200"
+                  class="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 px-3 py-2 text-sm text-gray-400 hover:bg-raised"
                 >
+                  {{ t('accounts.cookieInstructions') }}
                   <UiIcon
                     name="chevronRight"
                     :size="14"
                     class="transition-transform group-open:rotate-90"
                   />
-                  {{ t('accounts.moreSettings') }}
                 </summary>
-                <div class="space-y-4 border-t border-line p-3">
-                  <label class="block">
-                    <span class="mb-1 block text-sm font-medium text-gray-400">{{
-                      t('accounts.proxy')
-                    }}</span>
-                    <input
-                      v-model.trim="accountEnvironment.proxy"
-                      class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                      placeholder="socks5://127.0.0.1:1080"
-                    />
-                  </label>
-                  <AccountRegionFields
-                    v-model:locale="accountEnvironment.locale"
-                    v-model:timezone="accountEnvironment.timezone"
-                  />
-                </div>
+                <ol
+                  class="list-decimal space-y-2 border-t border-line py-3 pr-3 pl-8 text-xs leading-5 text-gray-400"
+                >
+                  <li v-for="step in pasteSteps" :key="step">{{ t(step) }}</li>
+                </ol>
               </details>
-            </fieldset>
-            <div class="mt-6 flex gap-2">
+              <ol
+                class="mb-5 hidden gap-3 border-b border-line pb-5 sm:grid sm:grid-cols-2 sm:gap-5"
+              >
+                <li
+                  v-for="(step, index) in pasteSteps"
+                  :key="step"
+                  class="flex min-w-0 items-start gap-2.5"
+                >
+                  <span
+                    class="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-raised text-xs font-semibold text-gray-400"
+                    aria-hidden="true"
+                  >
+                    {{ index + 1 }}
+                  </span>
+                  <span class="text-xs leading-5 text-gray-400">{{ t(step) }}</span>
+                </li>
+              </ol>
+              <fieldset class="min-w-0 space-y-5" :disabled="pendingAction !== ''">
+                <div class="grid items-start gap-5 md:grid-cols-[minmax(0,1fr)_16rem] md:gap-6">
+                  <div class="min-w-0">
+                    <div class="mb-2 flex items-center justify-between gap-3">
+                      <label for="cookie-import-text" class="text-sm font-semibold text-white">
+                        {{ t('accounts.cookies') }}
+                      </label>
+                      <span
+                        class="rounded border border-line px-1.5 py-0.5 font-mono text-xs text-gray-500"
+                        >1 MiB</span
+                      >
+                    </div>
+                    <p id="cookie-import-help" class="mb-3 text-xs leading-5 text-gray-500">
+                      {{ t('accounts.cookieHelp') }}
+                    </p>
+                    <div
+                      class="overflow-hidden rounded-lg border border-line bg-canvas transition focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/10"
+                    >
+                      <textarea
+                        id="cookie-import-text"
+                        v-model="cookieText"
+                        class="block h-52 max-h-96 min-h-40 w-full resize-y bg-transparent p-3 font-mono text-xs leading-6 text-white placeholder:text-gray-600 focus:outline-none disabled:opacity-60 sm:p-4 md:h-72"
+                        spellcheck="false"
+                        autocomplete="off"
+                        autocapitalize="off"
+                        autocorrect="off"
+                        data-lpignore="true"
+                        data-1p-ignore
+                        maxlength="1048576"
+                        aria-describedby="cookie-import-help cookie-import-security"
+                        :placeholder="t('accounts.cookiePlaceholder')"
+                        required
+                      />
+                      <div class="border-t border-line p-3">
+                        <label
+                          for="cookie-import-file"
+                          class="mb-2 flex items-center gap-2 text-xs font-medium text-gray-400"
+                        >
+                          <UiIcon name="importAccounts" :size="14" />
+                          {{ t('accounts.cookieFile') }}
+                        </label>
+                        <input
+                          id="cookie-import-file"
+                          class="block min-w-0 w-full rounded text-xs text-gray-500 file:mr-3 file:cursor-pointer file:rounded file:border file:border-line file:bg-raised file:px-3 file:py-2 file:text-xs file:font-medium file:text-gray-300 file:transition hover:file:bg-line focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:opacity-60"
+                          type="file"
+                          accept=".json,.txt,.cookies,application/json,text/plain"
+                          aria-describedby="cookie-import-help"
+                          @change="readCookieFile"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div class="min-w-0 space-y-4">
+                    <fieldset class="min-w-0">
+                      <legend class="mb-3 text-sm font-semibold text-white">
+                        {{ t('accounts.cookieMethod') }}
+                      </legend>
+                      <div class="grid gap-2.5 sm:grid-cols-2 md:grid-cols-1">
+                        <label
+                          class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition focus-within:ring-2 focus-within:ring-blue-500/20 has-disabled:cursor-not-allowed has-disabled:opacity-60"
+                          :class="
+                            cookieMethod === 'browser'
+                              ? 'border-blue-500/60 bg-blue-500/10'
+                              : 'border-line bg-canvas hover:border-line-strong'
+                          "
+                        >
+                          <input
+                            v-model="cookieMethod"
+                            class="mt-0.5 size-4 shrink-0 accent-blue-600"
+                            type="radio"
+                            name="cookie-import-method"
+                            value="browser"
+                          />
+                          <span class="min-w-0 text-sm font-medium leading-5 text-gray-300">{{
+                            t('accounts.cookieMethodBrowser')
+                          }}</span>
+                        </label>
+                        <label
+                          class="flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition focus-within:ring-2 focus-within:ring-blue-500/20 has-disabled:cursor-not-allowed has-disabled:opacity-60"
+                          :class="
+                            cookieMethod === 'http'
+                              ? 'border-blue-500/60 bg-blue-500/10'
+                              : 'border-line bg-canvas hover:border-line-strong'
+                          "
+                        >
+                          <input
+                            v-model="cookieMethod"
+                            class="mt-0.5 size-4 shrink-0 accent-blue-600"
+                            type="radio"
+                            name="cookie-import-method"
+                            value="http"
+                            aria-labelledby="cookie-import-http-label"
+                            aria-describedby="cookie-import-http-help"
+                          />
+                          <span class="min-w-0">
+                            <span
+                              id="cookie-import-http-label"
+                              class="block text-sm font-medium leading-5 text-gray-300"
+                              >{{ t('accounts.cookieMethodHttp') }}</span
+                            >
+                            <span
+                              id="cookie-import-http-help"
+                              class="mt-2 block text-xs leading-5 text-gray-500"
+                            >
+                              {{ t('accounts.cookieMethodHttpHelp') }}
+                            </span>
+                          </span>
+                        </label>
+                      </div>
+                    </fieldset>
+                    <div
+                      class="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-amber-200"
+                    >
+                      <UiIcon name="lock" :size="15" class="mt-0.5" />
+                      <p id="cookie-import-security" class="min-w-0 text-xs leading-5">
+                        {{ t('accounts.cookieSecurity') }}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <details class="group rounded-lg border border-line">
+                  <summary
+                    class="flex min-h-11 cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-sm text-gray-400 transition hover:bg-raised hover:text-gray-200"
+                  >
+                    <UiIcon name="options" :size="15" />
+                    {{ t('accounts.moreSettings') }}
+                    <UiIcon
+                      name="chevronRight"
+                      :size="14"
+                      class="ml-auto transition-transform group-open:rotate-90"
+                    />
+                  </summary>
+                  <div class="space-y-4 border-t border-line p-4">
+                    <label class="block">
+                      <span class="mb-1 block text-sm font-medium text-gray-400">{{
+                        t('accounts.proxy')
+                      }}</span>
+                      <input
+                        v-model.trim="accountEnvironment.proxy"
+                        class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
+                        placeholder="socks5://127.0.0.1:1080"
+                      />
+                    </label>
+                    <AccountRegionFields
+                      v-model:locale="accountEnvironment.locale"
+                      v-model:timezone="accountEnvironment.timezone"
+                    />
+                  </div>
+                </details>
+              </fieldset>
+            </div>
+            <div
+              class="flex shrink-0 justify-end gap-3 border-t border-line bg-panel px-4 py-3 sm:px-6 sm:py-4"
+            >
               <button
-                class="flex-1 rounded bg-raised py-2 text-sm text-gray-300 transition hover:bg-line disabled:opacity-50"
+                class="min-h-11 flex-1 rounded-lg border border-line bg-raised px-5 py-2 text-sm font-medium text-gray-300 transition hover:bg-line disabled:opacity-50 sm:flex-none"
                 type="button"
                 :disabled="pendingAction !== ''"
                 @click="closeCookieImport"
@@ -1064,11 +1205,15 @@ async function refreshAllAccounts(): Promise<void> {
                 {{ t('common.cancel') }}
               </button>
               <button
-                class="flex-1 rounded bg-blue-600 py-2 text-sm text-white transition hover:bg-blue-500 disabled:opacity-50"
+                class="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50 sm:min-w-28 sm:flex-none"
                 type="submit"
                 :disabled="pendingAction !== '' || !cookieText.trim()"
                 :aria-busy="pendingAction === 'cookie-import'"
               >
+                <UiIcon
+                  :name="pendingAction === 'cookie-import' ? 'spinner' : 'importAccounts'"
+                  :size="16"
+                />
                 {{
                   t(
                     pendingAction === 'cookie-import'
@@ -1286,3 +1431,18 @@ async function refreshAllAccounts(): Promise<void> {
     </div>
   </section>
 </template>
+
+<style scoped>
+/* Keep editor sizing independent of the shared unlayered form font reset. */
+.cookie-import-dialog textarea {
+  font-size: 0.8125rem;
+  line-height: 1.5rem;
+}
+
+@media (width < 40rem) {
+  .cookie-import-dialog textarea,
+  .cookie-import-dialog :deep(input:not([type='file'], [type='radio'])) {
+    font-size: 1rem;
+  }
+}
+</style>
