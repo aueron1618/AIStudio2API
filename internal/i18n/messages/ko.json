@@ -157,6 +157,8 @@
   "Build 通道没有可用账户": "Build 채널에 사용 가능한 계정이 없습니다",
   "Build 非流式优先选项已关闭": "Build 비스트리밍 우선 옵션 사용 안함",
   "CONTINUATION_REWRITE 必须是 true 或 false": "CONTINUATION_REWRITE는 true 또는 false여야 합니다",
+  "AUTO_CONTINUATION 必须是 true 或 false": "AUTO_CONTINUATION는 true 또는 false여야 합니다",
+  "ANTI_TRUNCATION 必须是 true 或 false": "ANTI_TRUNCATION은 true 또는 false여야 합니다",
   "CORS 预检: %w": "CORS 프리플라이트: {0}",
   "CORS 预检返回 HTTP %d": "CORS 프리플라이트가 HTTP {0}을 반환했습니다",
   "Camoufox BiDi 初始 tab 无效": "Camoufox BiDi 초기 탭이 잘못되었습니다",

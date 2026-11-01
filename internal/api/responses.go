@@ -411,7 +411,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	generateRequest := prepared.generate
 	generateRequest.Unary = !request.Stream || s.responseModes().FakeStream
-	events, err := s.service.Generate(r.Context(), generateRequest)
+	events, err := s.generate(r.Context(), generateRequest)
 	if err == nil && request.Stream {
 		events, err = awaitStreamStart(r.Context(), events)
 	}
@@ -461,7 +461,7 @@ func (s *server) compactOverThreshold(ctx context.Context, request *responsesReq
 	if threshold <= 0 {
 		return nil, nil
 	}
-	count, err := s.service.CountTokens(ctx, aistudio.TokenCountRequest{
+	count, err := s.countTokens(ctx, aistudio.TokenCountRequest{
 		Model: prepared.generate.Model, System: prepared.generate.System, Contents: prepared.generate.Contents, Tools: prepared.generate.Tools,
 	})
 	if err != nil || count.InputTokens <= threshold {

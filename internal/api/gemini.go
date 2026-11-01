@@ -1189,7 +1189,7 @@ func mapGeminiTools(groups []geminiToolGroup, config geminiToolConfig) (aistudio
 // handleGeminiCountTokens 统计请求的输入 token 数，引用显式缓存时另给出缓存部分的 token 数
 func (s *server) handleGeminiCountTokens(w http.ResponseWriter, r *http.Request, request aistudio.GenerateRequest, cache *geminiCache) {
 	request = s.prepareSearch(request)
-	count, err := s.service.CountTokens(r.Context(), aistudio.TokenCountRequest{
+	count, err := s.countTokens(r.Context(), aistudio.TokenCountRequest{
 		Model: request.Model, System: request.System, Contents: request.Contents, Tools: request.Tools,
 		MediaResolution: request.Config.MediaResolution,
 	})

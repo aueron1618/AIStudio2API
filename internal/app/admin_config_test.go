@@ -72,3 +72,40 @@ func TestAdminConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAutoContinuationConfigIsImmediateAndPreservesOmittedField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	cfg := config.Default()
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	pool := aistudio.NewAccountPool(nil, 1)
+	service := &trackedService{pool: pool}
+	admin := &runtimeAdmin{configPath: path, requests: newRequestRegistry(t.Context()), pool: pool, service: service}
+	value, err := admin.RuntimeConfig(t.Context())
+	if err != nil || value.AutoContinuation == nil || !*value.AutoContinuation {
+		t.Fatalf("missing enabled default in management DTO: %+v, %v", value, err)
+	}
+	disabled := false
+	value.AutoContinuation = &disabled
+	updated, err := admin.UpdateRuntimeConfig(t.Context(), value)
+	if err != nil || updated.AutoContinuation == nil || *updated.AutoContinuation || !service.autoContinuationDisabled.Load() {
+		t.Fatalf("disable did not apply immediately: %+v, %v", updated, err)
+	}
+	if !sameDataConfig(updated, cfg, dataConfigOverrides{}) {
+		t.Fatal("auto continuation incorrectly requires a service restart")
+	}
+	updated.AutoContinuation = nil
+	if _, err := admin.UpdateRuntimeConfig(t.Context(), updated); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil || loaded.AutoContinuation || !service.autoContinuationDisabled.Load() {
+		t.Fatalf("omitted field re-enabled continuation: %+v, %v", loaded, err)
+	}
+	enabled := true
+	updated.AutoContinuation = &enabled
+	if _, err := admin.UpdateRuntimeConfig(t.Context(), updated); err != nil || service.autoContinuationDisabled.Load() {
+		t.Fatalf("re-enabling failed: %v", err)
+	}
+}

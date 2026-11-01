@@ -42,7 +42,13 @@ export const messages: Record<TranslationKey, string> = {
     '為支援搜尋的模型提供 -search 型號，使用該型號時啟用 Google 搜尋。',
   'settings.googleSearch': '全部模型啟用搜尋',
   'settings.googleSearchHelp': '為生成請求啟用 Google 搜尋，包括一般型號與攜帶函式工具的請求。',
+  'settings.antiTruncation': '抗截斷前綴模型',
+  'settings.antiTruncationHelp':
+    '預設關閉。開啟後保留所有一般模型，並為所有公開模型（含使用者映射和搜尋模型）提供「抗截断-」變體；僅這些變體使用合成工具承載完整本文並還原輸出。關閉後不顯示也不接受此前綴模型。儲存後對新請求立即生效，一般模型不受影響，與自動續寫獨立。',
   'settings.continuationRewrite': '改寫續寫請求',
+  'settings.autoContinuation': '自動續寫',
+  'settings.autoContinuationHelp':
+    '預設開啟。關閉後不再發起下一輪，即使上游要求續寫或達到輸出上限；儲存後立即生效，不中斷已傳送的輪次，與 assistant 前綴改寫無關。',
   'settings.continuationRewriteHelp':
     '以 assistant 訊息結尾的請求，在不支援原生續寫的模型上改為續寫請求；關閉時原樣傳送，上游拒絕時回傳其錯誤',
   'settings.continuationPrompt': '續寫提示詞',

@@ -41,7 +41,7 @@ func (s *server) startChatChoices(ctx context.Context, request aistudio.Generate
 		choices.running.Add(1)
 		go func() {
 			defer choices.running.Done()
-			upstream, err := s.service.Generate(choices.ctx, choice)
+			upstream, err := s.generate(choices.ctx, choice)
 			source := upstream
 			if err == nil && stream {
 				source, err = awaitStreamStart(choices.ctx, upstream)

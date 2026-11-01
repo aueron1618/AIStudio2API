@@ -23,7 +23,6 @@ interface NavEntry {
 
 // entries 为导航，条目与顺序和管理端主页面一致
 const entries: NavEntry[] = [
-  { tab: 'logs', label: 'nav.logs', icon: 'logs' },
   { tab: 'accounts', label: 'nav.accounts', icon: 'accounts' },
   { tab: 'models', label: 'nav.models', icon: 'models' },
   { tab: 'requests', label: 'nav.requests', icon: 'requests' },
@@ -32,6 +31,7 @@ const entries: NavEntry[] = [
   { tab: 'playground', label: 'nav.playground', icon: 'playground' },
   { tab: 'history', label: 'pg.history', icon: 'history' },
   { tab: 'version', label: 'nav.version', icon: 'version' },
+  { tab: 'logs', label: 'nav.logs', icon: 'logs' },
 ]
 
 // playgroundRoutes 是导航中高亮 API 试用的页面：官网高亮 Playground 的页面，音乐页不高亮

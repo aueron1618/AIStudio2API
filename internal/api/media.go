@@ -286,7 +286,7 @@ func (s *server) handleOpenAISpeech(w http.ResponseWriter, r *http.Request) {
 	if style != "" {
 		part.SpeechMetadata = &aistudio.SpeechMetadata{Style: style}
 	}
-	events, err := s.service.Generate(r.Context(), aistudio.GenerateRequest{
+	events, err := s.generate(r.Context(), aistudio.GenerateRequest{
 		ID:    newID("speech"),
 		Unary: true,
 		Model: request.Model,

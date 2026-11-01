@@ -727,7 +727,9 @@ Anthropic 流式 `message_start` 写入本地输入估算：收到请求时取�
 
 ### 自动续写
 
-ListModels 能力码 91（目录能力 `output_continuation`）的模型由官网分轮生成超过 32768 token 的输出，输出长度上限为该模型的 `inputTokenLimit`：
+`AUTO_CONTINUATION=true` 为默认值，与 `CONTINUATION_REWRITE` 输入前缀改写独立。设为 `false` 时不发送自动续写标志或 token，输出预算采用模型的单轮上限，任何结束原因都不会触发下一轮；原因 22 或 `max_tokens + token` 也按终态返回。管理页保存立即生效：已发出的轮次允许结束，但后续轮被禁止，以单轮方式发出的请求不会因为稍后重新开启而自动升级为多轮。
+
+开启时，ListModels 能力码 91（目录能力 `output_continuation`）的模型由官网分轮生成超过 32768 token 的输出，输出长度上限为该模型的 `inputTokenLimit`：
 
 1. 请求的 generation config field 46 为 `1`，根 field 11 省略；max output 大于 32768 时首轮发送 32768
 2. 候选 field 9（JSON 索引 8）给出续写 token。完成帧以 `max_tokens` 结束且同一帧带 token、本轮上限小于请求的输出总量，或以终止原因 22 结束时，本轮不形成终态

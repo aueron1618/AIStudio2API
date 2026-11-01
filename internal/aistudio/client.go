@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
@@ -82,16 +84,34 @@ type ClientOptions struct {
 
 // Client 实现 AI Studio 私有协议核心
 type Client struct {
-	transport       RPCTransport
-	protected       ProtectedTransport
-	contextProvider RequestContextProvider
-	catalogMu       sync.RWMutex
-	catalogs        map[string]modelCatalog
-	tierMu          sync.RWMutex
-	tiers           map[string]BenefitTier
-	termsMu         sync.Mutex
-	termsAccepted   map[string]struct{}
-	disclaimers     map[string]struct{}
+	transport                RPCTransport
+	protected                ProtectedTransport
+	contextProvider          RequestContextProvider
+	catalogMu                sync.RWMutex
+	catalogs                 map[string]modelCatalog
+	tierMu                   sync.RWMutex
+	tiers                    map[string]BenefitTier
+	termsMu                  sync.Mutex
+	termsAccepted            map[string]struct{}
+	disclaimers              map[string]struct{}
+	autoContinuationDisabled atomic.Bool
+}
+
+// SetAutoContinuation controls subsequent rounds, including requests already running.
+func (c *Client) SetAutoContinuation(enabled bool) {
+	c.autoContinuationDisabled.Store(!enabled)
+}
+
+type continuationPolicyContextKey struct{}
+
+var errAutoContinuationDisabled = errors.New("automatic continuation is disabled")
+
+// checkContinuation also runs after WAA preparation, at the actual send boundary.
+func checkContinuation(ctx context.Context) error {
+	if disabled, ok := ctx.Value(continuationPolicyContextKey{}).(*atomic.Bool); ok && disabled.Load() {
+		return errAutoContinuationDisabled
+	}
+	return nil
 }
 
 // NewClient 创建协议客户端
@@ -170,6 +190,12 @@ func (c *Client) do(ctx context.Context, method string, accountID string, reques
 }
 
 func (c *Client) doProtected(ctx context.Context, request GenerateRequest, body []byte) (*RPCResponse, error) {
+	if request.continuationRound > 0 || request.continuationToken != "" {
+		ctx = context.WithValue(ctx, continuationPolicyContextKey{}, &c.autoContinuationDisabled)
+	}
+	if err := checkContinuation(ctx); err != nil {
+		return nil, err
+	}
 	rpc := newRPCRequest("GenerateContent", request.AccountID, request.ID, body, true)
 	c.applyBenefitTier(rpc.Method, request.AccountID, rpc.Header)
 	if request.ImageRoute {

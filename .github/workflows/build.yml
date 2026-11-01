@@ -17,6 +17,7 @@ concurrency:
 env:
   GOTOOLCHAIN: local
   SPIDERMONKEY: v152.0.4-aistudio2api.1
+  DOCKER_METADATA_SHORT_SHA_LENGTH: '6'
 
 jobs:
   frontend:
@@ -444,7 +445,8 @@ jobs:
             latest=auto
             ${{ matrix.variant == 'no-browser' && 'suffix=-no-browser,onlatest=true' || '' }}
           tags: |
-            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=main-,format=short,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{raw}}
             type=semver,pattern={{version}}
       - id: build
@@ -531,7 +533,8 @@ jobs:
             latest=auto
             ${{ matrix.variant == 'no-browser' && 'suffix=-no-browser,onlatest=true' || '' }}
           tags: |
-            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=main-,format=short,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{raw}}
             type=semver,pattern={{version}}
       - name: Publish Variant Manifest

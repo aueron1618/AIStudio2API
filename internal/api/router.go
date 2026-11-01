@@ -31,6 +31,8 @@ type Config struct {
 	ResponseModes func() ResponseModes
 	// SearchSettings 返回当前生成服务的搜索型号与全模型搜索设置
 	SearchSettings func() (modelAliases, googleSearch bool)
+	// AntiTruncation enables prefixed models for new requests.
+	AntiTruncation func() bool
 	// WaitLaunch 在生成服务启动期间等到启动结束，公开 API 请求经它等待后再处理
 	WaitLaunch func(context.Context)
 	// EgressProxy 返回服务连接外部 MCP 服务器所用的出口代理，空串为直连

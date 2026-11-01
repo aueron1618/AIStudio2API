@@ -157,6 +157,8 @@
   "Build 通道没有可用账户": "Kein verfügbares Konto für Build-Kanal",
   "Build 非流式优先选项已关闭": "Option für Non-Streaming-Präferenz in Build ist deaktiviert",
   "CONTINUATION_REWRITE 必须是 true 或 false": "CONTINUATION_REWRITE muss true oder false sein",
+  "AUTO_CONTINUATION 必须是 true 或 false": "AUTO_CONTINUATION muss true oder false sein",
+  "ANTI_TRUNCATION 必须是 true 或 false": "ANTI_TRUNCATION muss true oder false sein",
   "CORS 预检: %w": "CORS-Preflight: {0}",
   "CORS 预检返回 HTTP %d": "CORS-Preflight antwortet mit HTTP {0}",
   "Camoufox BiDi 初始 tab 无效": "Ungültiger anfänglicher Tab in Camoufox BiDi",

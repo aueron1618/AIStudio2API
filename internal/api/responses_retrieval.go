@@ -32,7 +32,7 @@ func (s *server) handleResponsesInputTokens(w http.ResponseWriter, r *http.Reque
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "model is required")
 		return
 	}
-	count, err := s.service.CountTokens(r.Context(), aistudio.TokenCountRequest{
+	count, err := s.countTokens(r.Context(), aistudio.TokenCountRequest{
 		Model: prepared.generate.Model, System: prepared.generate.System, Contents: prepared.generate.Contents,
 		Tools: prepared.generate.Tools,
 	})

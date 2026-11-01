@@ -73,7 +73,7 @@ func (s *server) respondBackground(w http.ResponseWriter, r *http.Request, reque
 		generate := prepared.generate
 		generate.Unary = true
 		generate.Background = true
-		events, err = s.service.Generate(ctx, generate)
+		events, err = s.generate(ctx, generate)
 	}
 	var result generationResult
 	if err == nil {
@@ -120,7 +120,7 @@ func (s *server) streamBackground(w http.ResponseWriter, r *http.Request, reques
 	prepared.generate.Background = true
 	var events <-chan aistudio.Event
 	if err == nil {
-		events, err = s.service.Generate(ctx, prepared.generate)
+		events, err = s.generate(ctx, prepared.generate)
 	}
 	reported := func(error) bool { return !errors.Is(ctx.Err(), context.Canceled) }
 	if err == nil {

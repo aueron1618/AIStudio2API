@@ -44,7 +44,13 @@ export const messages: Record<TranslationKey, string> = {
   'settings.googleSearch': 'Google-Suche für alle Modelle',
   'settings.googleSearchHelp':
     'Aktiviert die Google-Suche für Generierungsanfragen, einschließlich gewöhnlicher Modellnamen und Funktionswerkzeuge.',
+  'settings.antiTruncation': 'Modelle gegen abgeschnittene Ausgaben',
+  'settings.antiTruncationHelp':
+    'Standardmäßig deaktiviert. Behält alle gewöhnlichen Modelle bei und ergänzt für jedes öffentliche Modell, einschließlich Benutzerzuordnungen und Suchmodellen, eine "抗截断-"-Variante. Nur diese Varianten verwenden ein synthetisches Funktionswerkzeug, das den vollständigen Antworttext trägt und als Ausgabe wiederherstellt. Bei deaktivierter Option werden Präfixmodelle weder angezeigt noch akzeptiert. Nach dem Speichern gilt die Änderung sofort für neue Anfragen; gewöhnliche Modelle bleiben unverändert. Unabhängig von der automatischen Fortsetzung.',
   'settings.continuationRewrite': 'Fortsetzungsanfragen umschreiben',
+  'settings.autoContinuation': 'Automatische Fortsetzung',
+  'settings.autoContinuationHelp':
+    'Standardmäßig aktiviert. Deaktivieren verhindert sofort weitere Runden, auch wenn der Upstream eine Fortsetzung anfordert oder sein Ausgabelimit erreicht. Bereits gesendete Runden und das Umschreiben des Assistant-Präfixes bleiben unverändert.',
   'settings.continuationRewriteHelp':
     'Anfragen, die mit einer Assistant-Nachricht enden, werden bei Modellen ohne native Fortsetzung als Fortsetzungsanfrage umgeschrieben; ausgeschaltet werden sie unverändert gesendet und eine Ablehnung durch den Upstream wird zurückgegeben',
   'settings.continuationPrompt': 'Fortsetzungs-Prompt',
