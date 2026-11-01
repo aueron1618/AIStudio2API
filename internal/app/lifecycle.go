@@ -20,6 +20,7 @@ type managedService interface {
 	aistudio.Service
 	State() string
 	ApplyCapacity(warmTarget int, maxActive int, startupConcurrency int, perAccountConcurrency int)
+	SetAutoContinuation(bool)
 }
 
 // generationAdmin 表示进程级管理器转交给当前生成服务的管理操作
@@ -90,15 +91,17 @@ type runtimeManager struct {
 	configPath       string
 	activeManagement config.Config
 	// reservedListenAddr 是被 Windows 保留而改用 activeManagement.ListenAddr 监听的配置地址，没有改用时为空
-	reservedListenAddr string
-	previewAddress     string
-	overrides          dataConfigOverrides
-	requests           *requestRegistry
-	factory            runtimeFactory
-	startMu            sync.Mutex
-	mu                 sync.RWMutex
-	current            *runtimeGeneration
-	startCancel        context.CancelFunc
+	reservedListenAddr     string
+	previewAddress         string
+	overrides              dataConfigOverrides
+	requests               *requestRegistry
+	factory                runtimeFactory
+	startMu                sync.Mutex
+	mu                     sync.RWMutex
+	current                *runtimeGeneration
+	continuationRevision   uint64
+	antiTruncationRevision uint64
+	startCancel            context.CancelFunc
 	// launching 在生成服务启动期间存在，启动结束时关闭
 	launching       chan struct{}
 	autoStartCancel context.CancelFunc
@@ -159,6 +162,8 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 
 	manager.mu.Lock()
 	current := manager.current
+	continuationRevision := manager.continuationRevision
+	antiTruncationRevision := manager.antiTruncationRevision
 	if current.service.State() != "STOPPED" {
 		status, err := current.admin.StartService(ctx)
 		manager.mu.Unlock()
@@ -197,6 +202,13 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 
 	manager.mu.Lock()
 	current = manager.current
+	if manager.continuationRevision != continuationRevision {
+		next.config.AutoContinuation = current.config.AutoContinuation
+		next.service.SetAutoContinuation(next.config.AutoContinuation)
+	}
+	if manager.antiTruncationRevision != antiTruncationRevision {
+		next.config.AntiTruncation = current.config.AntiTruncation
+	}
 	manager.current = next
 	manager.mu.Unlock()
 
@@ -285,6 +297,12 @@ func (manager *runtimeManager) searchSettings() (modelAliases, googleSearch bool
 	manager.mu.RLock()
 	defer manager.mu.RUnlock()
 	return manager.current.config.SearchModelAliases, manager.current.config.GoogleSearch
+}
+
+func (manager *runtimeManager) antiTruncationEnabled() bool {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return manager.current.config.AntiTruncation
 }
 
 // mediaLinks 返回当前生成服务的媒体输出是否使用 URL 与设置的服务地址
@@ -540,6 +558,13 @@ func (manager *runtimeManager) UpdateRuntimeConfig(ctx context.Context, value ap
 		manager.current.service.ApplyCapacity(
 			updated.WarmWorkerLimit, updated.MaxActiveWorkers, updated.WarmStartupConcurrency, updated.PerAccountConcurrency,
 		)
+		if updated.AutoContinuation != nil {
+			manager.current.service.SetAutoContinuation(*updated.AutoContinuation)
+			manager.current.config.AutoContinuation = *updated.AutoContinuation
+			manager.continuationRevision++
+		}
+		manager.current.config.AntiTruncation = updated.AntiTruncation
+		manager.antiTruncationRevision++
 		updated = manager.decorateRuntimeConfig(updated, manager.current.config)
 		manager.ledger.SetBodyCapture(updated.RequestBodyLog)
 		err = manager.logs.set(updated.LogFile, updated.LogMaxTotalMB)

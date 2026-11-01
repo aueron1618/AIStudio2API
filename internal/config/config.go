@@ -59,7 +59,9 @@ var configKeys = [...]string{
 	"YOUTUBE_LINKS",
 	"SEARCH_MODEL_ALIASES",
 	"GOOGLE_SEARCH",
+	"ANTI_TRUNCATION",
 	"FIRST_EVENT_HEDGE",
+	"AUTO_CONTINUATION",
 	"CONTINUATION_REWRITE",
 	"CONTINUATION_PROMPT",
 }
@@ -106,7 +108,9 @@ type Config struct {
 	YouTubeLinks           bool
 	SearchModelAliases     bool
 	GoogleSearch           bool
+	AntiTruncation         bool
 	FirstEventHedge        string
+	AutoContinuation       bool
 	ContinuationRewrite    bool
 	ContinuationPrompt     string
 	AuthStates             string
@@ -140,6 +144,7 @@ func Default() Config {
 		NonstreamKeepalive:     true,
 		SearchModelAliases:     true,
 		FirstEventHedge:        FirstEventHedgeOff,
+		AutoContinuation:       true,
 		ContinuationRewrite:    true,
 		ContinuationPrompt:     DefaultContinuationPrompt,
 		AuthStates:             defaultAuthStates,
@@ -237,6 +242,12 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("GOOGLE_SEARCH 必须是 true 或 false")
 		}
 	}
+	if value, ok := values["ANTI_TRUNCATION"]; ok {
+		cfg.AntiTruncation, err = strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return Config{}, fmt.Errorf("ANTI_TRUNCATION 必须是 true 或 false")
+		}
+	}
 	if value, ok := values["YOUTUBE_LINKS"]; ok {
 		cfg.YouTubeLinks, err = strconv.ParseBool(strings.TrimSpace(value))
 		if err != nil {
@@ -250,6 +261,12 @@ func Load(path string) (Config, error) {
 		cfg.ContinuationRewrite, err = strconv.ParseBool(strings.TrimSpace(value))
 		if err != nil {
 			return Config{}, fmt.Errorf("CONTINUATION_REWRITE 必须是 true 或 false")
+		}
+	}
+	if value, ok := values["AUTO_CONTINUATION"]; ok {
+		cfg.AutoContinuation, err = strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return Config{}, fmt.Errorf("AUTO_CONTINUATION 必须是 true 或 false")
 		}
 	}
 	if value, ok := values["CONTINUATION_PROMPT"]; ok {
@@ -362,7 +379,9 @@ func (c Config) Save(path string) error {
 		"YOUTUBE_LINKS":            strconv.FormatBool(c.YouTubeLinks),
 		"SEARCH_MODEL_ALIASES":     strconv.FormatBool(c.SearchModelAliases),
 		"GOOGLE_SEARCH":            strconv.FormatBool(c.GoogleSearch),
+		"ANTI_TRUNCATION":          strconv.FormatBool(c.AntiTruncation),
 		"FIRST_EVENT_HEDGE":        c.FirstEventHedge,
+		"AUTO_CONTINUATION":        strconv.FormatBool(c.AutoContinuation),
 		"CONTINUATION_REWRITE":     strconv.FormatBool(c.ContinuationRewrite),
 		"CONTINUATION_PROMPT":      c.ContinuationPrompt,
 		"AISTUDIO_AUTH_STATES":     c.AuthStates,

@@ -860,6 +860,10 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 	if value.AdminPassword != nil {
 		password = *value.AdminPassword
 	}
+	autoContinuation := saved.AutoContinuation
+	if value.AutoContinuation != nil {
+		autoContinuation = *value.AutoContinuation
+	}
 	initTimeout, err := time.ParseDuration(value.InitTimeout)
 	if err != nil {
 		return api.RuntimeConfig{}, invalidConfigError(fmt.Errorf("INIT_TIMEOUT 无效: %w", err))
@@ -876,6 +880,8 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 		BuildNativeNonstream: value.BuildNativeNonstream,
 		NonstreamKeepalive:   value.NonstreamKeepalive, FakeStream: value.FakeStream, YouTubeLinks: value.YouTubeLinks,
 		SearchModelAliases: value.SearchModelAliases, GoogleSearch: value.GoogleSearch,
+		AntiTruncation:      value.AntiTruncation,
+		AutoContinuation:    autoContinuation,
 		ContinuationRewrite: value.ContinuationRewrite, ContinuationPrompt: strings.TrimSpace(value.ContinuationPrompt),
 		FirstEventHedge: strings.ToLower(strings.TrimSpace(value.FirstEventHedge)), AuthStates: value.AuthStates, ListenAddr: value.ListenAddr, PreviewListenAddr: value.PreviewListenAddr,
 		ProxyAPIKey: value.APIKey, Proxy: value.Proxy, InitTimeout: initTimeout, RequestTimeout: requestTimeout,
@@ -899,6 +905,7 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 	}
 	admin.pool.SetRoutingStrategy(cfg.RoutingStrategy)
 	admin.pool.SetModelChannels(modelChannels(cfg.ModelChannels))
+	admin.service.SetAutoContinuation(cfg.AutoContinuation)
 	admin.requests.log("service", "INFO", "服务配置已保存")
 	models, _ := admin.CatalogModels(context.Background())
 	admin.requests.publish(api.AdminEvent{Type: "models", Data: map[string]any{"models": models}})
@@ -1174,6 +1181,8 @@ func runtimeConfigDTO(cfg config.Config) api.RuntimeConfig {
 		BuildNativeNonstream: cfg.BuildNativeNonstream,
 		NonstreamKeepalive:   cfg.NonstreamKeepalive, FakeStream: cfg.FakeStream, YouTubeLinks: cfg.YouTubeLinks,
 		SearchModelAliases: cfg.SearchModelAliases, GoogleSearch: cfg.GoogleSearch,
+		AntiTruncation:      cfg.AntiTruncation,
+		AutoContinuation:    &cfg.AutoContinuation,
 		ContinuationRewrite: cfg.ContinuationRewrite, ContinuationPrompt: cfg.ContinuationPrompt,
 		FirstEventHedge: cfg.FirstEventHedge, AuthStates: cfg.AuthStates, ListenAddr: cfg.ListenAddr, APIKey: cfg.ProxyAPIKey,
 		ActiveListenAddr: cfg.ListenAddr, ActiveAPIKey: cfg.ProxyAPIKey,

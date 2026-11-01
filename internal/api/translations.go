@@ -127,7 +127,7 @@ func (s *server) translateSegments(ctx context.Context, model string, sources []
 		instruction += "Context and style guidance: " + prompt + "\n\n"
 	}
 	schema := fmt.Sprintf(`{"type":"object","properties":{"segments":{"type":"array","items":{"type":"string"},"minItems":%d,"maxItems":%d}},"required":["segments"]}`, len(sources), len(sources))
-	events, err := s.service.Generate(ctx, aistudio.GenerateRequest{
+	events, err := s.generate(ctx, aistudio.GenerateRequest{
 		ID: newID("translation"), Unary: true, Model: model,
 		Contents: []aistudio.Content{{Role: aistudio.RoleUser, Parts: []aistudio.Part{{Text: instruction + string(encoded)}}}},
 		Config:   aistudio.GenerationConfig{Temperature: temperature, ResponseMIMEType: "application/json", ResponseSchema: json.RawMessage(schema)},

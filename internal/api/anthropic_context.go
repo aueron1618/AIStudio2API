@@ -329,7 +329,7 @@ func (s *server) compactAnthropic(ctx context.Context, request anthropicRequest,
 	summarize.Contents = append(slices.Clone(generate.Contents), aistudio.Content{Role: aistudio.RoleUser, Parts: []aistudio.Part{{Text: instructions}}})
 	summarize.Tools.ToolConfig.Mode = "none"
 	summarize.Unary = true
-	events, err := s.service.Generate(ctx, summarize)
+	events, err := s.generate(ctx, summarize)
 	if err != nil {
 		return nil, err
 	}

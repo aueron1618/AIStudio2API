@@ -157,6 +157,8 @@
   "Build 通道没有可用账户": "Build 通道沒有可用帳號",
   "Build 非流式优先选项已关闭": "Build 非串流優先選項已關閉",
   "CONTINUATION_REWRITE 必须是 true 或 false": "CONTINUATION_REWRITE 必須是 true 或 false",
+  "AUTO_CONTINUATION 必须是 true 或 false": "AUTO_CONTINUATION 必須是 true 或 false",
+  "ANTI_TRUNCATION 必须是 true 或 false": "ANTI_TRUNCATION 必須是 true 或 false",
   "CORS 预检: %w": "CORS 預檢: {0}",
   "CORS 预检返回 HTTP %d": "CORS 預檢返回 HTTP {0}",
   "Camoufox BiDi 初始 tab 无效": "Camoufox BiDi 初始 tab 無效",

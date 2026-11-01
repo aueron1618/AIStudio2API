@@ -111,6 +111,7 @@ func newRuntime(
 	pooled.ContinuationRewrite = cfg.ContinuationRewrite
 	pooled.ContinuationPrompt = cfg.ContinuationPrompt
 	service := newTrackedService(lifecycle, pooled, pool, requests, workers, cfg.RequestTimeout)
+	service.SetAutoContinuation(cfg.AutoContinuation)
 	service.buildNativeNonstream = cfg.BuildNativeNonstream
 	service.hedgeAuto, service.hedgeAfter, _ = config.ParseFirstEventHedge(cfg.FirstEventHedge)
 	service.modelMapping, _ = config.ParseModelMapping(cfg.ModelMapping)
@@ -138,35 +139,36 @@ func newRuntime(
 
 // trackedService 跟踪生成请求及其唯一账户租约
 type trackedService struct {
-	buildNativeNonstream bool
-	modelMapping         []config.ModelAlias
-	proxies              *aistudio.ProxyPool
-	rebindAccounts       func([]string)
-	lifecycle            context.Context
-	service              aistudio.Service
-	catalog              modelCatalogService
-	pool                 *aistudio.AccountPool
-	requests             *requestRegistry
-	workers              *accountWorkerManager
-	timeout              time.Duration
-	state                atomic.Int32
-	lifecycleMu          sync.Mutex
-	transitionDone       chan struct{}
-	transitionErr        error
-	transitionTimedOut   bool
-	dataContext          context.Context
-	dataCancel           context.CancelFunc
-	modelsMu             sync.RWMutex
-	models               []aistudio.Model
-	modelSyncMu          sync.Mutex
-	modelRetriesMu       sync.Mutex
-	modelRetries         map[string]struct{}
-	modelRefreshDone     <-chan struct{}
-	modelChangeMu        sync.Mutex
-	modelRevision        uint64
-	modelApplied         uint64
-	stateRefreshMu       sync.Mutex
-	stateRefreshAt       map[string]time.Time
+	buildNativeNonstream     bool
+	autoContinuationDisabled atomic.Bool
+	modelMapping             []config.ModelAlias
+	proxies                  *aistudio.ProxyPool
+	rebindAccounts           func([]string)
+	lifecycle                context.Context
+	service                  aistudio.Service
+	catalog                  modelCatalogService
+	pool                     *aistudio.AccountPool
+	requests                 *requestRegistry
+	workers                  *accountWorkerManager
+	timeout                  time.Duration
+	state                    atomic.Int32
+	lifecycleMu              sync.Mutex
+	transitionDone           chan struct{}
+	transitionErr            error
+	transitionTimedOut       bool
+	dataContext              context.Context
+	dataCancel               context.CancelFunc
+	modelsMu                 sync.RWMutex
+	models                   []aistudio.Model
+	modelSyncMu              sync.Mutex
+	modelRetriesMu           sync.Mutex
+	modelRetries             map[string]struct{}
+	modelRefreshDone         <-chan struct{}
+	modelChangeMu            sync.Mutex
+	modelRevision            uint64
+	modelApplied             uint64
+	stateRefreshMu           sync.Mutex
+	stateRefreshAt           map[string]time.Time
 	// hedgeAuto 与 hedgeAfter 是首事件超时备用请求的自适应开关与自定义等待
 	hedgeAuto  bool
 	hedgeAfter time.Duration
@@ -193,6 +195,14 @@ func newTrackedService(
 	return &trackedService{
 		lifecycle: lifecycle, service: service, catalog: catalog, pool: pool, requests: requests, workers: workers,
 		timeout: timeout, modelRetries: make(map[string]struct{}), stateRefreshAt: make(map[string]time.Time),
+	}
+}
+
+// SetAutoContinuation updates routing and the current client's next-round policy.
+func (service *trackedService) SetAutoContinuation(enabled bool) {
+	service.autoContinuationDisabled.Store(!enabled)
+	if target, ok := service.service.(interface{ SetAutoContinuation(bool) }); ok {
+		target.SetAutoContinuation(enabled)
 	}
 }
 
@@ -1683,7 +1693,10 @@ func (service *trackedService) generateWithRetry(
 ) {
 	requestedAccountID := strings.TrimSpace(request.AccountID)
 	modelID := strings.TrimPrefix(strings.TrimSpace(request.Model), "models/")
-	continuationRounds := service.pool.OutputContinuationRounds(modelID, request.Config.MaxOutputTokens)
+	continuationRounds := 1
+	if !service.autoContinuationDisabled.Load() {
+		continuationRounds = service.pool.OutputContinuationRounds(modelID, request.Config.MaxOutputTokens)
+	}
 	unbound := requestedAccountID == "" && resourceID == ""
 	fileBound := requestedAccountID == "" && resourceID != ""
 	retry := &generateRetry{maxAttempts: 1, recoveredWorker: make(map[string]struct{}), buildOnly: aistudio.RequestBuildOnly(request)}

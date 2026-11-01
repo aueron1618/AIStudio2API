@@ -44,7 +44,13 @@ export const messages: Record<TranslationKey, string> = {
   'settings.googleSearch': '모든 모델에서 검색 사용',
   'settings.googleSearchHelp':
     '일반 모델 이름 및 함수 도구가 포함된 생성 요청에서 Google 검색을 활성화합니다.',
+  'settings.antiTruncation': '출력 잘림 방지 모델',
+  'settings.antiTruncationHelp':
+    '기본적으로 꺼져 있습니다. 켜면 모든 일반 모델을 유지하고 사용자 매핑과 검색 모델을 포함한 모든 공개 모델에 "抗截断-" 모델을 추가합니다. 이 모델만 합성 함수 도구에 전체 응답 본문을 담아 출력으로 복원합니다. 끄면 접두사 모델을 표시하지 않으며 해당 요청도 받지 않습니다. 저장 후 새 요청에 즉시 적용되고 일반 모델에는 영향을 주지 않습니다. 자동 이어쓰기와 독립적인 설정입니다.',
   'settings.continuationRewrite': '이어쓰기 요청 재작성',
+  'settings.autoContinuation': '자동 이어쓰기',
+  'settings.autoContinuationHelp':
+    '기본적으로 켜져 있습니다. 끄면 업스트림이 이어쓰기를 요청하거나 출력 한도에 도달해도 다음 라운드를 시작하지 않습니다. 저장 즉시 적용되며 이미 전송된 라운드와 assistant 접두사 재작성에는 영향을 주지 않습니다.',
   'settings.continuationRewriteHelp':
     'assistant 메시지로 끝나는 요청을 기본 이어쓰기를 지원하지 않는 모델에서는 이어쓰기 요청으로 바꿉니다. 끄면 그대로 보내고 업스트림이 거부하면 그 오류를 반환합니다',
   'settings.continuationPrompt': '이어쓰기 프롬프트',

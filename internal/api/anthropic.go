@@ -158,7 +158,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	if request.Stream {
 		estimate = aistudio.StartInputTokenEstimate(generateRequest)
 	}
-	events, err := s.service.Generate(r.Context(), generateRequest)
+	events, err := s.generate(r.Context(), generateRequest)
 	if err == nil && request.Stream {
 		events, err = awaitStreamStart(r.Context(), events)
 	}
@@ -272,7 +272,7 @@ func (s *server) countAnthropicTokens(w http.ResponseWriter, r *http.Request, re
 		return 0, err
 	}
 	generateRequest = s.prepareSearch(generateRequest)
-	count, err := s.service.CountTokens(r.Context(), aistudio.TokenCountRequest{
+	count, err := s.countTokens(r.Context(), aistudio.TokenCountRequest{
 		Model: generateRequest.Model, System: generateRequest.System, Contents: generateRequest.Contents,
 		Tools: generateRequest.Tools,
 	})

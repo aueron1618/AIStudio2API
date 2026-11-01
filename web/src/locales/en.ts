@@ -44,7 +44,13 @@ export const messages: Record<TranslationKey, string> = {
   'settings.googleSearch': 'Google Search for all models',
   'settings.googleSearchHelp':
     'Enable Google Search for generation requests, including ordinary model IDs and requests with function tools.',
+  'settings.antiTruncation': 'Anti-truncation models',
+  'settings.antiTruncationHelp':
+    'Off by default. Keeps all ordinary models and adds "抗截断-" variants for every public model, including user mappings and search models. Only these variants use a synthetic function tool to carry the complete response body and restore it as output. When off, prefixed models are neither listed nor accepted. Saving applies immediately to new requests; ordinary models are unaffected. Independent of automatic continuation.',
   'settings.continuationRewrite': 'Rewrite continuation requests',
+  'settings.autoContinuation': 'Automatic continuation',
+  'settings.autoContinuationHelp':
+    'On by default. Disabling immediately prevents further rounds, even when upstream requests continuation or reaches its output limit. Already-sent rounds and assistant-prefix rewriting are unaffected.',
   'settings.continuationRewriteHelp':
     'Requests ending with an assistant message are rewritten as continuation requests on models without native continuation; when off they are sent unchanged and an upstream rejection is returned as is',
   'settings.continuationPrompt': 'Continuation prompt',

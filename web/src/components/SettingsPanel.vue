@@ -84,6 +84,8 @@ const sections: {
       'youtube_links',
       'search_model_aliases',
       'google_search',
+      'anti_truncation',
+      'auto_continuation',
       'continuation_rewrite',
       'continuation_prompt',
       'waa_backend',
@@ -660,6 +662,24 @@ async function saveConfig(): Promise<void> {
               :changed="changedFields.has('google_search')"
             >
               <UiSwitch id="setting-google-search" v-model="form.google_search" />
+            </SettingRow>
+            <SettingRow
+              :label="t('settings.antiTruncation')"
+              control-id="setting-anti-truncation"
+              :description="t('settings.antiTruncationHelp')"
+              effect="immediate"
+              :changed="changedFields.has('anti_truncation')"
+            >
+              <UiSwitch id="setting-anti-truncation" v-model="form.anti_truncation" />
+            </SettingRow>
+            <SettingRow
+              :label="t('settings.autoContinuation')"
+              control-id="setting-auto-continuation"
+              :description="t('settings.autoContinuationHelp')"
+              effect="immediate"
+              :changed="changedFields.has('auto_continuation')"
+            >
+              <UiSwitch id="setting-auto-continuation" v-model="form.auto_continuation" />
             </SettingRow>
             <SettingRow
               :label="t('settings.continuationRewrite')"

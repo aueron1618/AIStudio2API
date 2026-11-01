@@ -44,7 +44,13 @@ export const messages: Record<TranslationKey, string> = {
   'settings.googleSearch': 'Recherche Google pour tous les modèles',
   'settings.googleSearchHelp':
     'Active la recherche Google pour les requêtes de génération, y compris les modèles ordinaires et les outils de fonction.',
+  'settings.antiTruncation': 'Modèles anti-troncature',
+  'settings.antiTruncationHelp':
+    'Désactivé par défaut. Conserve tous les modèles ordinaires et ajoute des variantes "抗截断-" à chaque modèle public, y compris les correspondances utilisateur et les modèles de recherche. Seules ces variantes utilisent un outil de fonction synthétique pour transporter le corps complet de la réponse et le restituer en sortie. Une fois désactivées, les variantes préfixées ne sont ni affichées ni acceptées. Après enregistrement, le réglage prend effet immédiatement pour les nouvelles requêtes sans affecter les modèles ordinaires. Indépendant de la continuation automatique.',
   'settings.continuationRewrite': 'Réécrire les demandes de continuation',
+  'settings.autoContinuation': 'Continuation automatique',
+  'settings.autoContinuationHelp':
+    'Activée par défaut. La désactivation empêche immédiatement tout tour supplémentaire, même si le serveur demande une continuation ou atteint sa limite de sortie. Les tours déjà envoyés et la réécriture du préfixe assistant ne sont pas affectés.',
   'settings.continuationRewriteHelp':
     "Les requêtes qui se terminent par un message assistant sont réécrites en demandes de continuation sur les modèles sans continuation native ; désactivé, elles sont envoyées telles quelles et un refus de l'amont est renvoyé",
   'settings.continuationPrompt': 'Prompt de continuation',

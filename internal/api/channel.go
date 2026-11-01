@@ -13,7 +13,7 @@ func (s *server) models(ctx context.Context) ([]aistudio.Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	return aistudio.FilterModelsByChannel(models, aistudio.ChannelFromContext(ctx)), nil
+	return s.antiTruncationModels(aistudio.FilterModelsByChannel(models, aistudio.ChannelFromContext(ctx))), nil
 }
 
 func channelMiddleware(channel aistudio.Channel, next http.Handler) http.Handler {

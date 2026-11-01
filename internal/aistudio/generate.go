@@ -62,7 +62,7 @@ func EncodeGenerateContentRequest(request GenerateRequest, defaults GenerationDe
 	if retrieval != nil || serverSideTools {
 		length = 14
 	}
-	if request.continuationToken != "" {
+	if defaults.ContinuedOutputTokens > 0 && request.continuationToken != "" {
 		length = 17
 	}
 	wire := make([]any, length)
@@ -93,7 +93,7 @@ func EncodeGenerateContentRequest(request GenerateRequest, defaults GenerationDe
 		}
 		wire[13] = toolConfig
 	}
-	if request.continuationToken != "" {
+	if defaults.ContinuedOutputTokens > 0 && request.continuationToken != "" {
 		wire[16] = request.continuationToken
 	}
 	return json.Marshal(wire)
@@ -786,11 +786,24 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 	interaction := entry.defaults.InteractionStream && !build
 	task := entry.defaults.InteractionTask && !build
 	if interaction || task {
+		if request.AntiTruncation {
+			return nil, fmt.Errorf("%w: anti-truncation transport is not supported by the Interaction generation route", ErrInvalidArgument)
+		}
 		request.Tools = Tools{}
 	}
 	request, contract, err := prepareToolRequest(request)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+	}
+	var antiTruncation *antiTruncationTransport
+	if request.AntiTruncation {
+		if request.Tools.ToolConfig.Mode == "none" {
+			contract = &toolContract{names: map[string]bool{}}
+		}
+		request, antiTruncation, err = prepareAntiTruncation(request)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := validateTranscriptionConfig(request.Config.TranscriptionConfig, entry.model); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
@@ -879,7 +892,13 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 			}
 		}
 		emit := stopSequenceEmitter(matcher, emitEvent, &matchedStopSequence)
+		if antiTruncation != nil {
+			emit = antiTruncation.emitter(emit)
+		}
 		err := decodeStream(observeStreamActivity(ctx, response.Body), emit)
+		if antiTruncation != nil {
+			err = antiTruncation.complete(err)
+		}
 		if errors.Is(err, errStopSequenceMatched) {
 			_ = response.Body.Close()
 			finishAtStopSequence(ctx, request, output, stopTokenCount, matchedStopSequence, send)
@@ -989,6 +1008,9 @@ func (c *Client) truncateRequest(ctx context.Context, request GenerateRequest, l
 			break
 		}
 		start += next
+		if request.antiTruncationControlTail && start == len(request.Contents)-1 {
+			break
+		}
 		starts = append(starts, start)
 	}
 	fits := func(index int) (bool, error) {
@@ -1056,6 +1078,10 @@ func (c *Client) sendPlayground(ctx context.Context, request GenerateRequest, en
 			return nil, nil, fmt.Errorf("读取 AI Studio 请求上下文: %w", err)
 		}
 	}
+	if c.autoContinuationDisabled.Load() {
+		entry.defaults.ContinuedOutputTokens = 0
+		request.continuationRound, request.continuationToken = 0, ""
+	}
 	body, err := EncodeGenerateContentRequest(request, entry.defaults, runtime)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
@@ -1082,20 +1108,21 @@ func (c *Client) decodePlaygroundRounds(ctx context.Context, request GenerateReq
 	var previous *Usage
 	for {
 		decoder := NewFrameDecoder()
-		decoder.continuable = defaults.ContinuedOutputTokens > 0
+		decoder.continuable = defaults.ContinuedOutputTokens > 0 && !c.autoContinuationDisabled.Load()
 		if len(request.System) > 0 {
 			decoder.systemRoleTokens = 1
 		}
 		decoder.continueAtMaxTokens = int64(request.continuationRound+1)*continuationRoundTokens < total
 		forward := emit
 		if previous != nil {
+			prior := *previous
 			forward = func(event Event) error {
 				if event.Kind == EventUsage {
-					merged := mergeContinuedUsage(*previous, *event.Usage)
+					merged := mergeContinuedUsage(prior, *event.Usage)
 					event.Usage = &merged
 				}
 				if event.FrameUsage != nil {
-					merged := mergeContinuedUsage(*previous, *event.FrameUsage)
+					merged := mergeContinuedUsage(prior, *event.FrameUsage)
 					event.FrameUsage = &merged
 				}
 				return emit(event)
@@ -1103,6 +1130,22 @@ func (c *Client) decodePlaygroundRounds(ctx context.Context, request GenerateReq
 		}
 		if err := DecodeGenerateStream(source, decoder, forward); err != nil {
 			return err
+		}
+		finishDisabled := func() error {
+			if decoder.usage != nil {
+				if err := forward(Event{Kind: EventUsage, Usage: decoder.usage}); err != nil {
+					return err
+				}
+			} else if previous != nil {
+				if err := emit(Event{Kind: EventUsage, Usage: previous}); err != nil {
+					return err
+				}
+			}
+			return forward(Event{Kind: EventFinish, FinishReason: "continuation"})
+		}
+		// A setting saved during this round also vetoes explicit upstream continuation.
+		if decoder.continuationRequired && c.autoContinuationDisabled.Load() {
+			return finishDisabled()
 		}
 		if err := decoder.End(); err != nil {
 			return err
@@ -1119,13 +1162,19 @@ func (c *Client) decodePlaygroundRounds(ctx context.Context, request GenerateReq
 		}
 		request.continuationRound++
 		request.continuationToken = decoder.continuation
-		reportContinuationRound(ctx)
-		reportUpstreamMode(ctx, "GenerateContent", fmt.Sprintf("stream | 续写=%d", request.continuationRound), "")
 		body, err := EncodeGenerateContentRequest(request, defaults, runtime)
 		if err != nil {
 			return err
 		}
+		if c.autoContinuationDisabled.Load() {
+			return finishDisabled()
+		}
+		reportContinuationRound(ctx)
+		reportUpstreamMode(ctx, "GenerateContent", fmt.Sprintf("stream | 续写=%d", request.continuationRound), "")
 		response, err := c.doProtected(ctx, request, body)
+		if errors.Is(err, errAutoContinuationDisabled) {
+			return finishDisabled()
+		}
 		if err != nil {
 			return err
 		}

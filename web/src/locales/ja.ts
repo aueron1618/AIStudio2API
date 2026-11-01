@@ -44,7 +44,13 @@ export const messages: Record<TranslationKey, string> = {
   'settings.googleSearch': 'すべてのモデルで検索を有効化',
   'settings.googleSearchHelp':
     '通常のモデル名や関数ツールを含む生成リクエストで Google 検索を有効にします。',
+  'settings.antiTruncation': '出力途切れ対策モデル',
+  'settings.antiTruncationHelp':
+    '既定で無効です。有効にすると通常モデルをすべて維持し、ユーザーのマッピングや検索モデルを含むすべての公開モデルに「抗截断-」付きのモデルを追加します。これらのモデルのみ、合成関数ツールで完全な応答本文を受け取り、本文として復元します。無効時は接頭辞付きモデルを表示せず、リクエストも受け付けません。保存後すぐに新しいリクエストへ適用され、通常モデルには影響しません。自動続き生成とは独立した設定です。',
   'settings.continuationRewrite': '続き生成リクエストを書き換え',
+  'settings.autoContinuation': '自動続き生成',
+  'settings.autoContinuationHelp':
+    '既定で有効です。無効にすると、上流が続き生成を要求した場合や出力上限に達した場合も、次のラウンドを開始しません。保存後すぐに反映され、送信済みのラウンドと assistant の接頭辞の書き換えには影響しません。',
   'settings.continuationRewriteHelp':
     'assistant メッセージで終わるリクエストを、ネイティブの続き生成に対応しないモデルでは続き生成リクエストに書き換えます。オフのときはそのまま送信し、上流が拒否した場合はそのエラーを返します',
   'settings.continuationPrompt': '続き生成プロンプト',

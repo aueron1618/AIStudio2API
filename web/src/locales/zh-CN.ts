@@ -40,7 +40,13 @@ export const messages = {
     '为支持搜索的模型提供 -search 型号，使用该型号时启用 Google 搜索。',
   'settings.googleSearch': '全部模型启用搜索',
   'settings.googleSearchHelp': '为生成请求启用 Google 搜索，包括普通型号与携带函数工具的请求。',
+  'settings.antiTruncation': '抗截断前缀模型',
+  'settings.antiTruncationHelp':
+    '默认关闭。开启后保留所有普通模型，并为所有公开模型（含用户映射和搜索模型）提供“抗截断-”变体；仅这些变体使用合成工具承载完整正文并还原输出。关闭后不展示也不接受此前缀模型。保存后对新请求立即生效，普通模型不受影响，与自动续写独立。',
   'settings.continuationRewrite': '改写续写请求',
+  'settings.autoContinuation': '自动续写',
+  'settings.autoContinuationHelp':
+    '默认开启。关闭后不再发起下一轮，即使上游要求续写或达到输出上限；保存后立即生效，不中断已发出的轮次，与 assistant 前缀改写无关。',
   'settings.continuationRewriteHelp':
     '以 assistant 消息结尾的请求，在不支持原生续写的模型上改为续写请求；关闭时原样发送，上游拒绝时返回其错误',
   'settings.continuationPrompt': '续写提示词',

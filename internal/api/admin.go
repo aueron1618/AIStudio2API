@@ -263,7 +263,9 @@ type RuntimeConfig struct {
 	YouTubeLinks              bool         `json:"youtube_links"`
 	SearchModelAliases        bool         `json:"search_model_aliases"`
 	GoogleSearch              bool         `json:"google_search"`
+	AntiTruncation            bool         `json:"anti_truncation"`
 	FirstEventHedge           string       `json:"first_event_hedge"`
+	AutoContinuation          *bool        `json:"auto_continuation,omitempty"`
 	ContinuationRewrite       bool         `json:"continuation_rewrite"`
 	ContinuationPrompt        string       `json:"continuation_prompt"`
 	LogFile                   bool         `json:"log_file"`

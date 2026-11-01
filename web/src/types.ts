@@ -301,6 +301,8 @@ export interface ServiceConfig {
   youtube_links: boolean
   search_model_aliases: boolean
   google_search: boolean
+  anti_truncation: boolean
+  auto_continuation: boolean
   continuation_rewrite: boolean
   continuation_prompt: string
   first_event_hedge: string

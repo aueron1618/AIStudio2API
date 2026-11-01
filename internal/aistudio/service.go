@@ -95,6 +95,11 @@ func NewPooledService(pool *AccountPool, client *Client) *PooledService {
 	return &PooledService{pool: pool, client: client}
 }
 
+// SetAutoContinuation applies the server-side policy to the shared protocol client.
+func (s *PooledService) SetAutoContinuation(enabled bool) {
+	s.client.SetAutoContinuation(enabled)
+}
+
 // NewPoolRequestContextProvider 创建账户协议上下文提供者
 func NewPoolRequestContextProvider(pool *AccountPool) *PoolRequestContextProvider {
 	return &PoolRequestContextProvider{pool: pool}
@@ -141,6 +146,9 @@ func (t *WorkerProtectedTransport) doPrepared(
 	selection AccountSelection,
 	rpc RPCRequest,
 ) (*RPCResponse, error) {
+	if err := checkContinuation(ctx); err != nil {
+		return nil, err
+	}
 	lease, worker, rpc, err := t.prepareProtectedRequest(ctx, prompt, page, proofField, selection, rpc)
 	if err != nil {
 		return nil, err
@@ -159,6 +167,9 @@ func (t *WorkerProtectedTransport) doPrepared(
 		return nil, ErrAccountCoolingDown
 	}
 	reportRequestPhase(ctx, RequestPhaseSendingUpstream)
+	if err := checkContinuation(ctx); err != nil {
+		return nil, err
+	}
 	response, err := worker.SendProtected(ctx, ProtectedRequest{
 		URL: rpc.URL, Headers: headers, Body: rpc.Body, PagePrompt: page,
 	})
@@ -646,7 +657,7 @@ func (s *PooledService) ValidateGenerateRequest(request GenerateRequest) error {
 	if modelID == "" {
 		return fmt.Errorf("%w: GenerateContent model 不能为空", ErrInvalidArgument)
 	}
-	request.System, request.Contents = normalizeTurns(request.System, request.Contents, s.rewritesAssistantTail(modelID), s.ContinuationPrompt)
+	request.System, request.Contents = normalizeTurns(request.System, request.Contents, !request.AntiTruncation && s.rewritesAssistantTail(modelID), s.ContinuationPrompt)
 	if len(request.Contents) == 0 {
 		return fmt.Errorf("%w: 请求没有系统提示或对话内容", ErrInvalidArgument)
 	}
@@ -663,7 +674,7 @@ func (s *PooledService) Generate(ctx context.Context, request GenerateRequest) (
 	if modelID == "" {
 		return nil, fmt.Errorf("%w: GenerateContent model 不能为空", ErrInvalidArgument)
 	}
-	request.System, request.Contents = normalizeTurns(request.System, request.Contents, s.rewritesAssistantTail(modelID), s.ContinuationPrompt)
+	request.System, request.Contents = normalizeTurns(request.System, request.Contents, !request.AntiTruncation && s.rewritesAssistantTail(modelID), s.ContinuationPrompt)
 	if s.YouTubeLinks {
 		request.Contents = attachYouTubeLinks(request.Contents)
 	}

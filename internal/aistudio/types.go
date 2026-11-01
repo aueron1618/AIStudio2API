@@ -404,6 +404,10 @@ type GenerateRequest struct {
 	Background bool `json:"-"`
 	// Truncate 在生成前按模型上下文窗口移除最早的完整轮次
 	Truncate bool `json:"-"`
+	// AntiTruncation enables the final-answer transport selected by the API.
+	AntiTruncation bool `json:"-"`
+	// The appended control turn must stay attached to the latest genuine turn.
+	antiTruncationControlTail bool
 	// continuationRound 为自动续写的轮次，首轮为 0
 	continuationRound int
 	// continuationToken 为上一轮响应给出的续写 token
