@@ -1712,6 +1712,7 @@ func (service *trackedService) generateWithRetry(
 	hedged := false
 	var winner *generateAttempt
 	var activity *upstreamActivity
+	failedAntiTruncationToolCalls := 0
 	var err error
 	copyFiles := false
 	for attempt := 0; attempt < retry.maxAttempts; attempt++ {
@@ -1832,6 +1833,7 @@ func (service *trackedService) generateWithRetry(
 		var last attemptOutcome
 		winner = service.awaitFirstEvent(requestCtx, request, modelID, primary, plan, func(failed *generateAttempt, sameAccountPending bool) {
 			activity = failed.activity
+			failedAntiTruncationToolCalls = failed.first.AntiTruncationToolCalls
 			last = service.settleAttempt(requestCtx, request.ID, modelID, failed, retry, !sameAccountPending)
 		})
 		if winner != nil {
@@ -1842,7 +1844,7 @@ func (service *trackedService) generateWithRetry(
 			api.SetAccessLogFirstEvent(requestCtx, winner.firstAt.Sub(generationStartedAt))
 			api.SetAccessLogTarget(requestCtx, winner.first.ProviderModel, winner.accountLabel)
 			if request.Unary {
-				collected, collectErr := collectGenerateEvents(requestCtx, winner.source, func(waited time.Duration, events []aistudio.Event) {
+				collected, antiTruncationToolCalls, collectErr := collectGenerateEvents(requestCtx, winner.source, func(waited time.Duration, events []aistudio.Event) {
 					reasoning, content := 0, 0
 					for _, event := range events {
 						switch event.Kind {
@@ -1858,6 +1860,7 @@ func (service *trackedService) generateWithRetry(
 					))
 				})
 				if collectErr != nil {
+					failedAntiTruncationToolCalls = max(winner.first.AntiTruncationToolCalls, antiTruncationToolCalls)
 					winner.err = collectErr
 					last = service.settleAttempt(requestCtx, request.ID, modelID, winner, retry, true)
 					winner = nil
@@ -1902,9 +1905,10 @@ func (service *trackedService) generateWithRetry(
 			api.SetAccessLogUpstreamBytes(requestCtx, activity.bytes.Load())
 		}
 		api.SetAccessLogError(requestCtx, err)
+		api.SetAccessLogGenerationResult(requestCtx, nil, failedAntiTruncationToolCalls)
 		service.requests.finish(request.ID, finalRequestState(err))
 		select {
-		case destination <- aistudio.Event{Kind: aistudio.EventError, Err: err}:
+		case destination <- aistudio.Event{Kind: aistudio.EventError, Err: err, AntiTruncationToolCalls: failedAntiTruncationToolCalls}:
 		case <-clientCtx.Done():
 		}
 		cancel()
@@ -2224,12 +2228,13 @@ func firstGenerateEvent(ctx context.Context, source <-chan aistudio.Event, onWai
 			}
 			for {
 				select {
-				case _, ok := <-source:
+				case next, ok := <-source:
 					if !ok {
-						return aistudio.Event{}, event.Err
+						return event, event.Err
 					}
+					event.AntiTruncationToolCalls = max(event.AntiTruncationToolCalls, next.AntiTruncationToolCalls)
 				case <-ctx.Done():
-					return aistudio.Event{}, ctx.Err()
+					return event, ctx.Err()
 				}
 			}
 		case <-timer.C:
@@ -2244,26 +2249,28 @@ func firstGenerateEvent(ctx context.Context, source <-chan aistudio.Event, onWai
 }
 
 // collectGenerateEvents 收齐非流式请求首事件之后的上游事件，上游流中断时返回该错误；收集达到 streamStallThreshold 后每隔 waitReportInterval 以已等待时长与已收到的事件调用 onWait
-func collectGenerateEvents(ctx context.Context, source <-chan aistudio.Event, onWait func(time.Duration, []aistudio.Event)) (<-chan aistudio.Event, error) {
+func collectGenerateEvents(ctx context.Context, source <-chan aistudio.Event, onWait func(time.Duration, []aistudio.Event)) (<-chan aistudio.Event, int, error) {
 	startedAt := time.Now()
 	timer := time.NewTimer(streamStallThreshold)
 	defer timer.Stop()
 	var events []aistudio.Event
 	var interrupted error
+	antiTruncationToolCalls := 0
 	for {
 		select {
 		case event, ok := <-source:
 			if !ok {
 				if interrupted != nil {
-					return nil, interrupted
+					return nil, antiTruncationToolCalls, interrupted
 				}
 				replay := make(chan aistudio.Event, len(events))
 				for _, event := range events {
 					replay <- event
 				}
 				close(replay)
-				return replay, nil
+				return replay, antiTruncationToolCalls, nil
 			}
+			antiTruncationToolCalls = max(antiTruncationToolCalls, event.AntiTruncationToolCalls)
 			var streamErr *aistudio.StreamInterruptedError
 			if event.Kind == aistudio.EventError && errors.As(event.Err, &streamErr) {
 				interrupted = event.Err
@@ -2278,7 +2285,7 @@ func collectGenerateEvents(ctx context.Context, source <-chan aistudio.Event, on
 			}
 			timer.Reset(waitReportInterval)
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, antiTruncationToolCalls, ctx.Err()
 		}
 	}
 }
@@ -2424,6 +2431,7 @@ func (service *trackedService) forwardEvents(
 	contentEvents := 0
 	var usage *aistudio.Usage
 	toolCalls := 0
+	antiTruncationToolCalls := 0
 	stalled := false
 	stallTimer := time.NewTimer(streamStallThreshold)
 	stallTimer.Stop()
@@ -2436,7 +2444,7 @@ func (service *trackedService) forwardEvents(
 			return
 		}
 		select {
-		case destination <- aistudio.Event{Kind: aistudio.EventError, Err: requestErr}:
+		case destination <- aistudio.Event{Kind: aistudio.EventError, Err: requestErr, AntiTruncationToolCalls: antiTruncationToolCalls}:
 		case <-clientCtx.Done():
 		}
 	}
@@ -2454,7 +2462,7 @@ func (service *trackedService) forwardEvents(
 			requestErr = errors.Join(requestErr, err)
 			if clientCtx.Err() == nil {
 				select {
-				case destination <- aistudio.Event{Kind: aistudio.EventError, Err: err}:
+				case destination <- aistudio.Event{Kind: aistudio.EventError, Err: err, AntiTruncationToolCalls: antiTruncationToolCalls}:
 				case <-clientCtx.Done():
 				}
 			}
@@ -2496,7 +2504,7 @@ func (service *trackedService) forwardEvents(
 				requestErr = errStreamClosedBeforeFinish
 				state = "failed"
 				select {
-				case destination <- aistudio.Event{Kind: aistudio.EventError, Err: requestErr}:
+				case destination <- aistudio.Event{Kind: aistudio.EventError, Err: requestErr, AntiTruncationToolCalls: antiTruncationToolCalls}:
 				case <-clientCtx.Done():
 				}
 			}
@@ -2512,6 +2520,10 @@ func (service *trackedService) forwardEvents(
 		}
 		lastEventAt = now
 		lastEventKind = string(event.Kind)
+		if event.AntiTruncationToolCalls > antiTruncationToolCalls {
+			toolCalls += event.AntiTruncationToolCalls - antiTruncationToolCalls
+			antiTruncationToolCalls = event.AntiTruncationToolCalls
+		}
 		switch event.Kind {
 		case aistudio.EventReasoning:
 			reasoningEvents++

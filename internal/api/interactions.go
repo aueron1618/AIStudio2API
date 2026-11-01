@@ -244,7 +244,7 @@ func resolveInteractionResults(contents []aistudio.Content) error {
 // interactionObject 构造 SDK 使用的资源标识、状态与用量，result 为空时不带用量
 func interactionObject(request aistudio.GenerateRequest, created, status string, result *generationResult) map[string]any {
 	object := map[string]any{
-		"id": request.ID, "object": "interaction", "model": request.Model,
+		"id": request.ID, "object": "interaction", "model": baseResponseModel(request.Model),
 		"created": created, "updated": time.Now().UTC().Format(time.RFC3339), "status": status,
 	}
 	if result != nil && result.usage != nil {

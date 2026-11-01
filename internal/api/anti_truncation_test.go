@@ -119,7 +119,7 @@ func TestAntiTruncationModelLists(t *testing.T) {
 func antiTruncationProtocolRequest(protocol, model string, stream bool) (string, string) {
 	switch protocol {
 	case "chat":
-		return "/v1/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}],"stream":%t}`, model, stream)
+		return "/v1/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}],"stream":%t,"stream_options":{"include_usage":true}}`, model, stream)
 	case "messages":
 		return "/v1/messages", fmt.Sprintf(`{"model":%q,"max_tokens":256,"messages":[{"role":"user","content":"hello"}],"stream":%t}`, model, stream)
 	case "responses":
@@ -291,15 +291,100 @@ func TestAntiTruncationProtocolOutput(t *testing.T) {
 				if request.Model != "test" || !request.AntiTruncation || !strings.HasPrefix(request.Tools.Functions[0].Name, "agw_emit_") {
 					t.Fatalf("unexpected upstream request: %+v", request)
 				}
-				for _, hidden := range []string{"discard this preamble", "agw_emit_", "internal-call", "internal-signature"} {
+				for _, hidden := range []string{"discard this preamble", "agw_emit_", "internal-call", "internal-signature", "anti_truncation_tool_calls", "AntiTruncationToolCalls"} {
 					if bytes.Contains(raw, []byte(hidden)) {
 						t.Fatalf("leaked %q: %s", hidden, raw)
 					}
 				}
-				if stream {
-					_ = sseTestPayloads(t, raw)
+				assertAntiTruncationResponseModel(t, raw, stream, "test")
+			})
+		}
+	}
+}
+
+func assertAntiTruncationResponseModel(t *testing.T, raw []byte, stream bool, want string) {
+	t.Helper()
+	var frames []map[string]any
+	if stream {
+		frames = sseTestPayloads(t, raw)
+	} else {
+		var frame map[string]any
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			t.Fatal(err)
+		}
+		frames = append(frames, frame)
+	}
+	found := 0
+	var inspect func(map[string]any)
+	inspect = func(frame map[string]any) {
+		for _, key := range []string{"model", "modelVersion"} {
+			if value, ok := frame[key].(string); ok {
+				found++
+				if value != want {
+					t.Errorf("response %s=%q, want %q", key, value, want)
+				}
+			}
+		}
+		for _, key := range []string{"response", "message", "interaction"} {
+			if child, ok := frame[key].(map[string]any); ok {
+				inspect(child)
+			}
+		}
+	}
+	for _, frame := range frames {
+		inspect(frame)
+	}
+	if found == 0 {
+		t.Fatalf("response has no model field: %s", raw)
+	}
+}
+
+func TestAntiTruncationResponseModelAndAudit(t *testing.T) {
+	for _, protocol := range []string{"chat", "messages", "responses", "gemini", "interactions"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", protocol, stream), func(t *testing.T) {
+				admin := &modelLogAdmin{}
+				handler := NewHandler(modelLogService{}, Config{Admin: admin, AntiTruncation: func() bool { return true }})
+				requested := antiTruncationModelPrefix + "test"
+				path, body := antiTruncationProtocolRequest(protocol, requested, stream)
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
+				if w.Code != http.StatusOK {
+					t.Fatalf("status=%d: %s", w.Code, w.Body)
+				}
+				want := "test"
+				loggedResponse := want
+				if protocol == "gemini" {
+					want, loggedResponse = "provider-model", ""
+				}
+				assertAntiTruncationResponseModel(t, w.Body.Bytes(), stream, want)
+				if admin.entry.RequestedModel != requested || admin.entry.ResponseModel != loggedResponse || admin.entry.Model != "provider-model" {
+					t.Fatalf("request audit, emitted model and provider model were conflated: %+v", admin.entry)
 				}
 			})
 		}
+	}
+}
+
+func TestBaseResponseModel(t *testing.T) {
+	for _, test := range []struct{ model, want string }{
+		{"test", "test"},
+		{"models/test", "models/test"},
+		{antiTruncationModelPrefix + "mapped-search(high)", "mapped-search(high)"},
+		{"models/" + antiTruncationModelPrefix + "test", "test"},
+		{" mapped-" + antiTruncationModelPrefix + "test ", " mapped-" + antiTruncationModelPrefix + "test "},
+	} {
+		if got := baseResponseModel(test.model); got != test.want {
+			t.Errorf("model=%q: got %q, want %q", test.model, got, test.want)
+		}
+	}
+	request := responsesRequest{Model: antiTruncationModelPrefix + "test"}
+	for _, status := range []string{"queued", "in_progress", "completed", "incomplete", "failed", "cancelled"} {
+		if got := responseShell("response", 1, status, request)["model"]; got != "test" {
+			t.Errorf("%s model=%v", status, got)
+		}
+	}
+	if request.Model != antiTruncationModelPrefix+"test" {
+		t.Fatal("response projection changed the model used for routing and history")
 	}
 }

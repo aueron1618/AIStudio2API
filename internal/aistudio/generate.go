@@ -856,6 +856,9 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 		send := func(event Event) error {
 			providerModel = cmp.Or(event.ProviderModel, providerModel)
 			event.ProviderModel = providerModel
+			if antiTruncation != nil {
+				event.AntiTruncationToolCalls = antiTruncation.calls
+			}
 			select {
 			case events <- event:
 				return nil

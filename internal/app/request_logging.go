@@ -51,14 +51,15 @@ func (admin *runtimeAdmin) RecordAccessStart(entry api.AccessLog) {
 
 // requestOutcome 判定请求结果状态、日志级别与摘要，区分工具调用、限制与失败
 func requestOutcome(entry api.AccessLog) (string, string, string) {
+	finishReason := strings.ToLower(entry.FinishReason)
 	switch {
 	case entry.Canceled || entry.Status == 499:
 		return "cancelled", "WARN", "请求已取消"
 	case entry.Status >= http.StatusBadRequest || entry.Error != "":
 		return "failed", "ERROR", "请求失败"
-	case entry.FinishReason == "max_tokens" || entry.FinishReason == "max_output_tokens" || entry.FinishReason == "length":
+	case finishReason == "max_tokens" || finishReason == "max_output_tokens" || finishReason == "length":
 		return "limited", "WARN", "达到输出上限"
-	case entry.FinishReason != "" && entry.FinishReason != "stop" && entry.FinishReason != "stop_sequence":
+	case finishReason != "" && finishReason != "stop" && finishReason != "stop_sequence":
 		return "blocked", "WARN", "上游终止生成"
 	case entry.ToolCalls > 0:
 		return "tool_calls", "INFO", "工具调用完成"

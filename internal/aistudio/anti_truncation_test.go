@@ -69,6 +69,9 @@ func TestPrepareAntiTruncation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if transport.calls != 0 {
+					t.Fatal("preparation counted an unobserved tool call")
+				}
 				if !strings.HasPrefix(transport.name, "agw_emit_") || seen[transport.name] {
 					t.Fatalf("tool name was not unique: %q", transport.name)
 				}
@@ -180,9 +183,13 @@ func TestAntiTruncationReplacementAndMetadata(t *testing.T) {
 		{Kind: EventUsage, Usage: usage}, first, {Kind: EventText, Part: Part{Text: "ordinary suffix"}},
 		grounding, media, second, finish,
 	}
-	got, err := antiTruncationTestEvents(&antiTruncationTransport{name: antiTruncationTestName}, source, nil)
+	transport := &antiTruncationTransport{name: antiTruncationTestName}
+	got, err := antiTruncationTestEvents(transport, source, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if transport.calls != 2 {
+		t.Fatalf("transport calls=%d want=2", transport.calls)
 	}
 	unwrapped := first
 	unwrapped.Kind, unwrapped.Part = EventText, Part{Text: "answer one"}
@@ -230,13 +237,17 @@ func TestAntiTruncationFallbackAndFinishReasons(t *testing.T) {
 				if err := transport.complete(nil); err != nil || !reflect.DeepEqual(got, want) {
 					t.Fatalf("events=%+v error=%v want=%+v", got, err, want)
 				}
+				if synthetic && transport.calls != 1 || !synthetic && transport.calls != 0 {
+					t.Fatalf("synthetic=%t calls=%d", synthetic, transport.calls)
+				}
 			})
 		}
 	}
 	other := antiTruncationTestCall(antiTruncationTestName+"_other", "not transport text")
 	source := []Event{other, {Kind: EventFinish, FinishReason: "tool_calls"}}
-	got, err := antiTruncationTestEvents(&antiTruncationTransport{name: antiTruncationTestName}, source, nil)
-	if err != nil || !reflect.DeepEqual(got, source) {
+	transport := &antiTruncationTransport{name: antiTruncationTestName}
+	got, err := antiTruncationTestEvents(transport, source, nil)
+	if err != nil || !reflect.DeepEqual(got, source) || transport.calls != 0 {
 		t.Fatalf("a different random tool name was unwrapped: %+v, %v", got, err)
 	}
 }
@@ -286,7 +297,7 @@ func TestAntiTruncationEmitterFailuresAndBounds(t *testing.T) {
 			t.Fatal(err)
 		}
 		err := emit(antiTruncationTestCall(antiTruncationTestName, "answer"))
-		if err != failure || transport.complete(err) != failure || emit(Event{Kind: EventFinish}) != failure || calls != 1 {
+		if err != failure || transport.complete(err) != failure || emit(Event{Kind: EventFinish}) != failure || calls != 1 || transport.calls != 1 {
 			t.Fatalf("emitter failure was retried or changed: calls=%d error=%v", calls, err)
 		}
 	}
@@ -432,7 +443,9 @@ func TestAntiTruncationClientToolContracts(t *testing.T) {
 			}
 			var text string
 			calls, failures, finishes := 0, 0, 0
+			internalCalls := 0
 			for event := range events {
+				internalCalls = max(internalCalls, event.AntiTruncationToolCalls)
 				switch event.Kind {
 				case EventText:
 					text += event.Text
@@ -446,12 +459,18 @@ func TestAntiTruncationClientToolContracts(t *testing.T) {
 					}
 				case EventError:
 					failures++
+					if event.AntiTruncationToolCalls == 0 {
+						t.Fatal("tool contract failure lost observed transport calls")
+					}
 				case EventFinish:
 					finishes++
 				}
 			}
 			if calls != test.wantCalls || text != test.wantText || (failures > 0) != test.wantError || test.wantError && finishes != 0 || !test.wantError && finishes != 1 {
 				t.Fatalf("text=%q calls=%d errors=%d finishes=%d", text, calls, failures, finishes)
+			}
+			if (!test.wantError || len(test.calls) == 0) && internalCalls != 2 {
+				t.Fatalf("transport calls=%d want=2", internalCalls)
 			}
 			if len(test.allowed) > 0 && (len(sent.Tools.Functions) != 2 || sent.Tools.Functions[0].Name != "lookup") {
 				t.Fatal("allowed names did not filter genuine declarations before injection")
@@ -591,5 +610,115 @@ func TestAntiTruncationTruncationPreservesLatestTask(t *testing.T) {
 				t.Fatalf("latest task/prefill/control changed: %+v, %v", got.Contents, err)
 			}
 		})
+	}
+}
+
+func TestAntiTruncationClientCallSnapshots(t *testing.T) {
+	call := func(text string) Part { return antiTruncationTestCall(antiTruncationTestName, text).Part }
+	invalid := Part{FunctionCall: &FunctionCall{Name: antiTruncationTestName, Arguments: json.RawMessage(`{"content":123}`)}}
+	for _, test := range []struct {
+		name       string
+		parts      []Part
+		stop       bool
+		unfinished bool
+		wantCalls  []int
+		wantText   string
+		wantTools  int
+		wantFinish string
+		wantError  bool
+	}{
+		{name: "one call many events", parts: []Part{call("answer")}, wantCalls: []int{1, 1, 1}, wantText: "answer", wantFinish: "stop"},
+		{name: "incrementing calls", parts: []Part{call("one"), call("two")}, wantCalls: []int{1, 2, 2, 2}, wantText: "onetwo", wantFinish: "stop"},
+		{name: "buffered reasoning", parts: []Part{{Text: "discard"}, {Text: "thinking", Thought: true}, call("answer")}, wantCalls: []int{1, 1, 1, 1}, wantText: "answer", wantFinish: "stop"},
+		{name: "ordinary fallback", parts: []Part{{Text: "fallback"}}, wantCalls: []int{0, 0, 0}, wantText: "fallback", wantFinish: "stop"},
+		{name: "different random name", parts: []Part{antiTruncationTestCall(antiTruncationTestName+"_other", "not synthetic").Part}, wantCalls: []int{0, 0, 0}, wantTools: 1, wantFinish: "stop"},
+		{name: "genuine plus synthetic", parts: []Part{antiTruncationTestCall("lookup", "real").Part, call("answer")}, wantCalls: []int{0, 1, 1, 1}, wantText: "answer", wantTools: 1, wantFinish: "stop"},
+		{name: "empty content", parts: []Part{call("")}, wantCalls: []int{1, 1, 1}, wantFinish: "stop"},
+		{name: "empty swallowed by matcher", parts: []Part{call("")}, stop: true, wantCalls: []int{1, 1}, wantFinish: "stop"},
+		{name: "stop swallows whole answer", parts: []Part{call("<stop>")}, stop: true, wantCalls: []int{1, 1}, wantFinish: "stop_sequence"},
+		{name: "stop spans empty calls", parts: []Part{call("<sto"), call("p>discard")}, stop: true, wantCalls: []int{2, 2}, wantFinish: "stop_sequence"},
+		{name: "stop after visible content", parts: []Part{call("answer<sto"), call("p>discard")}, stop: true, wantCalls: []int{1, 2, 2}, wantText: "answer", wantFinish: "stop_sequence"},
+		{name: "invalid first content", parts: []Part{invalid}, wantCalls: []int{1}, wantError: true},
+		{name: "invalid later content", parts: []Part{call("answer"), invalid}, wantCalls: []int{1, 2}, wantText: "answer", wantError: true},
+		{name: "unfinished synthetic stream", parts: []Part{call("answer")}, unfinished: true, wantCalls: []int{1, 1}, wantText: "answer", wantError: true},
+		{name: "unfinished fallback stream", parts: []Part{{Text: "discard"}}, unfinished: true, wantCalls: []int{0}, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := NewClient(ClientOptions{
+				Transport: antiTruncationCountTransport(func(_ context.Context, request RPCRequest) (*RPCResponse, error) {
+					if request.Method != "CountTokens" {
+						return nil, errors.New("unexpected non-count RPC")
+					}
+					return &RPCResponse{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {JSONProtobufContentType}}, Body: io.NopCloser(strings.NewReader(`[10]`))}, nil
+				}),
+				Protected: ProtectedTransportFunc(func(_ context.Context, request GenerateRequest, _ RPCRequest) (*RPCResponse, error) {
+					parts := slices.Clone(test.parts)
+					for index, part := range parts {
+						if part.FunctionCall != nil && part.FunctionCall.Name == antiTruncationTestName {
+							value := *part.FunctionCall
+							value.Name = request.Tools.Functions[len(request.Tools.Functions)-1].Name
+							parts[index].FunctionCall = &value
+						}
+					}
+					var finish any = 1
+					if test.unfinished {
+						finish = nil
+					}
+					return antiTruncationTestResponse(t, parts, finish), nil
+				}),
+			})
+			model := Model{ID: "model", Capabilities: map[string]bool{"function_declarations": true}}
+			client.setModelCatalog("", modelCatalog{entries: map[string]modelEntry{model.ID: {model: model, defaults: GenerationDefaults{MaxOutputTokens: 1024}}}})
+			request := GenerateRequest{Model: model.ID, AntiTruncation: true, Contents: []Content{{Role: RoleUser, Parts: []Part{{Text: "question"}}}}}
+			if test.stop {
+				request.Config.StopSequences = []string{"<stop>"}
+			}
+			events, err := client.Generate(t.Context(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var counts []int
+			text, finish := "", ""
+			tools, failures := 0, 0
+			for event := range events {
+				counts = append(counts, event.AntiTruncationToolCalls)
+				switch event.Kind {
+				case EventText:
+					text += event.Text
+					if event.FunctionCall != nil {
+						t.Fatal("transport call reappeared in text")
+					}
+				case EventToolCall:
+					tools++
+				case EventFinish:
+					finish = event.FinishReason
+				case EventError:
+					failures++
+					if event.Err == nil {
+						t.Fatal("failure lost its error")
+					}
+				}
+			}
+			if !slices.Equal(counts, test.wantCalls) || text != test.wantText || tools != test.wantTools || finish != test.wantFinish || (failures > 0) != test.wantError {
+				t.Fatalf("snapshots=%v text=%q genuine=%d finish=%q errors=%d", counts, text, tools, finish, failures)
+			}
+		})
+	}
+}
+
+func TestAntiTruncationEventCounterJSON(t *testing.T) {
+	event := Event{Kind: EventText, Part: Part{Text: "answer"}}
+	before, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.AntiTruncationToolCalls = 3
+	after, err := json.Marshal(event)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("internal counter changed JSON: %s, %v", after, err)
+	}
+	var decoded Event
+	if err := json.Unmarshal([]byte(`{"kind":"text","AntiTruncationToolCalls":9,"anti_truncation_tool_calls":9}`), &decoded); err != nil || decoded.AntiTruncationToolCalls != 0 {
+		t.Fatalf("JSON populated the internal counter: %+v, %v", decoded, err)
 	}
 }

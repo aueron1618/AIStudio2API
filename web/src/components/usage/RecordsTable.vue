@@ -7,7 +7,7 @@ import type { UsageRecord } from '@/types'
 import UiIcon from '../UiIcon.vue'
 import UiSelect from '../UiSelect.vue'
 import RecordDrawer from './RecordDrawer.vue'
-import { useUsageFormat } from './format'
+import { displayModelName, showSeparateToolCalls, useUsageFormat } from './format'
 import { readPreference, writePreference } from '@/preference'
 import { latencyTone } from './model'
 
@@ -331,10 +331,16 @@ function latencyWidth(milliseconds: number): number {
                 </button>
               </td>
               <td class="px-4 py-2 whitespace-nowrap">
-                <span class="rounded px-1.5 py-0.5" :class="stateClass(record)">{{
-                  dimensionLabel('state', record.state)
-                }}</span>
+                <span class="rounded px-1.5 py-0.5" :class="stateClass(record)">
+                  {{ dimensionLabel('state', record.state) }}
+                  <span v-if="record.state === 'tool_calls'" class="ml-1 tabular-nums">{{
+                    integer(record.tool_calls)
+                  }}</span>
+                </span>
                 <span class="ml-1.5 text-gray-500 tabular-nums">{{ record.status }}</span>
+                <div v-if="showSeparateToolCalls(record)" class="mt-0.5 text-gray-500 tabular-nums">
+                  {{ t('usage.toolCalls') }} {{ integer(record.tool_calls) }}
+                </div>
               </td>
               <template
                 v-for="column in allColumns.filter((item) => visible.includes(item))"
@@ -342,16 +348,19 @@ function latencyWidth(milliseconds: number): number {
               >
                 <td v-if="column === 'model'" class="w-1/2 max-w-0 px-4 py-2">
                   <template v-if="record.status !== 401">
-                    <span v-tooltip="record.requested_model || record.model" class="block truncate">
+                    <span
+                      v-tooltip="displayModelName(record.requested_model || record.model)"
+                      class="block truncate"
+                    >
                       <span class="sr-only">{{ t('usage.requestedModel') }}: </span>
-                      {{ record.requested_model || record.model || '—' }}
+                      {{ displayModelName(record.requested_model || record.model) || '—' }}
                     </span>
                     <span
-                      v-tooltip="record.response_model"
+                      v-tooltip="displayModelName(record.response_model)"
                       class="mt-0.5 block truncate text-xs text-gray-500"
                     >
                       <span class="sr-only">{{ t('usage.responseModel') }}: </span>
-                      {{ record.response_model || '—' }}
+                      {{ displayModelName(record.response_model) || '—' }}
                     </span>
                   </template>
                   <span v-else>—</span>
@@ -422,30 +431,36 @@ function latencyWidth(milliseconds: number): number {
             :aria-label="`${t('usage.openDetail')} ${record.id}`"
             @click="selected = record"
           >
-            <div class="flex items-center gap-2">
-              <span class="rounded px-1.5 py-0.5" :class="stateClass(record)">{{
-                dimensionLabel('state', record.state)
-              }}</span>
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span class="rounded px-1.5 py-0.5 whitespace-nowrap" :class="stateClass(record)">
+                {{ dimensionLabel('state', record.state) }}
+                <span v-if="record.state === 'tool_calls'" class="ml-1 tabular-nums">{{
+                  integer(record.tool_calls)
+                }}</span>
+              </span>
               <span class="text-gray-500 tabular-nums">{{ record.status }}</span>
-              <span class="ml-auto text-gray-400 tabular-nums">{{
+              <span class="ml-auto text-gray-400 whitespace-nowrap tabular-nums">{{
                 dateTime(record.time, true)
               }}</span>
             </div>
-            <div
-              v-if="record.status !== 401"
-              v-tooltip="record.requested_model || record.model"
-              class="mt-1.5 truncate text-gray-200"
-            >
-              <span class="sr-only">{{ t('usage.requestedModel') }}: </span>
-              {{ record.requested_model || record.model || '—' }}
+            <div v-if="showSeparateToolCalls(record)" class="mt-0.5 text-gray-500 tabular-nums">
+              {{ t('usage.toolCalls') }} {{ integer(record.tool_calls) }}
             </div>
             <div
               v-if="record.status !== 401"
-              v-tooltip="record.response_model"
+              v-tooltip="displayModelName(record.requested_model || record.model)"
+              class="mt-1.5 truncate text-gray-200"
+            >
+              <span class="sr-only">{{ t('usage.requestedModel') }}: </span>
+              {{ displayModelName(record.requested_model || record.model) || '—' }}
+            </div>
+            <div
+              v-if="record.status !== 401"
+              v-tooltip="displayModelName(record.response_model)"
               class="mt-0.5 truncate text-xs text-gray-500"
             >
               <span class="sr-only">{{ t('usage.responseModel') }}: </span>
-              {{ record.response_model || '—' }}
+              {{ displayModelName(record.response_model) || '—' }}
             </div>
             <div class="mt-0.5 flex gap-3 text-gray-500 tabular-nums">
               <span

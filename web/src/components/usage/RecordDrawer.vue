@@ -14,7 +14,7 @@ import { useI18n } from '@/i18n'
 import { byteLength, prettyBody } from '@/logs'
 import type { RequestBody, UsageRecord } from '@/types'
 import UiIcon from '../UiIcon.vue'
-import { formatBytes, useUsageFormat } from './format'
+import { displayModelName, formatBytes, useUsageFormat } from './format'
 import { latencyTone } from './model'
 
 const props = defineProps<{ record: UsageRecord | null }>()
@@ -72,10 +72,13 @@ const summary = computed(() => {
       ? [
           {
             label: t('usage.requestedModel'),
-            value: record.requested_model || record.model || '—',
+            value: displayModelName(record.requested_model || record.model) || '—',
           },
-          { label: t('usage.responseModel'), value: record.response_model || '—' },
-          { label: t('usage.dimension.model'), value: record.model || '—' },
+          {
+            label: t('usage.responseModel'),
+            value: displayModelName(record.response_model) || '—',
+          },
+          { label: t('usage.dimension.model'), value: displayModelName(record.model) || '—' },
           { label: t('usage.dimension.account'), value: record.account || '—' },
           { label: t('usage.path'), value: record.path, wide: true },
         ]

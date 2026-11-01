@@ -60,3 +60,27 @@ func TestRequestProtocolChannelPrefixes(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestOutcomeWithObservedToolCalls(t *testing.T) {
+	for _, test := range []struct {
+		name, finish, state string
+		calls, status       int
+		err                 string
+	}{
+		{name: "transport stop", finish: "STOP", calls: 1, status: 200, state: "tool_calls"},
+		{name: "ordinary stop", finish: "stop", status: 200, state: "completed"},
+		{name: "local stop", finish: "stop_sequence", calls: 2, status: 200, state: "tool_calls"},
+		{name: "limit after tool call", finish: "MAX_TOKENS", calls: 1, status: 200, state: "limited"},
+		{name: "invalid transport", calls: 1, status: 502, err: "invalid transport content", state: "failed"},
+		{name: "cancelled", calls: 1, status: 499, state: "cancelled"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			entry := api.AccessLog{Model: "model", RequestedModel: "\u6297\u622a\u65ad-model", ResponseModel: "model",
+				FinishReason: test.finish, ToolCalls: test.calls, Status: test.status, Error: test.err}
+			row := requestRow(entry, time.Now())
+			if row.State != test.state || row.ToolCalls != test.calls || row.RequestedModel != entry.RequestedModel || row.ResponseModel != entry.ResponseModel {
+				t.Fatalf("outcome lost calls, state or raw audit model: %+v", row)
+			}
+		})
+	}
+}

@@ -34,13 +34,15 @@ type generationResult struct {
 	// safetyRatings 是候选的安全评级
 	safetyRatings []aistudio.SafetyRating
 	// responseID、turnToken、debugInfo 与 detailedFinishReason 是上游最后给出的 responseId、轮次令牌、调试信息与细分结束原因
-	responseID           string
-	turnToken            string
-	debugInfo            json.RawMessage
-	detailedFinishReason json.RawMessage
+	responseID              string
+	turnToken               string
+	debugInfo               json.RawMessage
+	detailedFinishReason    json.RawMessage
+	antiTruncationToolCalls int
 }
 
 func (result *generationResult) apply(event aistudio.Event) error {
+	result.antiTruncationToolCalls = max(result.antiTruncationToolCalls, event.AntiTruncationToolCalls)
 	if event.ProviderModel != "" {
 		result.providerModel = event.ProviderModel
 	}
@@ -116,7 +118,10 @@ func awaitStreamStart(ctx context.Context, events <-chan aistudio.Event) (<-chan
 			return nil, errIncompleteStream
 		}
 		if event.Kind == aistudio.EventError {
-			return nil, event.Err
+			replay := make(chan aistudio.Event, 1)
+			replay <- event
+			close(replay)
+			return replay, event.Err
 		}
 		first = event
 	}

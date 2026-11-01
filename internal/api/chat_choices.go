@@ -19,11 +19,13 @@ type chatChoices struct {
 	err     error
 	once    sync.Once
 	running sync.WaitGroup
+	// toolCalls retains observed per-choice totals when cancellation skips result aggregation.
+	toolCalls []int
 }
 
 // startChatChoices 在各自 goroutine 中启动每个 choice 并立即读取其事件，非流式请求等待各 Generate 返回，流式请求等待首个就绪的 choice
 func (s *server) startChatChoices(ctx context.Context, request aistudio.GenerateRequest, count int, stream bool) *chatChoices {
-	choices := &chatChoices{events: make([]<-chan aistudio.Event, count)}
+	choices := &chatChoices{events: make([]<-chan aistudio.Event, count), toolCalls: make([]int, count)}
 	choices.ctx, choices.cancel = context.WithCancel(ctx)
 	started := make(chan error, count)
 	for index := range count {
@@ -41,23 +43,39 @@ func (s *server) startChatChoices(ctx context.Context, request aistudio.Generate
 		choices.running.Add(1)
 		go func() {
 			defer choices.running.Done()
+			toolCalls, antiTruncationToolCalls := 0, 0
+			observe := func(event aistudio.Event) {
+				if event.Kind == aistudio.EventToolCall {
+					toolCalls++
+				}
+				antiTruncationToolCalls = max(antiTruncationToolCalls, event.AntiTruncationToolCalls)
+			}
 			upstream, err := s.generate(choices.ctx, choice)
 			source := upstream
-			if err == nil && stream {
+			if err != nil {
+				source = nil
+			} else if stream {
 				source, err = awaitStreamStart(choices.ctx, upstream)
 			}
 			started <- err
-			if err != nil {
+			if err != nil && source == nil {
 				failed := make(chan aistudio.Event, 1)
 				failed <- aistudio.Event{Kind: aistudio.EventError, Err: err}
 				close(failed)
 				source = failed
 			}
-			relayEvents(choices.ctx, source, events)
-			if upstream != nil {
-				for range upstream {
+			relayEvents(choices.ctx, source, events, observe)
+			if source != nil {
+				for event := range source {
+					observe(event)
 				}
 			}
+			if upstream != nil {
+				for event := range upstream {
+					observe(event)
+				}
+			}
+			choices.toolCalls[index] = toolCalls + antiTruncationToolCalls
 		}()
 	}
 	waits := count
@@ -74,7 +92,7 @@ func (s *server) startChatChoices(ctx context.Context, request aistudio.Generate
 }
 
 // relayEvents 经内存队列把 source 的事件转发到 out
-func relayEvents(ctx context.Context, source <-chan aistudio.Event, out chan<- aistudio.Event) {
+func relayEvents(ctx context.Context, source <-chan aistudio.Event, out chan<- aistudio.Event, observe func(aistudio.Event)) {
 	var queue []aistudio.Event
 	for source != nil || len(queue) > 0 {
 		var send chan<- aistudio.Event
@@ -92,6 +110,7 @@ func relayEvents(ctx context.Context, source <-chan aistudio.Event, out chan<- a
 				source = nil
 				continue
 			}
+			observe(event)
 			queue = append(queue, event)
 		}
 	}
@@ -132,6 +151,11 @@ func (choices *chatChoices) settle(ctx context.Context) {
 		return
 	}
 	choices.running.Wait()
+	toolCalls := 0
+	for _, count := range choices.toolCalls {
+		toolCalls += count
+	}
+	SetAccessLogGenerationResult(ctx, nil, toolCalls)
 	SetAccessLogError(ctx, choices.err)
 }
 
@@ -142,7 +166,7 @@ func (choices *chatChoices) record(ctx context.Context, results []generationResu
 	}
 	toolCalls := 0
 	for index := range results {
-		toolCalls += len(results[index].toolCalls)
+		toolCalls += len(results[index].toolCalls) + results[index].antiTruncationToolCalls
 	}
 	SetAccessLogGenerationResult(ctx, sumUsage(results), toolCalls)
 }

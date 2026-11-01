@@ -1,7 +1,24 @@
 import { computed } from 'vue'
 import { channelLabelKey, useI18n, type TranslationKey } from '@/i18n'
-import type { UpstreamChannel, UsageDimension } from '@/types'
+import type { UpstreamChannel, UsageDimension, UsageRecord } from '@/types'
 import { protocolLabels } from './model'
+
+const antiTruncationPrefix = /^(models\/)?抗截断-/
+
+// Only remove the reserved leading alias, preserving the namespace and model suffixes.
+export function displayModelName(value: string): string {
+  return value.replace(antiTruncationPrefix, '$1')
+}
+
+// Historical anti-truncation zeros may be unsampled; show only the stored count.
+export function showSeparateToolCalls(
+  record: Pick<UsageRecord, 'state' | 'tool_calls' | 'requested_model'>,
+): boolean {
+  return (
+    record.state !== 'tool_calls' &&
+    (record.tool_calls > 0 || antiTruncationPrefix.test(record.requested_model))
+  )
+}
 
 const stateKeys: Record<string, TranslationKey> = {
   completed: 'usage.state.completed',

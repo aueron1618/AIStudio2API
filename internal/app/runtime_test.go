@@ -201,7 +201,7 @@ func TestCollectGenerateEventsCancellationDuringDrain(t *testing.T) {
 	defer close(source)
 	done := make(chan error, 1)
 	go func() {
-		_, err := collectGenerateEvents(ctx, source, nil)
+		_, _, err := collectGenerateEvents(ctx, source, nil)
 		done <- err
 	}()
 	source <- aistudio.Event{Kind: aistudio.EventError, Err: &aistudio.StreamInterruptedError{Err: io.ErrUnexpectedEOF}}

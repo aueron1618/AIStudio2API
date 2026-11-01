@@ -663,6 +663,8 @@ type Event struct {
 	// FinishFrame 表示事件来自带结束原因的上游帧
 	FinishFrame bool  `json:"finish_frame,omitempty"`
 	Err         error `json:"-"`
+	// AntiTruncationToolCalls is the cumulative observed transport calls for this generation.
+	AntiTruncationToolCalls int `json:"-"`
 }
 
 // SafetyRating 是候选或输入在一个安全类别上的评级，取值为 Gemini API 枚举名

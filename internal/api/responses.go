@@ -1164,7 +1164,7 @@ func responseShell(id string, created int64, status string, request responsesReq
 		"incomplete_details":   nil,
 		"instructions":         instructions,
 		"metadata":             request.Metadata,
-		"model":                request.Model,
+		"model":                baseResponseModel(request.Model),
 		"output":               []any{},
 		"output_text":          "",
 		"parallel_tool_calls":  parallelToolCalls,

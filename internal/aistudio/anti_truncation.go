@@ -17,6 +17,7 @@ type antiTruncationTransport struct {
 	name          string
 	pending       []Event
 	bufferedBytes int
+	calls         int
 	synthetic     bool
 	realTools     bool
 	finished      bool
@@ -80,6 +81,7 @@ func (transport *antiTruncationTransport) emitter(forward func(Event) error) fun
 			}
 		}()
 		if event.Kind == EventToolCall && event.FunctionCall != nil && event.FunctionCall.Name == transport.name {
+			transport.calls++
 			transport.synthetic = true
 			if err := transport.flush(true); err != nil {
 				return err
