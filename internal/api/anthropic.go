@@ -943,7 +943,7 @@ func buildAnthropicResponse(id string, model string, result generationResult, se
 		"id":            id,
 		"type":          "message",
 		"role":          "assistant",
-		"model":         model,
+		"model":         baseResponseModel(model),
 		"content":       blocks,
 		"stop_reason":   stopReason,
 		"stop_sequence": stopSequence,
@@ -1190,7 +1190,7 @@ func (writer *anthropicStreamWriter) start() error {
 	if err := writer.send("message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
-			"id": writer.id, "type": "message", "role": "assistant", "model": writer.model,
+			"id": writer.id, "type": "message", "role": "assistant", "model": baseResponseModel(writer.model),
 			"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
 			"usage": anthropicStartUsage{InputTokens: writer.inputTokens},
 		},

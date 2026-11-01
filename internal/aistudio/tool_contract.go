@@ -244,7 +244,7 @@ func (contract *toolContract) forward(ctx context.Context, source <-chan Event) 
 				err = fmt.Errorf("上游未返回 required tool call")
 			}
 			if err != nil {
-				event = Event{Kind: EventError, Err: err}
+				event = Event{Kind: EventError, Err: err, AntiTruncationToolCalls: event.AntiTruncationToolCalls}
 				failed = true
 			}
 			select {

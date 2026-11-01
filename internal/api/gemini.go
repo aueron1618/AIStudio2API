@@ -1299,7 +1299,7 @@ func geminiPromptFeedback(request aistudio.GenerateRequest, err error) (map[stri
 	if len(feedback.SafetyRatings) > 0 {
 		block["safetyRatings"] = feedback.SafetyRatings
 	}
-	return map[string]any{"promptFeedback": block, "modelVersion": request.Model, "responseId": request.ID}, true
+	return map[string]any{"promptFeedback": block, "modelVersion": baseResponseModel(request.Model), "responseId": request.ID}, true
 }
 
 // buildGeminiResponse 按候选序号输出各候选内容与终止原因，用量为全部候选之和
@@ -1315,7 +1315,7 @@ func buildGeminiResponse(request aistudio.GenerateRequest, results []generationR
 	}
 	response := map[string]any{
 		"candidates":   candidates,
-		"modelVersion": cmp.Or(results[0].providerModel, request.Model),
+		"modelVersion": baseResponseModel(cmp.Or(results[0].providerModel, request.Model)),
 		"responseId":   cmp.Or(results[0].responseID, request.ID),
 	}
 	if results[0].turnToken != "" {
@@ -1768,7 +1768,7 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request ai
 				return nil
 			}
 			candidate := map[string]any{"index": index, "content": map[string]any{"role": "model", "parts": []any{part}}}
-			frame := map[string]any{"responseId": cmp.Or(event.ResponseID, request.ID), "modelVersion": cmp.Or(event.ProviderModel, request.Model), "candidates": []any{candidate}}
+			frame := map[string]any{"responseId": cmp.Or(event.ResponseID, request.ID), "modelVersion": baseResponseModel(cmp.Or(event.ProviderModel, request.Model)), "candidates": []any{candidate}}
 			if event.TurnToken != "" {
 				frame["turnToken"] = event.TurnToken
 			}
@@ -1826,7 +1826,7 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request ai
 		finished = append(finished, candidate)
 	}
 	final := map[string]any{
-		"responseId": cmp.Or(results[0].responseID, request.ID), "modelVersion": cmp.Or(results[0].providerModel, request.Model),
+		"responseId": cmp.Or(results[0].responseID, request.ID), "modelVersion": baseResponseModel(cmp.Or(results[0].providerModel, request.Model)),
 		"candidates": finished,
 	}
 	if results[0].turnToken != "" {

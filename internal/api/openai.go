@@ -1091,7 +1091,7 @@ func buildChatCompletion(id string, created int64, model string, results []gener
 		"id":      id,
 		"object":  "chat.completion",
 		"created": created,
-		"model":   model,
+		"model":   baseResponseModel(model),
 	}
 	for index := range results {
 		choices = append(choices, chatCompletionChoice(index, results[index], tools, media))
@@ -1200,7 +1200,7 @@ func (s *server) streamChatCompletion(w http.ResponseWriter, r *http.Request, re
 			"id":      id,
 			"object":  "chat.completion.chunk",
 			"created": created,
-			"model":   request.Model,
+			"model":   baseResponseModel(request.Model),
 			"choices": []any{},
 			"usage":   openAIUsage(usage),
 		}
@@ -1309,7 +1309,7 @@ func writeChatChunk(w http.ResponseWriter, id string, created int64, model strin
 		"id":      id,
 		"object":  "chat.completion.chunk",
 		"created": created,
-		"model":   model,
+		"model":   baseResponseModel(model),
 		"choices": []any{choice},
 	}
 	if includeUsage {

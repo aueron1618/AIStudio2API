@@ -11,6 +11,15 @@ import (
 
 const antiTruncationModelPrefix = "\u6297\u622a\u65ad-"
 
+// baseResponseModel hides the transport selector without changing request routing.
+func baseResponseModel(model string) string {
+	name := strings.TrimPrefix(strings.TrimSpace(model), "models/")
+	if base, prefixed := strings.CutPrefix(name, antiTruncationModelPrefix); prefixed {
+		return base
+	}
+	return model
+}
+
 func (s *server) antiTruncationEnabled() bool {
 	return s.config.AntiTruncation != nil && s.config.AntiTruncation()
 }
