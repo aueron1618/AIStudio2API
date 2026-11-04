@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -14,6 +15,9 @@ func TestMinimumMemoryDefaults(t *testing.T) {
 	}
 	if cfg.WAABackend != WAABackendSpiderMonkey || cfg.WarmWorkerLimit != 0 || cfg.MaxActiveWorkers != 1 || cfg.WarmStartupConcurrency != 1 || cfg.PerAccountConcurrency != 1 {
 		t.Fatalf("not minimum-memory defaults: %+v", cfg)
+	}
+	if !slices.Equal(cfg.UpstreamChannels, []string{"playground", "build"}) {
+		t.Fatalf("default channels changed: %v", cfg.UpstreamChannels)
 	}
 	for _, backend := range []string{WAABackendSpiderMonkey, WAABackendCamoufox} {
 		cfg.WAABackend = backend
@@ -80,5 +84,30 @@ func TestWorkerLimitValidation(t *testing.T) {
 		if err := cfg.Validate(); (err == nil) != test.valid {
 			t.Fatalf("limits %+v: %v", test, err)
 		}
+	}
+}
+
+func TestWarmWorkerEnvironmentAllowsZeroAndRejectsNegative(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	t.Setenv("MAX_ACTIVE_WORKERS", "4")
+	for _, value := range []string{"0", "2", "-1", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("WARM_WORKER_LIMIT", value)
+			cfg, err := Load(path)
+			if err != nil || cfg.MaxActiveWorkers != 4 {
+				t.Fatalf("warm limit changed an explicit active limit: %+v, %v", cfg, err)
+			}
+			want := 0
+			if value == "2" {
+				want = 2
+			}
+			if cfg.WarmWorkerLimit != want {
+				t.Fatalf("warm limit %q = %d, want %d", value, cfg.WarmWorkerLimit, want)
+			}
+			invalid := value == "-1" || value == "invalid"
+			if (len(cfg.Invalid) != 0) != invalid {
+				t.Fatalf("warm limit %q invalid notices: %+v", value, cfg.Invalid)
+			}
+		})
 	}
 }

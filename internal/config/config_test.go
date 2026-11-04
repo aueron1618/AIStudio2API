@@ -27,8 +27,9 @@ func TestAutoContinuationConfiguration(t *testing.T) {
 		t.Fatalf("environment override was ignored: %+v, %v", loaded, err)
 	}
 	t.Setenv("AUTO_CONTINUATION", "invalid")
-	if _, err := Load(path); err == nil {
-		t.Fatal("invalid auto-continuation setting was accepted")
+	loaded, err = Load(path)
+	if err != nil || !loaded.AutoContinuation || len(loaded.Invalid) != 1 || loaded.Invalid[0].Key != "AUTO_CONTINUATION" {
+		t.Fatalf("invalid auto-continuation must use the default and report the key: %+v, %v", loaded, err)
 	}
 }
 

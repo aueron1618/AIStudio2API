@@ -21,6 +21,7 @@ type managedService interface {
 	State() string
 	ApplyCapacity(warmTarget int, maxActive int, startupConcurrency int, perAccountConcurrency int)
 	SetAutoContinuation(bool)
+	SetAPIKeyAccounts(map[string][]string)
 }
 
 // generationAdmin 表示进程级管理器转交给当前生成服务的管理操作
@@ -43,6 +44,7 @@ type generationAdmin interface {
 	StopService(context.Context) (api.AdminStatus, error)
 	RuntimeConfig(context.Context) (api.RuntimeConfig, error)
 	UpdateRuntimeConfig(context.Context, api.RuntimeConfig) (api.RuntimeConfig, error)
+	applyRoutingConfig(strategy, channels string)
 	Cooldowns(context.Context) ([]api.AdminCooldown, error)
 	ClearCooldown(ctx context.Context, accountID string, scope string) error
 	Requests(context.Context) ([]api.AdminRequest, error)
@@ -91,17 +93,16 @@ type runtimeManager struct {
 	configPath       string
 	activeManagement config.Config
 	// reservedListenAddr 是被 Windows 保留而改用 activeManagement.ListenAddr 监听的配置地址，没有改用时为空
-	reservedListenAddr     string
-	previewAddress         string
-	overrides              dataConfigOverrides
-	requests               *requestRegistry
-	factory                runtimeFactory
-	startMu                sync.Mutex
-	mu                     sync.RWMutex
-	current                *runtimeGeneration
-	continuationRevision   uint64
-	antiTruncationRevision uint64
-	startCancel            context.CancelFunc
+	reservedListenAddr string
+	previewAddress     string
+	overrides          dataConfigOverrides
+	requests           *requestRegistry
+	factory            runtimeFactory
+	startMu            sync.Mutex
+	mu                 sync.RWMutex
+	current            *runtimeGeneration
+	liveConfigRevision uint64
+	startCancel        context.CancelFunc
 	// launching 在生成服务启动期间存在，启动结束时关闭
 	launching       chan struct{}
 	autoStartCancel context.CancelFunc
@@ -126,6 +127,7 @@ func newRuntimeManager(
 	if err != nil {
 		return nil, err
 	}
+	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts, cfg))
 	manager.current = generation
 	return manager, nil
 }
@@ -162,8 +164,7 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 
 	manager.mu.Lock()
 	current := manager.current
-	continuationRevision := manager.continuationRevision
-	antiTruncationRevision := manager.antiTruncationRevision
+	liveConfigRevision := manager.liveConfigRevision
 	if current.service.State() != "STOPPED" {
 		status, err := current.admin.StartService(ctx)
 		manager.mu.Unlock()
@@ -176,9 +177,10 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 	launchCtx, launchCancel := context.WithCancel(manager.lifecycle)
 	manager.startCancel = launchCancel
 	manager.launching = make(chan struct{})
+	// Load may migrate the file, so it shares the save lock.
+	cfg, err := config.Load(manager.configPath)
 	manager.mu.Unlock()
 
-	cfg, err := config.Load(manager.configPath)
 	if err != nil {
 		manager.finishStart(launchCancel)
 		return api.AdminStatus{}, err
@@ -202,12 +204,10 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 
 	manager.mu.Lock()
 	current = manager.current
-	if manager.continuationRevision != continuationRevision {
-		next.config.AutoContinuation = current.config.AutoContinuation
-		next.service.SetAutoContinuation(next.config.AutoContinuation)
-	}
-	if manager.antiTruncationRevision != antiTruncationRevision {
-		next.config.AntiTruncation = current.config.AntiTruncation
+	if manager.liveConfigRevision != liveConfigRevision {
+		next.applyLiveConfig(runtimeConfigDTO(current.config), manager.activeManagement)
+	} else {
+		next.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts, manager.activeManagement))
 	}
 	manager.current = next
 	manager.mu.Unlock()
@@ -555,22 +555,32 @@ func (manager *runtimeManager) UpdateRuntimeConfig(ctx context.Context, value ap
 	manager.mu.Lock()
 	updated, err := manager.current.admin.UpdateRuntimeConfig(ctx, value)
 	if err == nil {
-		manager.current.service.ApplyCapacity(
-			updated.WarmWorkerLimit, updated.MaxActiveWorkers, updated.WarmStartupConcurrency, updated.PerAccountConcurrency,
-		)
-		if updated.AutoContinuation != nil {
-			manager.current.service.SetAutoContinuation(*updated.AutoContinuation)
-			manager.current.config.AutoContinuation = *updated.AutoContinuation
-			manager.continuationRevision++
-		}
-		manager.current.config.AntiTruncation = updated.AntiTruncation
-		manager.antiTruncationRevision++
+		manager.current.applyLiveConfig(updated, manager.activeManagement)
+		manager.liveConfigRevision++
 		updated = manager.decorateRuntimeConfig(updated, manager.current.config)
 		manager.ledger.SetBodyCapture(updated.RequestBodyLog)
 		err = manager.logs.set(updated.LogFile, updated.LogMaxTotalMB)
 	}
 	manager.mu.Unlock()
 	return updated, err
+}
+
+// applyLiveConfig updates only immediate settings, not the restart-bound snapshot.
+func (generation *runtimeGeneration) applyLiveConfig(value api.RuntimeConfig, active config.Config) {
+	cfg := &generation.config
+	cfg.ProxyAPIKey, cfg.APIKeyAccounts = value.APIKey, value.APIKeyAccounts
+	cfg.RoutingStrategy, cfg.ModelChannels = value.RoutingStrategy, value.ModelChannels
+	cfg.WarmWorkerLimit, cfg.MaxActiveWorkers = value.WarmWorkerLimit, value.MaxActiveWorkers
+	cfg.WarmStartupConcurrency, cfg.PerAccountConcurrency = value.WarmStartupConcurrency, value.PerAccountConcurrency
+	cfg.AntiTruncation = value.AntiTruncation
+	if value.AutoContinuation != nil {
+		cfg.AutoContinuation = *value.AutoContinuation
+	}
+	cfg.RequestBodyLog, cfg.LogFile, cfg.LogMaxTotalMB = value.RequestBodyLog, value.LogFile, value.LogMaxTotalMB
+	generation.admin.applyRoutingConfig(cfg.RoutingStrategy, cfg.ModelChannels)
+	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts, active))
+	generation.service.ApplyCapacity(cfg.WarmWorkerLimit, cfg.MaxActiveWorkers, cfg.WarmStartupConcurrency, cfg.PerAccountConcurrency)
+	generation.service.SetAutoContinuation(cfg.AutoContinuation)
 }
 
 // Cooldowns 返回当前生成服务冷却状态
@@ -646,20 +656,21 @@ func sameDataConfig(value api.RuntimeConfig, active config.Config, overrides dat
 	saved := config.Config{
 		AuthStates: value.AuthStates, Proxy: value.Proxy,
 		InitTimeout: initTimeout, RequestTimeout: requestTimeout, TemporaryChat: value.TemporaryChat,
-		UpstreamChannels:     value.UpstreamChannels,
-		ModelMapping:         value.ModelMapping,
-		WAABackend:           value.WAABackend,
-		BuildNativeNonstream: value.BuildNativeNonstream,
-		NonstreamKeepalive:   value.NonstreamKeepalive,
-		FakeStream:           value.FakeStream,
-		YouTubeLinks:         value.YouTubeLinks,
-		SearchModelAliases:   value.SearchModelAliases,
-		GoogleSearch:         value.GoogleSearch,
-		FirstEventHedge:      value.FirstEventHedge,
-		ContinuationRewrite:  value.ContinuationRewrite,
-		ContinuationPrompt:   value.ContinuationPrompt,
-		MediaOutput:          value.MediaOutput,
-		MediaBaseURL:         value.MediaBaseURL,
+		UpstreamChannels:      value.UpstreamChannels,
+		ModelMapping:          value.ModelMapping,
+		WAABackend:            value.WAABackend,
+		BuildNativeNonstream:  value.BuildNativeNonstream,
+		NonstreamKeepalive:    value.NonstreamKeepalive,
+		FakeStream:            value.FakeStream,
+		YouTubeLinks:          value.YouTubeLinks,
+		SearchModelAliases:    value.SearchModelAliases,
+		GoogleSearch:          value.GoogleSearch,
+		FirstEventHedge:       value.FirstEventHedge,
+		FirstEventHedgeModels: value.FirstEventHedgeModels,
+		ContinuationRewrite:   value.ContinuationRewrite,
+		ContinuationPrompt:    value.ContinuationPrompt,
+		MediaOutput:           value.MediaOutput,
+		MediaBaseURL:          value.MediaBaseURL,
 	}
 	overrides.Apply(&saved)
 	return saved.AuthStates == active.AuthStates && saved.Proxy == active.Proxy &&
@@ -669,7 +680,7 @@ func sameDataConfig(value api.RuntimeConfig, active config.Config, overrides dat
 		saved.WAABackend == active.WAABackend &&
 		saved.BuildNativeNonstream == active.BuildNativeNonstream &&
 		saved.NonstreamKeepalive == active.NonstreamKeepalive && saved.FakeStream == active.FakeStream &&
-		saved.YouTubeLinks == active.YouTubeLinks && saved.FirstEventHedge == active.FirstEventHedge &&
+		saved.YouTubeLinks == active.YouTubeLinks && saved.FirstEventHedge == active.FirstEventHedge && saved.FirstEventHedgeModels == active.FirstEventHedgeModels &&
 		saved.SearchModelAliases == active.SearchModelAliases && saved.GoogleSearch == active.GoogleSearch &&
 		saved.ContinuationRewrite == active.ContinuationRewrite && saved.ContinuationPrompt == active.ContinuationPrompt &&
 		saved.MediaOutput == active.MediaOutput && saved.MediaBaseURL == active.MediaBaseURL

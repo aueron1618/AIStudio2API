@@ -7,24 +7,8 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
-	"github.com/Mag1cFall/AIStudio2API/internal/api"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 )
-
-type antiTruncationStartAdmin struct {
-	generationAdmin
-	service *trackedService
-}
-
-func (admin antiTruncationStartAdmin) StartService(context.Context) (api.AdminStatus, error) {
-	admin.service.state.Store(serviceRunning)
-	return api.AdminStatus{State: "RUNNING", Running: true}, nil
-}
-
-func (admin antiTruncationStartAdmin) StopService(context.Context) (api.AdminStatus, error) {
-	admin.service.state.Store(serviceStopped)
-	return api.AdminStatus{State: "STOPPED"}, nil
-}
 
 func TestAntiTruncationRuntimeConfig(t *testing.T) {
 	cfg := config.Default()
@@ -72,16 +56,12 @@ func TestAntiTruncationDisableSurvivesConcurrentStartup(t *testing.T) {
 	if err := cfg.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	current := &trackedService{}
 	manager := &runtimeManager{
-		lifecycle: ctx, configPath: path,
-		current: &runtimeGeneration{
-			service: current, admin: antiTruncationStartAdmin{service: current}, config: cfg,
-			lifecycleCancel: func() {}, closeRuntime: func() error { return nil },
-		},
+		lifecycle: ctx, configPath: path, activeManagement: cfg, logs: &logOutput{},
+		current: configTestGeneration(ctx, path, cfg),
 	}
 	building, release := make(chan struct{}), make(chan struct{})
-	next := &trackedService{}
+	next := configTestGeneration(ctx, path, cfg)
 	manager.factory = func(launch, _ context.Context, snapshot config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
 		close(building)
 		select {
@@ -89,10 +69,8 @@ func TestAntiTruncationDisableSurvivesConcurrentStartup(t *testing.T) {
 		case <-launch.Done():
 			return nil, launch.Err()
 		}
-		return &runtimeGeneration{
-			service: next, admin: antiTruncationStartAdmin{service: next}, config: snapshot,
-			lifecycleCancel: func() {}, closeRuntime: func() error { return nil },
-		}, nil
+		next.config = snapshot
+		return next, nil
 	}
 	result := make(chan error, 1)
 	go func() {
@@ -104,10 +82,11 @@ func TestAntiTruncationDisableSurvivesConcurrentStartup(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	manager.mu.Lock()
-	manager.current.config.AntiTruncation = false
-	manager.antiTruncationRevision++
-	manager.mu.Unlock()
+	value := runtimeConfigDTO(cfg)
+	value.AntiTruncation = false
+	if _, err := manager.UpdateRuntimeConfig(ctx, value); err != nil {
+		t.Fatal(err)
+	}
 	close(release)
 	select {
 	case err := <-result:
@@ -117,7 +96,11 @@ func TestAntiTruncationDisableSurvivesConcurrentStartup(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	if manager.current.service != next || manager.antiTruncationEnabled() {
+	if manager.current != next || manager.antiTruncationEnabled() {
 		t.Fatal("publishing an older startup snapshot re-enabled anti-truncation")
+	}
+	loaded, err := config.Load(path)
+	if err != nil || loaded.AntiTruncation {
+		t.Fatalf("startup overwrote the saved setting: %+v, %v", loaded, err)
 	}
 }

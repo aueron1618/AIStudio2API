@@ -69,6 +69,8 @@ func (catalog *cookieCatalogStub) RefreshAccountState(ctx context.Context, id st
 	return aistudio.AccountRefresh{Models: len(models)}, err
 }
 
+func (*cookieCatalogStub) ReclaimIdleInlineMedia(context.Context) error { return nil }
+
 func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 	for _, test := range []struct {
 		name       string

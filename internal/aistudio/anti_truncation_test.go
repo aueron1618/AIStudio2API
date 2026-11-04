@@ -722,3 +722,97 @@ func TestAntiTruncationEventCounterJSON(t *testing.T) {
 		t.Fatalf("JSON populated the internal counter: %+v, %v", decoded, err)
 	}
 }
+
+func TestAntiTruncationClientRegeneration(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		first         []Part
+		finish        any
+		alwaysFail    bool
+		fallback      bool
+		stop          bool
+		wantRequests  int
+		wantCalls     int
+		wantRealCalls int
+		wantText      string
+		wantError     bool
+	}{
+		{name: "discard interrupted preamble", first: []Part{{Text: "discard"}}, wantRequests: 2, wantCalls: 1, wantText: "answer"},
+		{name: "malformed response before output", finish: 19, wantRequests: 2, wantCalls: 1, wantText: "answer"},
+		{name: "malformed function before output", finish: 10, wantRequests: 2, wantCalls: 1, wantText: "answer"},
+		{name: "empty synthetic then synthetic", first: []Part{antiTruncationTestCall(antiTruncationTestName, "").Part}, wantRequests: 2, wantCalls: 2, wantText: "answer"},
+		{name: "empty synthetic then fallback", first: []Part{antiTruncationTestCall(antiTruncationTestName, "").Part}, fallback: true, wantRequests: 2, wantCalls: 1, wantText: "answer"},
+		{name: "visible synthetic cannot replay", first: []Part{antiTruncationTestCall(antiTruncationTestName, "first").Part}, wantRequests: 1, wantCalls: 1, wantText: "first", wantError: true},
+		{name: "genuine tool cannot replay", first: []Part{antiTruncationTestCall("lookup", "query").Part}, wantRequests: 1, wantRealCalls: 1, wantError: true},
+		{name: "stop filter survives regeneration", stop: true, wantRequests: 2, wantCalls: 1, wantText: "answer"},
+		{name: "bounded attempts", first: []Part{{Text: "discard"}}, alwaysFail: true, wantRequests: regenerations + 1, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			client := NewClient(ClientOptions{
+				Transport: antiTruncationCountTransport(func(_ context.Context, request RPCRequest) (*RPCResponse, error) {
+					if request.Method != "CountTokens" {
+						return nil, errors.New("unexpected non-count RPC")
+					}
+					return &RPCResponse{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {JSONProtobufContentType}}, Body: io.NopCloser(strings.NewReader(`[10]`))}, nil
+				}),
+				Protected: ProtectedTransportFunc(func(_ context.Context, request GenerateRequest, _ RPCRequest) (*RPCResponse, error) {
+					requests++
+					name := request.Tools.Functions[len(request.Tools.Functions)-1].Name
+					parts, finish := []Part{antiTruncationTestCall(name, "answer").Part}, any(1)
+					if test.fallback {
+						parts = []Part{{Text: "answer"}}
+					}
+					if test.stop {
+						parts = []Part{antiTruncationTestCall(name, "answer<stop>discard").Part}
+					}
+					if requests == 1 || test.alwaysFail {
+						parts, finish = slices.Clone(test.first), test.finish
+						for index, part := range parts {
+							if part.FunctionCall != nil && part.FunctionCall.Name == antiTruncationTestName {
+								call := *part.FunctionCall
+								call.Name = name
+								parts[index].FunctionCall = &call
+							}
+						}
+					}
+					return antiTruncationTestResponse(t, parts, finish), nil
+				}),
+			})
+			model := Model{ID: "model", Capabilities: map[string]bool{"function_declarations": true}}
+			client.setModelCatalog("", modelCatalog{entries: map[string]modelEntry{model.ID: {model: model, defaults: GenerationDefaults{MaxOutputTokens: 1024}}}})
+			request := GenerateRequest{Model: model.ID, AntiTruncation: true,
+				Contents: []Content{{Role: RoleUser, Parts: []Part{{Text: "question"}}}},
+				Tools:    Tools{Functions: []FunctionDeclaration{{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`)}}},
+			}
+			if test.stop {
+				request.Config.StopSequences = []string{"<stop>"}
+			}
+			events, err := client.Generate(t.Context(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := ""
+			calls, realCalls, failures, finishes := 0, 0, 0, 0
+			for event := range events {
+				calls = max(calls, event.AntiTruncationToolCalls)
+				switch event.Kind {
+				case EventText:
+					text += event.Text
+				case EventToolCall:
+					realCalls++
+					if event.FunctionCall.Name != "lookup" {
+						t.Fatal("regeneration leaked the internal transport tool")
+					}
+				case EventError:
+					failures++
+				case EventFinish:
+					finishes++
+				}
+			}
+			if requests != test.wantRequests || calls != test.wantCalls || realCalls != test.wantRealCalls || text != test.wantText || (failures > 0) != test.wantError || !test.wantError && finishes != 1 {
+				t.Fatalf("requests=%d calls=%d real=%d text=%q errors=%d finishes=%d", requests, calls, realCalls, text, failures, finishes)
+			}
+		})
+	}
+}

@@ -121,6 +121,7 @@ func NewHandler(service aistudio.Service, config Config) http.Handler {
 	public.HandleFunc("GET /v1beta/cachedContents/{cache}", s.handleGeminiCacheGet)
 	public.HandleFunc("PATCH /v1beta/cachedContents/{cache}", s.handleGeminiCacheUpdate)
 	public.HandleFunc("DELETE /v1beta/cachedContents/{cache}", s.handleGeminiCacheDelete)
+	public.HandleFunc("/", writeRouteNotFound)
 
 	control := http.NewServeMux()
 	control.HandleFunc("GET /api/status", s.handleStatus)
@@ -132,7 +133,7 @@ func NewHandler(service aistudio.Service, config Config) http.Handler {
 
 	root := http.NewServeMux()
 	root.Handle("GET /health", corsMiddleware(http.HandlerFunc(s.handleHealth)))
-	publicHandler := bodyLimitMiddleware(browserOriginMiddleware(config.APIKey, authMiddleware(config.APIKey, requestBodyMiddleware(config.Ledger, waitLaunchMiddleware(config.WaitLaunch, public)))))
+	publicHandler := bodyLimitMiddleware(browserOriginMiddleware(config.APIKey, authMiddleware(config.APIKey, apiKeyContextMiddleware(config.APIKey, requestBodyMiddleware(config.Ledger, waitLaunchMiddleware(config.WaitLaunch, public))))))
 	loggedHandler := requestLoggingMiddleware(config.Admin, corsMiddleware(publicHandler))
 	root.Handle("/v1/", channelMiddleware(aistudio.ChannelPlayground, loggedHandler))
 	root.Handle("/build/v1/", channelMiddleware(aistudio.ChannelBuild,

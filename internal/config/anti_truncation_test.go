@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -33,11 +32,11 @@ func TestAntiTruncationConfig(t *testing.T) {
 	})
 
 	for _, test := range []struct {
-		name    string
-		file    string
-		env     map[string]string
-		want    bool
-		wantErr bool
+		name        string
+		file        string
+		env         map[string]string
+		want        bool
+		wantInvalid bool
 	}{
 		{name: "missing_option"},
 		{name: "file_enabled", file: "ANTI_TRUNCATION=true\n", want: true},
@@ -47,10 +46,10 @@ func TestAntiTruncationConfig(t *testing.T) {
 		{name: "env_disables", file: "ANTI_TRUNCATION=true\n", env: map[string]string{"ANTI_TRUNCATION": "false"}},
 		{name: "trimmed_env", env: map[string]string{"ANTI_TRUNCATION": " true "}, want: true},
 		{name: "env_replaces_invalid_file", file: "ANTI_TRUNCATION=invalid\n", env: map[string]string{"ANTI_TRUNCATION": "true"}, want: true},
-		{name: "invalid_file", file: "ANTI_TRUNCATION=invalid\n", wantErr: true},
-		{name: "empty_file_value", file: "ANTI_TRUNCATION=\n", wantErr: true},
-		{name: "invalid_env", file: "ANTI_TRUNCATION=true\n", env: map[string]string{"ANTI_TRUNCATION": "invalid"}, wantErr: true},
-		{name: "empty_env", file: "ANTI_TRUNCATION=true\n", env: map[string]string{"ANTI_TRUNCATION": ""}, wantErr: true},
+		{name: "invalid_file", file: "ANTI_TRUNCATION=invalid\n", wantInvalid: true},
+		{name: "empty_file_value", file: "ANTI_TRUNCATION=\n", wantInvalid: true},
+		{name: "invalid_env", file: "ANTI_TRUNCATION=true\n", env: map[string]string{"ANTI_TRUNCATION": "invalid"}, wantInvalid: true},
+		{name: "empty_env", file: "ANTI_TRUNCATION=true\n", env: map[string]string{"ANTI_TRUNCATION": ""}, wantInvalid: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for key, value := range test.env {
@@ -61,17 +60,20 @@ func TestAntiTruncationConfig(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, err := Load(path)
-			if test.wantErr {
-				if err == nil || !strings.Contains(err.Error(), "ANTI_TRUNCATION") {
-					t.Fatalf("expected ANTI_TRUNCATION validation error, got %v", err)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			want := Default()
 			want.AntiTruncation = test.want
+			if test.wantInvalid {
+				if len(got.Invalid) != 1 || got.Invalid[0].Key != "ANTI_TRUNCATION" || !strings.Contains(got.Invalid[0].Reason, "ANTI_TRUNCATION") {
+					t.Fatalf("expected ANTI_TRUNCATION invalid-value notice, got %+v", got.Invalid)
+				}
+				want.Invalid = got.Invalid
+			}
+			if len(test.env) != 0 {
+				want.Environment = []string{"ANTI_TRUNCATION"}
+			}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("Load() = %+v, want %+v", got, want)
 			}
@@ -107,12 +109,12 @@ func TestAntiTruncationConfig(t *testing.T) {
 				if err := want.Save(path); err != nil {
 					t.Fatal(err)
 				}
-				values, err := readEnvFile(path)
+				values, _, err := readEnvFile(path)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if values["ANTI_TRUNCATION"] != strconv.FormatBool(enabled) {
-					t.Fatalf("saved ANTI_TRUNCATION = %q, want %t", values["ANTI_TRUNCATION"], enabled)
+				if value, exists := values["ANTI_TRUNCATION"]; exists != enabled || enabled && value != "true" {
+					t.Fatalf("saved ANTI_TRUNCATION = %q, exists=%t, enabled=%t", value, exists, enabled)
 				}
 				got, err := Load(path)
 				if err != nil {

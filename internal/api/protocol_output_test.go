@@ -288,11 +288,12 @@ func TestChatLegacyFunctions(t *testing.T) {
 
 func TestProtocolFinishReasons(t *testing.T) {
 	// The protocol layer receives the decoder's canonical lowercase reasons.
+	// Malformed responses are not safety refusals.
 	for _, tc := range []struct {
 		reasons, chat, anthropic, incomplete string
 	}{
-		{"stop,unspecified,other,language,malformed_function_call,unexpected_tool_call,too_many_tool_calls,image_other,no_image,missing_thought_signature,unrecognized_name,pause_turn", "stop", "end_turn", ""},
-		{"safety,recitation,blocklist,prohibited_content,spii,image_safety,image_prohibited_content,image_recitation,malformed_response,provider_42", "content_filter", "refusal", "content_filter"},
+		{"stop,unspecified,other,language,malformed_function_call,unexpected_tool_call,too_many_tool_calls,image_other,no_image,missing_thought_signature,malformed_response,unrecognized_name,pause_turn", "stop", "end_turn", ""},
+		{"safety,recitation,blocklist,prohibited_content,spii,image_safety,image_prohibited_content,image_recitation,provider_42", "content_filter", "refusal", "content_filter"},
 		{"max_tokens,continuation", "length", "max_tokens", "max_output_tokens"},
 		{"stop_sequence", "stop", "stop_sequence", ""},
 	} {

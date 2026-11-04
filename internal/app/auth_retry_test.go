@@ -73,3 +73,48 @@ func TestAuthRefreshWithoutExtension(t *testing.T) {
 		t.Fatalf("重新登录丢失续签扩展: %+v", kept)
 	}
 }
+
+func TestKeepAuthExtensionWithNativeSource(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		email      string
+		freshOAuth bool
+		oldOAuth   bool
+		wantOld    bool
+	}{
+		{name: "native relogin", email: "user@example.test", oldOAuth: true, wantOld: true},
+		{name: "case insensitive email", email: "USER@example.test", oldOAuth: true, wantOld: true},
+		{name: "different account", email: "other@example.test", oldOAuth: true},
+		{name: "fresh renewal material", email: "user@example.test", oldOAuth: true, freshOAuth: true},
+		{name: "no previous renewal material", email: "user@example.test"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			previous := aistudio.AuthExtension{Source: aistudio.AuthSource{Browser: "chrome", Root: "fixture-root", Profile: "Default", Email: "user@example.test"}}
+			if test.oldOAuth {
+				previous.OAuth = &aistudio.ChromeOAuthMaterial{GaiaID: "fixture-gaia", RefreshToken: "old-fixture"}
+			}
+			current := aistudio.StorageState{}
+			current.SetAuthExtension(previous)
+			fresh := aistudio.AuthExtension{Source: aistudio.AuthSource{Browser: "camoufox", Email: test.email}}
+			if test.freshOAuth {
+				fresh.OAuth = &aistudio.ChromeOAuthMaterial{GaiaID: "fixture-gaia", RefreshToken: "fresh-fixture"}
+			}
+			next := aistudio.StorageState{Cookies: []aistudio.StateCookie{{Name: "SAPISID", Value: "new-fixture", Domain: ".google.com"}}}
+			next.SetAuthExtension(fresh)
+			if err := keepAuthExtension(&next, current); err != nil {
+				t.Fatal(err)
+			}
+			kept, exists, err := next.AuthExtension()
+			want := fresh
+			if test.wantOld {
+				want = previous
+			}
+			if err != nil || !exists || kept.Source != want.Source || (kept.OAuth != nil) != (want.OAuth != nil) || kept.OAuth != nil && kept.OAuth.RefreshToken != want.OAuth.RefreshToken {
+				t.Fatal("relogin did not preserve the correct account's renewal source and material")
+			}
+			if next.Cookies[0].Value != "new-fixture" {
+				t.Fatal("preserving renewal material replaced fresh cookies")
+			}
+		})
+	}
+}

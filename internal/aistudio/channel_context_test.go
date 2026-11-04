@@ -98,3 +98,54 @@ func TestModelRestrictionDoesNotOverrideURLChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestContextChannelAndAPIKeyScope(t *testing.T) {
+	model := Model{ID: "shared", Methods: []string{"generateContent"}}
+	accounts := []*Account{
+		{ID: "a", Config: AccountConfig{Enabled: true}, State: AccountReady, Models: []Model{model}},
+		{ID: "b", Config: AccountConfig{Enabled: true}, State: AccountReady, Models: []Model{model}},
+	}
+	pool := NewAccountPool(accounts, 1)
+	pool.SetUpstreamChannels([]Channel{ChannelPlayground, ChannelBuild})
+	pool.SetAPIKeyAccounts(map[string][]string{"limited": {"b"}})
+	for _, account := range accounts {
+		if err := pool.SetBuildCatalog(account.ID, []Model{model}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, channel := range []Channel{ChannelPlayground, ChannelBuild} {
+		t.Run(string(channel), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(ContextWithAPIKey(ContextWithChannel(t.Context(), channel), "limited"), time.Second)
+			defer cancel()
+			selection := AccountSelection{ModelID: model.ID, Method: "generateContent", PreferredChannel: ChannelBuild}
+			for _, acquire := range []func(context.Context, AccountSelection) (*AccountLease, error){
+				pool.AcquireFor,
+				func(ctx context.Context, selection AccountSelection) (*AccountLease, error) {
+					lease, _, err := pool.TryAcquireFor(ctx, selection)
+					return lease, err
+				},
+			} {
+				lease, err := acquire(ctx, selection)
+				if err != nil || lease == nil || lease.Account().ID != "b" || lease.Channel() != channel {
+					t.Fatalf("key or URL scope lost: lease=%v err=%v", lease, err)
+				}
+				if err := lease.Release(); err != nil {
+					t.Fatal(err)
+				}
+				denied := selection
+				denied.AccountID = "a"
+				if lease, err := acquire(ctx, denied); lease != nil || !errors.Is(err, ErrNoEligibleAccount) {
+					t.Fatalf("explicit account escaped key scope: lease=%v err=%v", lease, err)
+				}
+			}
+			groups, err := pool.ClassifyCandidates(ctx, selection, []string{"a", "b"})
+			if err != nil || !slices.Equal(groups.WarmReady, []string{"b"}) {
+				t.Fatalf("worker candidates escaped key scope: groups=%+v err=%v", groups, err)
+			}
+			selection.AllowedAccountIDs = []string{"a"}
+			if lease, err := pool.AcquireFor(ctx, selection); lease != nil || !errors.Is(err, ErrNoEligibleAccount) {
+				t.Fatalf("disjoint allowed accounts escaped key scope: lease=%v err=%v", lease, err)
+			}
+		})
+	}
+}

@@ -6,12 +6,56 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
+	"github.com/Mag1cFall/AIStudio2API/internal/api"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 )
+
+type configTestService struct {
+	*trackedService
+	capacity [4]int
+	bindings map[string][]string
+}
+
+func (service *configTestService) ApplyCapacity(warm, active, startup, perAccount int) {
+	service.capacity = [4]int{warm, active, startup, perAccount}
+}
+
+func (service *configTestService) SetAPIKeyAccounts(bindings map[string][]string) {
+	service.bindings = bindings
+	service.trackedService.SetAPIKeyAccounts(bindings)
+}
+
+type configStartAdmin struct {
+	*runtimeAdmin
+}
+
+func (admin configStartAdmin) StartService(context.Context) (api.AdminStatus, error) {
+	admin.service.state.Store(serviceRunning)
+	return api.AdminStatus{State: "RUNNING", Running: true}, nil
+}
+
+func (admin configStartAdmin) StopService(context.Context) (api.AdminStatus, error) {
+	admin.service.state.Store(serviceStopped)
+	return api.AdminStatus{State: "STOPPED"}, nil
+}
+
+func configTestGeneration(ctx context.Context, path string, cfg config.Config) *runtimeGeneration {
+	pool := aistudio.NewAccountPool(nil, cfg.PerAccountConcurrency)
+	requests := newRequestRegistry(ctx)
+	service := &configTestService{trackedService: &trackedService{pool: pool, requests: requests}}
+	service.SetAutoContinuation(cfg.AutoContinuation)
+	admin := &runtimeAdmin{configPath: path, config: cfg, pool: pool, requests: requests, service: service.trackedService}
+	admin.applyRoutingConfig(cfg.RoutingStrategy, cfg.ModelChannels)
+	return &runtimeGeneration{
+		service: service, admin: configStartAdmin{admin}, config: cfg,
+		lifecycleCancel: func() {}, closeRuntime: func() error { return nil },
+	}
+}
 
 // TestAdminConfig 验证凭据保存、密码保留与管理重启标记
 func TestAdminConfig(t *testing.T) {
@@ -107,5 +151,77 @@ func TestAutoContinuationConfigIsImmediateAndPreservesOmittedField(t *testing.T)
 	updated.AutoContinuation = &enabled
 	if _, err := admin.UpdateRuntimeConfig(t.Context(), updated); err != nil || service.autoContinuationDisabled.Load() {
 		t.Fatalf("re-enabling failed: %v", err)
+	}
+}
+
+func TestLocalRuntimeConfigEnvironmentLocksAndDTO(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	cfg := config.Default()
+	cfg.AntiTruncation, cfg.AutoContinuation = true, false
+	cfg.ProxyAPIKey, cfg.APIKeyAccounts = "test-key", "test-key:file@example.com"
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANTI_TRUNCATION", "false")
+	t.Setenv("AUTO_CONTINUATION", "true")
+	t.Setenv("API_KEY_ACCOUNTS", "test-key:env@example.com")
+	t.Setenv("FIRST_EVENT_HEDGE_MODELS", "locked-model")
+	t.Setenv("WARM_WORKER_LIMIT", "0")
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &runtimeManager{
+		activeManagement: saved, current: configTestGeneration(t.Context(), path, saved), logs: &logOutput{},
+	}
+	value, err := manager.RuntimeConfig(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"anti_truncation", "auto_continuation", "first_event_hedge_models", "api_key_accounts", "environment", "invalid"} {
+		if _, ok := fields[key]; !ok {
+			t.Errorf("management DTO is missing %s", key)
+		}
+	}
+	value.AntiTruncation, value.AutoContinuation = true, new(bool)
+	value.APIKeyAccounts, value.FirstEventHedgeModels = "test-key:changed@example.com", "changed-model"
+	value.WarmWorkerLimit = 1
+	updated, err := manager.UpdateRuntimeConfig(t.Context(), value)
+	if err != nil || updated.AntiTruncation || updated.AutoContinuation == nil || !*updated.AutoContinuation ||
+		updated.APIKeyAccounts != saved.APIKeyAccounts || updated.FirstEventHedgeModels != saved.FirstEventHedgeModels || updated.WarmWorkerLimit != 0 {
+		t.Fatalf("environment overrides were changed: %+v, %v", updated, err)
+	}
+	service := manager.current.service.(*configTestService)
+	if service.autoContinuationDisabled.Load() || manager.antiTruncationEnabled() || !slices.Equal(service.bindings["test-key"], []string{"env@example.com"}) {
+		t.Fatal("locked runtime values were changed")
+	}
+	if updated.ServiceRestartRequired || updated.ManagementRestartRequired {
+		t.Fatalf("locked values incorrectly require a restart: %+v", updated)
+	}
+}
+
+func TestContinuationControlsHaveIndependentRestartBoundaries(t *testing.T) {
+	cfg := config.Default()
+	value := runtimeConfigDTO(cfg)
+	value.AutoContinuation, value.AntiTruncation = new(bool), true
+	if !sameDataConfig(value, cfg, dataConfigOverrides{}) {
+		t.Fatal("live controls require a restart")
+	}
+	value.ContinuationRewrite = !cfg.ContinuationRewrite
+	if sameDataConfig(value, cfg, dataConfigOverrides{}) {
+		t.Fatal("input rewrite lost its independent restart boundary")
+	}
+	value = runtimeConfigDTO(cfg)
+	value.FirstEventHedgeModels = "different-model"
+	if sameDataConfig(value, cfg, dataConfigOverrides{}) {
+		t.Fatal("hedge model changes must be reflected in the restart marker")
 	}
 }
