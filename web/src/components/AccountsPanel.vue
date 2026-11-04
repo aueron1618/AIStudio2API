@@ -1352,7 +1352,7 @@ async function refreshAllAccounts(): Promise<void> {
                   {{ t('accounts.moreSettings') }}
                 </summary>
                 <div class="space-y-4 border-t border-line p-3">
-                  <AccountEnvironmentFields :model-value="accountEnvironment" />
+                  <AccountEnvironmentFields :model-value="accountEnvironment" optional />
                 </div>
               </details>
             </div>

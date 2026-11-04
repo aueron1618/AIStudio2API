@@ -6,24 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Mag1cFall/AIStudio2API/internal/api"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 )
-
-type continuationStartAdmin struct {
-	generationAdmin
-	service *trackedService
-}
-
-func (admin continuationStartAdmin) StartService(context.Context) (api.AdminStatus, error) {
-	admin.service.state.Store(serviceRunning)
-	return api.AdminStatus{State: "RUNNING", Running: true}, nil
-}
-
-func (admin continuationStartAdmin) StopService(context.Context) (api.AdminStatus, error) {
-	admin.service.state.Store(serviceStopped)
-	return api.AdminStatus{State: "STOPPED"}, nil
-}
 
 func TestAutoContinuationDisableSurvivesConcurrentStartup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -33,30 +17,23 @@ func TestAutoContinuationDisableSurvivesConcurrentStartup(t *testing.T) {
 	if err := cfg.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	current := &trackedService{}
-	current.SetAutoContinuation(true)
 	manager := &runtimeManager{
-		lifecycle: ctx, configPath: path,
-		current: &runtimeGeneration{
-			service: current, admin: continuationStartAdmin{service: current}, config: cfg,
-			lifecycleCancel: func() {}, closeRuntime: func() error { return nil },
-		},
+		lifecycle: ctx, configPath: path, activeManagement: cfg, logs: &logOutput{},
+		current: configTestGeneration(ctx, path, cfg),
 	}
 	building := make(chan struct{})
 	release := make(chan struct{})
-	next := &trackedService{}
+	next := configTestGeneration(ctx, path, cfg)
 	manager.factory = func(launch, _ context.Context, snapshot config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
-		next.SetAutoContinuation(snapshot.AutoContinuation)
+		next.service.SetAutoContinuation(snapshot.AutoContinuation)
 		close(building)
 		select {
 		case <-release:
 		case <-launch.Done():
 			return nil, launch.Err()
 		}
-		return &runtimeGeneration{
-			service: next, admin: continuationStartAdmin{service: next}, config: snapshot,
-			lifecycleCancel: func() {}, closeRuntime: func() error { return nil },
-		}, nil
+		next.config = snapshot
+		return next, nil
 	}
 	result := make(chan error, 1)
 	go func() {
@@ -69,11 +46,11 @@ func TestAutoContinuationDisableSurvivesConcurrentStartup(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	// The next instance already captured "enabled" before the setting was saved.
-	manager.mu.Lock()
-	manager.current.service.SetAutoContinuation(false)
-	manager.current.config.AutoContinuation = false
-	manager.continuationRevision++
-	manager.mu.Unlock()
+	value := runtimeConfigDTO(cfg)
+	value.AutoContinuation = new(bool)
+	if _, err := manager.UpdateRuntimeConfig(ctx, value); err != nil {
+		t.Fatal(err)
+	}
 	close(release)
 	select {
 	case err := <-result:
@@ -83,7 +60,11 @@ func TestAutoContinuationDisableSurvivesConcurrentStartup(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	if manager.current.service != next || !next.autoContinuationDisabled.Load() || manager.current.config.AutoContinuation {
+	if manager.current != next || !next.service.(*configTestService).autoContinuationDisabled.Load() || manager.current.config.AutoContinuation {
 		t.Fatal("publishing an older startup snapshot re-enabled automatic continuation")
+	}
+	loaded, err := config.Load(path)
+	if err != nil || loaded.AutoContinuation {
+		t.Fatalf("startup overwrote the saved setting: %+v, %v", loaded, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
@@ -17,6 +18,9 @@ var errStopSequenceMatched = errors.New("stop sequence matched")
 
 // continuationRoundTokens 为官网自动续写每轮增加的输出上限
 const continuationRoundTokens = 32768
+
+// regenerations 是上游以函数调用格式错误、意外的工具调用或响应格式异常结束、流中断或流尾 5xx 错误且客户端没有收到内容时重新生成的次数上限
+const regenerations = 3
 
 // tokenCountResult 保存并发输入计数结果
 type tokenCountResult struct {
@@ -825,16 +829,17 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 	request.Contents = applySpeechTranscript(request.Contents, entry.model, request.Config)
 	wireRequest := request
 	wireRequest.Config.StopSequences = nil
-	var response *RPCResponse
-	var decodeStream func(io.Reader, func(Event) error) error
-	switch {
-	case entry.model.Capabilities["assistant_route"]:
-		response, decodeStream, err = c.sendAssistant(ctx, wireRequest, entry)
-	case build:
-		response, decodeStream, err = c.sendBuild(ctx, wireRequest, entry)
-	default:
-		response, decodeStream, err = c.sendPlayground(ctx, wireRequest, entry)
+	sendRequest := func() (*RPCResponse, func(io.Reader, func(Event) error) error, error) {
+		switch {
+		case entry.model.Capabilities["assistant_route"]:
+			return c.sendAssistant(ctx, wireRequest, entry)
+		case build:
+			return c.sendBuild(ctx, wireRequest, entry)
+		default:
+			return c.sendPlayground(ctx, wireRequest, entry)
+		}
 	}
+	response, decodeStream, err := sendRequest()
 	if err != nil {
 		return nil, err
 	}
@@ -848,10 +853,13 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 	go func() {
 		defer close(events)
 		defer cancelTokenCount()
-		stopClose := context.AfterFunc(ctx, func() {
-			_ = response.Body.Close()
-		})
-		defer stopClose()
+		closeOnCancel := func(response *RPCResponse) func() bool {
+			return context.AfterFunc(ctx, func() {
+				_ = response.Body.Close()
+			})
+		}
+		stopClose := closeOnCancel(response)
+		defer func() { stopClose() }()
 		providerModel := entry.model.ID
 		send := func(event Event) error {
 			providerModel = cmp.Or(event.ProviderModel, providerModel)
@@ -869,6 +877,19 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 		var usage *Usage
 		var finish *Event
 		var output Output
+		// committed 表示本次生成已有不能随重新生成丢弃的输出：客户端收到的正文、函数调用与媒体，或重新执行有外部副作用的服务端工具调用
+		committed := false
+		// sources 暂存 committed 之前收到的网页来源与引用，重新生成时丢弃
+		var sources []Event
+		releaseSources := func() error {
+			for _, source := range sources {
+				if err := send(source); err != nil {
+					return err
+				}
+			}
+			sources = nil
+			return nil
+		}
 		matchedStopSequence := ""
 		emitEvent := func(event Event) error {
 			switch event.Kind {
@@ -881,8 +902,20 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 				finish = &value
 				return nil
 			default:
-				output.Add(event)
-				if request.Config.HideThinking && event.Kind == EventReasoning || serverToolHidden(request, event) {
+				hiddenTool := serverToolHidden(request, event)
+				if !hiddenTool || !serverToolReplayable(event) {
+					output.Add(event)
+					committed = committed || !event.Thought && event.payload()
+				}
+				if !committed {
+					if event.Kind == EventGrounding || event.Kind == EventCitation {
+						sources = append(sources, event)
+						return nil
+					}
+				} else if err := releaseSources(); err != nil {
+					return err
+				}
+				if request.Config.HideThinking && event.Kind == EventReasoning || hiddenTool {
 					if event.ThoughtSignature == "" {
 						return nil
 					}
@@ -894,13 +927,36 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 				return send(event)
 			}
 		}
-		emit := stopSequenceEmitter(matcher, emitEvent, &matchedStopSequence)
-		if antiTruncation != nil {
-			emit = antiTruncation.emitter(emit)
+		decodeResponse := func() error {
+			emit := stopSequenceEmitter(matcher, emitEvent, &matchedStopSequence)
+			if antiTruncation != nil {
+				// Regeneration discards the failed buffer, but not actual tool-call counts.
+				*antiTruncation = antiTruncationTransport{name: antiTruncation.name, calls: antiTruncation.calls}
+				emit = antiTruncation.emitter(emit)
+			}
+			err := decodeStream(observeStreamActivity(ctx, response.Body), emit)
+			if antiTruncation != nil {
+				return antiTruncation.complete(err)
+			}
+			return err
 		}
-		err := decodeStream(observeStreamActivity(ctx, response.Body), emit)
-		if antiTruncation != nil {
-			err = antiTruncation.complete(err)
+		err := decodeResponse()
+		for regenerated := 0; regenerated < regenerations && regenerable(ctx, err, finish, committed); regenerated++ {
+			stopClose()
+			_ = response.Body.Close()
+			if response, decodeStream, err = sendRequest(); err != nil {
+				if ctx.Err() == nil {
+					_ = send(Event{Kind: EventError, Err: err})
+				}
+				return
+			}
+			stopClose = closeOnCancel(response)
+			usage, finish, sources = nil, nil, nil
+			matcher = newStopSequenceMatcher(request.Config.StopSequences)
+			err = decodeResponse()
+		}
+		if releaseSources() != nil {
+			return
 		}
 		if errors.Is(err, errStopSequenceMatched) {
 			_ = response.Body.Close()
@@ -941,6 +997,20 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 		}
 	}()
 	return contract.forward(ctx, events), nil
+}
+
+// regenerable 表示上游以函数调用格式错误、意外的工具调用或响应格式异常结束、流在完成帧之前中断或流尾为 5xx 错误，且本次生成还没有不能丢弃的输出
+func regenerable(ctx context.Context, err error, finish *Event, committed bool) bool {
+	if err != nil {
+		var interrupted *StreamInterruptedError
+		var rpcError *RPCError
+		if ctx.Err() != nil || !errors.As(err, &interrupted) && !(errors.As(err, &rpcError) && rpcError.StatusCode >= http.StatusInternalServerError) {
+			return false
+		}
+	} else if finish == nil || finish.FinishReason != "malformed_function_call" && finish.FinishReason != "unexpected_tool_call" && finish.FinishReason != "malformed_response" {
+		return false
+	}
+	return !committed
 }
 
 // countStopInput 并发计数请求输入，供本地命中 stop sequence 后补全用量

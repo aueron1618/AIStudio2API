@@ -29,7 +29,7 @@ REQUEST_BODY_LOG=false
 - 账户 DOM、JS 原型和 Cookie 相互隔离，不共享可变页面状态。
 - 大日志折叠时卸载详情；请求正文显式加载，关闭或切换记录时取消未完成的请求并释放原文与格式化副本。
 - 默认不记录请求正文；启用后使用 gzip 压缩存储，但不加密。旧正文在事务中迁移，失败时保留原数据。
-- `no-browser` Docker 目标保留 HTTP Cookie 导入与 SpiderMonkey，不包含 Camoufox 的系统依赖；完整 `runtime` 目标仍支持浏览器功能。
+- `no-browser` Docker 目标保留 HTTP Cookie 导入与 SpiderMonkey，不包含 Camoufox 的系统依赖；默认 `browser` 目标支持浏览器功能。CI 的 `release-no-browser` / `release-browser` 复用同次构建的静态发行程序，运行时边界相同。
 
 ## 取舍与测量
 

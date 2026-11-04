@@ -18,6 +18,17 @@ type retryTestService struct {
 	generate func(context.Context, aistudio.GenerateRequest) (<-chan aistudio.Event, error)
 }
 
+type videoScopeTestService struct {
+	aistudio.Service
+	aistudio.VideoService
+	taskContext func() (context.Context, context.CancelFunc, error)
+}
+
+func (service *videoScopeTestService) GenerateVideo(_ context.Context, request aistudio.VideoRequest) (aistudio.VideoOperation, error) {
+	service.taskContext = request.TaskContext
+	return aistudio.VideoOperation{ID: "offline-video"}, nil
+}
+
 func (service retryTestService) Generate(ctx context.Context, request aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
 	return service.generate(ctx, request)
 }
@@ -118,7 +129,10 @@ func TestGenerateWithRetryStreamInterruption(t *testing.T) {
 				}
 				service.requests.start(request, cancel)
 				events := make(chan aistudio.Event)
-				go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", service.pool.AcquireFor, events)
+				acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool) (*aistudio.AccountLease, error) {
+					return service.pool.AcquireFor(ctx, selection)
+				}
+				go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
 				var text strings.Builder
 				var responseErr error
 				for event := range events {
@@ -171,7 +185,10 @@ func TestGenerateWithRetryCancellation(t *testing.T) {
 			request := aistudio.GenerateRequest{ID: "cancel-test", Model: "shared", Unary: unary}
 			service.requests.start(request, cancel)
 			events := make(chan aistudio.Event)
-			go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", service.pool.AcquireFor, events)
+			acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool) (*aistudio.AccountLease, error) {
+				return service.pool.AcquireFor(ctx, selection)
+			}
+			go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
 			select {
 			case <-firstSent:
 			case <-ctx.Done():
@@ -213,5 +230,62 @@ func TestCollectGenerateEventsCancellationDuringDrain(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("drain waited indefinitely for upstream closure")
+	}
+}
+
+func TestVideoTaskPreservesRequestScope(t *testing.T) {
+	for _, channel := range []aistudio.Channel{aistudio.ChannelPlayground, aistudio.ChannelBuild} {
+		t.Run(string(channel), func(t *testing.T) {
+			service := retryTestRuntime(t, nil)
+			video := &videoScopeTestService{}
+			service.service = video
+			service.timeout = 5 * time.Second
+			dataCtx, stopData := context.WithCancel(t.Context())
+			defer stopData()
+			service.dataContext = dataCtx
+			service.state.Store(serviceRunning)
+			service.pool.SetAPIKeyAccounts(map[string][]string{"limited": {"a@example.test"}})
+			model := aistudio.Model{ID: "shared", Methods: []string{"generateContent"}, CapabilityOptions: map[string][]string{"video_output_resolutions": {"720p"}}}
+			for _, id := range []string{"a@example.test", "b@example.test"} {
+				if err := service.pool.SetCatalog(id, aistudio.BenefitTierFree, []aistudio.Model{model}); err != nil {
+					t.Fatal(err)
+				}
+				if err := service.pool.SetBuildCatalog(id, []aistudio.Model{model}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancelRequest := context.WithCancel(aistudio.ContextWithAPIKey(aistudio.ContextWithChannel(t.Context(), channel), "limited"))
+			defer cancelRequest()
+			if _, err := service.GenerateVideo(ctx, aistudio.VideoRequest{Model: model.ID, Prompt: "offline test"}); err != nil {
+				t.Fatal(err)
+			}
+			cancelRequest()
+			taskCtx, cancelTask, err := video.taskContext()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cancelTask()
+			if taskCtx.Err() != nil || aistudio.ChannelFromContext(taskCtx) != channel {
+				t.Fatalf("background task lost URL scope or inherited cancellation: channel=%q err=%v", aistudio.ChannelFromContext(taskCtx), taskCtx.Err())
+			}
+			selection := aistudio.AccountSelection{ModelID: model.ID, Method: "generateContent"}
+			lease, err := service.pool.AcquireFor(taskCtx, selection)
+			if err != nil || lease == nil || lease.Account().ID != "a@example.test" || lease.Channel() != channel {
+				t.Fatalf("background task lost request scope: lease=%v err=%v", lease, err)
+			}
+			if err := lease.Release(); err != nil {
+				t.Fatal(err)
+			}
+			selection.AllowedAccountIDs = []string{"b@example.test"}
+			if lease, err := service.pool.AcquireFor(taskCtx, selection); lease != nil || !errors.Is(err, aistudio.ErrNoEligibleAccount) {
+				t.Fatalf("background retry escaped key scope: lease=%v err=%v", lease, err)
+			}
+			stopData()
+			select {
+			case <-taskCtx.Done():
+			case <-time.After(time.Second):
+				t.Fatal("stopping the data service did not cancel the background task")
+			}
+		})
 	}
 }

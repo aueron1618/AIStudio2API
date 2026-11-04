@@ -159,7 +159,10 @@ export function apiKey(): string {
 
 // Keep the playground and its snippets on the model's permitted fixed URL channel.
 export function publicAPIBase(modelID: string, model?: Model): '/v1' | '/build/v1' {
-  const id = modelID.replace(/^models\//, '').replace(/\([^()]*\)$/, '')
+  const id = modelID
+    .replace(/^models\//, '')
+    .replace(/^抗截断-/, '')
+    .replace(/\([^()]*\)$/, '')
   const baseID = id.replace(/-search$/, '').replace(/\([^()]*\)$/, '')
   const catalog = useConsole().models.value
   const channels = (

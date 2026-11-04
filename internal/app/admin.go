@@ -634,12 +634,21 @@ func resetCookieAuthUser(lease *aistudio.AccountLease, prepare func(*aistudio.Ac
 
 // keepAuthExtension 在新登录状态缺少续签材料时沿用账户已有的 Chrome 来源与 OAuth 材料
 func keepAuthExtension(next *aistudio.StorageState, current aistudio.StorageState) error {
-	if _, exists, err := next.AuthExtension(); err != nil || exists {
+	nextExtension, nextExists, err := next.AuthExtension()
+	if err != nil || nextExtension.OAuth != nil {
 		return err
 	}
 	extension, exists, err := current.AuthExtension()
 	if err != nil || !exists {
 		return err
+	}
+	if nextExists {
+		if extension.OAuth == nil {
+			return nil
+		}
+		if nextExtension.Source.Email != "" && extension.Source.Email != "" && !strings.EqualFold(nextExtension.Source.Email, extension.Source.Email) {
+			return nil
+		}
 	}
 	next.SetAuthExtension(extension)
 	return nil
@@ -883,7 +892,7 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 		AntiTruncation:      value.AntiTruncation,
 		AutoContinuation:    autoContinuation,
 		ContinuationRewrite: value.ContinuationRewrite, ContinuationPrompt: strings.TrimSpace(value.ContinuationPrompt),
-		FirstEventHedge: strings.ToLower(strings.TrimSpace(value.FirstEventHedge)), AuthStates: value.AuthStates, ListenAddr: value.ListenAddr, PreviewListenAddr: value.PreviewListenAddr,
+		FirstEventHedge: strings.ToLower(strings.TrimSpace(value.FirstEventHedge)), FirstEventHedgeModels: strings.TrimSpace(value.FirstEventHedgeModels), AuthStates: value.AuthStates, ListenAddr: value.ListenAddr, PreviewListenAddr: value.PreviewListenAddr,
 		ProxyAPIKey: value.APIKey, Proxy: value.Proxy, InitTimeout: initTimeout, RequestTimeout: requestTimeout,
 		WarmWorkerLimit: value.WarmWorkerLimit, MaxActiveWorkers: value.MaxActiveWorkers,
 		WarmStartupConcurrency: value.WarmStartupConcurrency,
@@ -892,19 +901,19 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 		UpstreamChannels:       value.UpstreamChannels,
 		ModelMapping:           strings.TrimSpace(value.ModelMapping),
 		ModelChannels:          strings.TrimSpace(value.ModelChannels),
+		APIKeyAccounts:         strings.TrimSpace(value.APIKeyAccounts),
 		TemporaryChat:          value.TemporaryChat,
 		WAABackend:             value.WAABackend,
 		MediaOutput:            strings.ToLower(strings.TrimSpace(value.MediaOutput)),
 		MediaBaseURL:           strings.TrimSpace(value.MediaBaseURL),
-	}
+	}.KeepEnvironment(saved)
 	if err := cfg.Validate(); err != nil {
 		return api.RuntimeConfig{}, invalidConfigError(err)
 	}
 	if err := cfg.Save(admin.configPath); err != nil {
 		return api.RuntimeConfig{}, err
 	}
-	admin.pool.SetRoutingStrategy(cfg.RoutingStrategy)
-	admin.pool.SetModelChannels(modelChannels(cfg.ModelChannels))
+	admin.applyRoutingConfig(cfg.RoutingStrategy, cfg.ModelChannels)
 	admin.service.SetAutoContinuation(cfg.AutoContinuation)
 	admin.requests.log("service", "INFO", "服务配置已保存")
 	models, _ := admin.CatalogModels(context.Background())
@@ -913,6 +922,11 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 	value.ActiveProxy = admin.config.Proxy
 	value.ProxyPool = admin.proxyPoolStatus()
 	return value, nil
+}
+
+func (admin *runtimeAdmin) applyRoutingConfig(strategy, channels string) {
+	admin.pool.SetRoutingStrategy(strategy)
+	admin.pool.SetModelChannels(modelChannels(channels))
 }
 
 func (admin *runtimeAdmin) Cooldowns(context.Context) ([]api.AdminCooldown, error) {
@@ -1184,7 +1198,7 @@ func runtimeConfigDTO(cfg config.Config) api.RuntimeConfig {
 		AntiTruncation:      cfg.AntiTruncation,
 		AutoContinuation:    &cfg.AutoContinuation,
 		ContinuationRewrite: cfg.ContinuationRewrite, ContinuationPrompt: cfg.ContinuationPrompt,
-		FirstEventHedge: cfg.FirstEventHedge, AuthStates: cfg.AuthStates, ListenAddr: cfg.ListenAddr, APIKey: cfg.ProxyAPIKey,
+		FirstEventHedge: cfg.FirstEventHedge, FirstEventHedgeModels: cfg.FirstEventHedgeModels, AuthStates: cfg.AuthStates, ListenAddr: cfg.ListenAddr, APIKey: cfg.ProxyAPIKey,
 		ActiveListenAddr: cfg.ListenAddr, ActiveAPIKey: cfg.ProxyAPIKey,
 		PreviewListenAddr: cfg.PreviewListenAddr, ActivePreviewListenAddr: cfg.PreviewListenAddr,
 		Proxy: cfg.Proxy, InitTimeout: cfg.InitTimeout.String(), RequestTimeout: cfg.RequestTimeout.String(),
@@ -1195,11 +1209,23 @@ func runtimeConfigDTO(cfg config.Config) api.RuntimeConfig {
 		UpstreamChannels:       cfg.UpstreamChannels,
 		ModelMapping:           cfg.ModelMapping,
 		ModelChannels:          cfg.ModelChannels,
+		APIKeyAccounts:         cfg.APIKeyAccounts,
 		TemporaryChat:          cfg.TemporaryChat,
 		WAABackend:             cfg.WAABackend,
 		MediaOutput:            cfg.MediaOutput,
 		MediaBaseURL:           cfg.MediaBaseURL,
+		Environment:            append([]string{}, cfg.Environment...),
+		Invalid:                invalidConfigDTO(cfg.Invalid),
 	}
+}
+
+// invalidConfigDTO 把加载时无效的配置项转为管理接口的表示
+func invalidConfigDTO(values []config.InvalidValue) []api.InvalidConfigValue {
+	result := make([]api.InvalidConfigValue, 0, len(values))
+	for _, value := range values {
+		result = append(result, api.InvalidConfigValue{Key: value.Key, Value: value.Value, Reason: value.Reason})
+	}
+	return result
 }
 
 var _ generationAdmin = (*runtimeAdmin)(nil)

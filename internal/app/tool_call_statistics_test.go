@@ -86,7 +86,10 @@ func TestTrackedAntiTruncationToolStatistics(t *testing.T) {
 					ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 					service.requests.start(request, cancel)
 					events := make(chan aistudio.Event)
-					go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", service.pool.AcquireFor, events)
+					acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool) (*aistudio.AccountLease, error) {
+						return service.pool.AcquireFor(ctx, selection)
+					}
+					go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
 					return events, nil
 				}}, api.Config{Admin: admin, AntiTruncation: func() bool { return true }})
 				body := fmt.Sprintf(`{"model":"\u6297\u622a\u65ad-shared","messages":[{"role":"user","content":"hi"}],"stream":%t}`, stream)
@@ -119,6 +122,46 @@ func TestTrackedAntiTruncationToolStatistics(t *testing.T) {
 				assertRetryLeasesReleased(t, service)
 			})
 		}
+	}
+}
+
+func TestStreamToolStatisticsPublishedBeforeSourceClose(t *testing.T) {
+	source := make(chan aistudio.Event, 2)
+	source <- aistudio.Event{Kind: aistudio.EventText, Text: "answer", AntiTruncationToolCalls: 1}
+	source <- aistudio.Event{Kind: aistudio.EventError, Err: errors.New("fixture terminal error"), AntiTruncationToolCalls: 1}
+	service := retryTestRuntime(t, func(context.Context, aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
+		return source, nil
+	})
+	done := make(chan struct{})
+	defer func() {
+		close(source)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("tracked stream did not release its lease")
+		}
+	}()
+	admin := &toolStatisticsAdmin{}
+	handler := api.NewHandler(retryTestService{generate: func(ctx context.Context, request aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
+		// Keep the upstream open so the handler must observe statistics before draining.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		service.requests.start(request, cancel)
+		events := make(chan aistudio.Event)
+		acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool) (*aistudio.AccountLease, error) {
+			return service.pool.AcquireFor(ctx, selection)
+		}
+		go func() {
+			service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
+			close(done)
+		}()
+		return events, nil
+	}}, api.Config{Admin: admin, AntiTruncation: func() bool { return true }})
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"\u6297\u622a\u65ad-shared","messages":[{"role":"user","content":"hello"}],"stream":true}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	observed := admin.entry
+	if observed.ToolCalls != 1 || observed.Error == "" {
+		t.Fatalf("terminal response raced ahead of statistics: calls=%d error=%q", observed.ToolCalls, observed.Error)
 	}
 }
 

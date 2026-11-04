@@ -1,7 +1,7 @@
 FROM --platform=$BUILDPLATFORM node:24.15.0-bookworm-slim AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci
 COPY web/ ./
 RUN npm run build
 
@@ -17,10 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends xz-utils && rm 
     && curl -fsSL https://github.com/Mag1cFall/firefox/releases/download/$SPIDERMONKEY/spidermonkey-$SPIDERMONKEY-linux-$TARGETARCH.tar.gz | tar -xz -C /opt/spidermonkey
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 COPY --from=web /src/internal/webui/dist internal/webui/dist
-RUN target=$([ "$TARGETARCH" = arm64 ] && echo aarch64 || echo x86_64) \
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    target=$([ "$TARGETARCH" = arm64 ] && echo aarch64 || echo x86_64) \
     && CGO_ENABLED=1 GOOS=linux GOARCH=$TARGETARCH \
     CC="/opt/zig/zig cc -target $target-linux-musl" CXX="/opt/zig/zig c++ -target $target-linux-musl" \
     CGO_CXXFLAGS=-I/opt/spidermonkey/include CGO_LDFLAGS=-L/opt/spidermonkey/lib \
@@ -39,6 +40,11 @@ CMD ["aistudio2api", "-open-ui=false"]
 
 FROM runtime-base AS no-browser
 COPY --from=build /out/aistudio2api /usr/local/bin/aistudio2api
+
+# CI reuses the versioned, statically linked Linux package for each architecture.
+FROM runtime-base AS release-no-browser
+ARG TARGETARCH
+COPY release/linux-$TARGETARCH/aistudio2api /usr/local/bin/aistudio2api
 
 # Download on the build platform; select the browser archive for the target platform.
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS browser-download
@@ -69,13 +75,19 @@ RUN set -eu; \
     rm -rf /opt/camoufox/fonts/macos /opt/camoufox/fontconfig/macos; \
     rm /tmp/camoufox.zip /tmp/camoufox-download.go
 
-# Keep the browser-enabled image as the default docker build target.
-FROM runtime-base AS browser
+FROM runtime-base AS runtime-browser
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgtk-3-0 libasound2 libnss3 libdbus-glib-1-2 libxtst6 libxrandr2 libgbm1 libxkbcommon0 \
     libpango-1.0-0 libcairo2 libxcomposite1 libxdamage1 libxfixes3 libx11-xcb1 \
     xvfb libfontconfig1 libegl1 libgl1 libgl1-mesa-dri libglx-mesa0 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /out/aistudio2api /usr/local/bin/aistudio2api
 COPY --from=browser-download /opt/camoufox /opt/camoufox
 ENV CAMOUFOX_PATH=/opt/camoufox/camoufox-bin
+
+FROM runtime-browser AS release-browser
+ARG TARGETARCH
+COPY release/linux-$TARGETARCH/aistudio2api /usr/local/bin/aistudio2api
+
+# Keep the browser-enabled source build as the default docker build target.
+FROM runtime-browser AS browser
+COPY --from=build /out/aistudio2api /usr/local/bin/aistudio2api
