@@ -41,7 +41,7 @@ const rollupColumns = `
  state TEXT NOT NULL, status INTEGER NOT NULL, requests INTEGER NOT NULL,
  input_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, reply_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL,
  duration_ms INTEGER NOT NULL, first_event_ms INTEGER NOT NULL, first_events INTEGER NOT NULL, queue_ms INTEGER NOT NULL,
- duration_hist BLOB NOT NULL, first_event_hist BLOB NOT NULL, last_time INTEGER NOT NULL, cached_tokens INTEGER NOT NULL,
+ duration_hist BLOB NOT NULL, first_event_hist BLOB NOT NULL, last_time INTEGER NOT NULL, cached_tokens INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY (start, model, account, channel, protocol, state, status)`
 
 const schema = `
@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS requests (
  input_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, reply_tokens INTEGER NOT NULL,
  total_tokens INTEGER NOT NULL, tool_calls INTEGER NOT NULL, error TEXT NOT NULL, attempts TEXT NOT NULL,
  cached_tokens INTEGER NOT NULL DEFAULT 0,
- requested_model TEXT NOT NULL DEFAULT '', response_model TEXT NOT NULL DEFAULT '');
+ requested_model TEXT NOT NULL DEFAULT '', response_model TEXT NOT NULL DEFAULT '',
+ average_tokens_per_second REAL NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS requests_time ON requests(time);
 CREATE INDEX IF NOT EXISTS requests_model_time ON requests(model, time);
 CREATE INDEX IF NOT EXISTS requests_account_time ON requests(account, time);
@@ -65,28 +66,29 @@ CREATE TABLE IF NOT EXISTS request_bodies (
 
 // Row 是一次完成请求的用量记录
 type Row struct {
-	ID              string
-	Time            time.Time
-	Protocol        string
-	Path            string
-	Model           string
-	RequestedModel  string
-	ResponseModel   string
-	Account         string
-	Channel         string
-	Status          int
-	State           string
-	Duration        time.Duration
-	FirstEvent      time.Duration
-	Queue           time.Duration
-	InputTokens     int64
-	CachedTokens    int64
-	ReasoningTokens int64
-	ReplyTokens     int64
-	TotalTokens     int64
-	ToolCalls       int
-	Error           string
-	Attempts        []api.RequestAttempt
+	ID                     string
+	Time                   time.Time
+	Protocol               string
+	Path                   string
+	Model                  string
+	RequestedModel         string
+	ResponseModel          string
+	Account                string
+	Channel                string
+	Status                 int
+	State                  string
+	Duration               time.Duration
+	FirstEvent             time.Duration
+	Queue                  time.Duration
+	InputTokens            int64
+	CachedTokens           int64
+	ReasoningTokens        int64
+	ReplyTokens            int64
+	TotalTokens            int64
+	ToolCalls              int
+	AverageTokensPerSecond float64
+	Error                  string
+	Attempts               []api.RequestAttempt
 }
 
 // write 是写入协程处理的一条用量或正文
@@ -115,103 +117,17 @@ func Open(path string, log Logger) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sqlitedb.Open(path)
+	db, err := sqlitedb.Open(path, schema)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("初始化请求账本: %w", err)
 	}
 	db.SetMaxOpenConns(4)
-	if _, err := db.Exec(schema); err != nil {
-		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
-	}
-	for _, column := range []string{"requested_model", "response_model"} {
-		var exists bool
-		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)`, column).Scan(&exists); err != nil {
-			return nil, errors.Join(fmt.Errorf("inspect request column %s: %w", column, err), db.Close())
-		}
-		if !exists {
-			if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
-				return nil, errors.Join(fmt.Errorf("add request column %s: %w", column, err), db.Close())
-			}
-		}
-	}
-	if err := addCachedTokens(db); err != nil {
-		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
-	}
-	if err := migrateBodies(db); err != nil {
-		return nil, errors.Join(fmt.Errorf("migrate request bodies: %w", err), db.Close())
-	}
 	store := &Store{db: db, writes: make(chan write, queueLimit), done: make(chan struct{}), log: log}
 	if err := store.alignDays(); err != nil {
 		return nil, errors.Join(fmt.Errorf("重建本地日汇总: %w", err), db.Close())
 	}
 	go store.run()
 	return store, nil
-}
-
-// addCachedTokens 为没有缓存 token 列的请求与汇总表追加该列，已有记录计为 0
-func addCachedTokens(db *sql.DB) error {
-	for _, table := range []string{"requests", "hours", "days"} {
-		var exists bool
-		if err := db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info(?) WHERE name = 'cached_tokens'`, table).Scan(&exists); err != nil {
-			return err
-		}
-		if !exists {
-			if _, err := db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0`); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// migrateBodies replaces the legacy plaintext table only after every body is copied.
-func migrateBodies(db *sql.DB) error {
-	var exists bool
-	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='bodies')`).Scan(&exists); err != nil || !exists {
-		return err
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var sequence int64
-	if err := tx.QueryRow(`SELECT COALESCE(MIN(seq),0) - (SELECT count(*) FROM bodies) FROM request_bodies`).Scan(&sequence); err != nil {
-		return err
-	}
-	rows, err := tx.Query(`SELECT id,time,request,request_size,response,response_size FROM bodies ORDER BY time,id`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, request, response string
-		var at, requestSize, responseSize int64
-		if err := rows.Scan(&id, &at, &request, &requestSize, &response, &responseSize); err != nil {
-			return err
-		}
-		compressedRequest, err := compress(request)
-		if err != nil {
-			return err
-		}
-		compressedResponse, err := compress(response)
-		if err != nil {
-			return err
-		}
-		// Legacy bodies precede already-written native bodies in the retention order.
-		if _, err := tx.Exec(`INSERT INTO request_bodies (seq,id,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
-			sequence, id, at, compressedRequest, requestSize, compressedResponse, responseSize); err != nil {
-			return err
-		}
-		sequence++
-	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DROP TABLE bodies`); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 // Close 写完已排队的记录后关闭数据库
@@ -368,11 +284,11 @@ func (store *Store) write(batch []write) (err error) {
 			result, err := tx.Exec(`INSERT OR IGNORE INTO requests (
  id, time, protocol, path, model, account, channel, status, state,
  duration_ms, first_event_ms, queue_ms, input_tokens, reasoning_tokens, reply_tokens, total_tokens, tool_calls, error, attempts,
- cached_tokens, requested_model, response_model) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+ cached_tokens, requested_model, response_model, average_tokens_per_second) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				row.ID, row.Time.UnixMilli(), row.Protocol, row.Path, row.Model, row.Account, row.Channel, row.Status, row.State,
 				row.Duration.Milliseconds(), row.FirstEvent.Milliseconds(), row.Queue.Milliseconds(),
 				row.InputTokens, row.ReasoningTokens, row.ReplyTokens, row.TotalTokens, row.ToolCalls, row.Error, string(encoded),
-				row.CachedTokens, row.RequestedModel, row.ResponseModel)
+				row.CachedTokens, row.RequestedModel, row.ResponseModel, row.AverageTokensPerSecond)
 			if err != nil {
 				return err
 			}

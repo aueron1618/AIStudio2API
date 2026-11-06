@@ -909,22 +909,29 @@ func (manager *accountWorkerManager) ProtocolHeaders(ctx context.Context, accoun
 
 // waitOpening 等待账户正在启动的常驻 Worker 结束启动
 func (manager *accountWorkerManager) waitOpening(ctx context.Context, accountID string) error {
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		manager.rebalanceMu.Lock()
-		opening := manager.openings[accountID]
-		manager.rebalanceMu.Unlock()
-		if opening == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-opening:
-		}
+	manager.rebalanceMu.Lock()
+	opening := manager.openings[accountID]
+	manager.rebalanceMu.Unlock()
+	if opening == nil {
+		return nil
 	}
+	endWait := beginOpeningWait(ctx)
+	defer endWait()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-opening:
+		return nil
+	}
+}
+
+// beginOpeningWait 把 ctx 中的账户租约标记为等待 Worker 启动占位，让启动中的认证续签不等待它，ctx 没有租约时为空操作
+func beginOpeningWait(ctx context.Context) func() {
+	lease, ok := aistudio.AccountLeaseFromContext(ctx)
+	if !ok {
+		return func() {}
+	}
+	return lease.BeginOpeningWait()
 }
 
 // residentWorker 返回账户已就绪的常驻 Worker，没有时返回 nil
@@ -1543,10 +1550,13 @@ func (manager *accountWorkerManager) ensureWorker(
 			if !waitForOpening {
 				return nil, errAccountWorkerOpening
 			}
+			endWait := beginOpeningWait(ctx)
 			select {
 			case <-ctx.Done():
+				endWait()
 				return nil, ctx.Err()
 			case <-opening:
+				endWait()
 				continue
 			}
 		}

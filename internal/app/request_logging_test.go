@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
 )
 
@@ -25,6 +26,22 @@ func TestRequestRowModelFields(t *testing.T) {
 				t.Fatalf("request log model=%q want=%q", data.Model, tc.model)
 			}
 		})
+	}
+}
+
+func TestRequestRowReusesAverageTokensPerSecond(t *testing.T) {
+	for _, latency := range []time.Duration{0, -time.Second, time.Second + 500*time.Microsecond} {
+		entry := api.AccessLog{Status: 200, Latency: latency, FirstEvent: 700 * time.Millisecond,
+			Usage: &aistudio.Usage{OutputTokens: 20, ReasoningTokens: 5}}
+		data := requestLogData(entry)
+		row := requestRow(entry, time.Now())
+		want := 0.0
+		if latency > 0 {
+			want = 25 / latency.Seconds()
+		}
+		if row.AverageTokensPerSecond != data.Usage.AverageTokensPerSecond || row.AverageTokensPerSecond != want {
+			t.Fatalf("average changed between log and ledger: row=%v log=%v want=%v", row.AverageTokensPerSecond, data.Usage.AverageTokensPerSecond, want)
+		}
 	}
 }
 

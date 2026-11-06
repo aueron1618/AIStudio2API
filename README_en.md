@@ -102,10 +102,10 @@ The three projects connect to AI Studio, the Gemini web app and Antigravity, and
 ## System Requirements
 
 - **Windows Release Runtime**: Windows 10 or later; on systems without the WebView2 Runtime, the desktop app asks whether to download it from Microsoft and installs it with the Microsoft installer showing its progress, then opens its window; if you cancel or the installation fails, it opens the management UI in the default browser
-- **macOS Desktop App**: macOS 12 or later, universal for Apple silicon and Intel
+- **macOS Desktop App**: macOS 13 or later, universal for Apple silicon and Intel
 - **Linux Desktop App**: Built on Ubuntu 22.04 with GTK 3 and WebKit2GTK 4.1, for systems such as Ubuntu 22.04, Debian 12, or later. The deb installs these and the Camoufox libraries; the AppImage also needs the Camoufox libraries listed on the next line
 - **Linux Release Runtime**: Extract `aistudio2api-<version>-linux-<amd64-or-arm64>.tar.gz`, enter the matching directory, and run `./aistudio2api`. Camoufox needs the Firefox system libraries and Xvfb; on Debian/Ubuntu run `sudo apt-get update && sudo apt-get satisfy -y "libgtk-3-0, libasound2t64 | libasound2, libx11-xcb1, xvfb"`
-- **Source Build**: Go 1.27+, Node.js 24.15 with npm 11 recommended, and CGO enabled. Use UCRT clang from [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releases) on Windows, Xcode Command Line Tools on macOS, or [Zig](https://ziglang.org/download/) 0.16 on Linux, plus the platform's SpiderMonkey static library from [Mag1cFall/firefox Releases](https://github.com/Mag1cFall/firefox/releases)
+- **Source Build**: Go 1.27+, Node.js 24.15 with npm 11 recommended, and CGO enabled. Use UCRT clang from [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releases) on Windows, Xcode Command Line Tools on macOS, or [Zig](https://ziglang.org/download/) 0.16 on Linux, plus the platform's SpiderMonkey and libwebp static libraries from the Releases of [Mag1cFall/firefox](https://github.com/Mag1cFall/firefox/releases) and [Mag1cFall/libwebp](https://github.com/Mag1cFall/libwebp/releases)
 - **Operating System**: Windows, macOS, Linux
 - **Memory**: In-process SpiderMonkey with no resident Workers by default; cold starts and large contexts require extra memory. The native JS heap is not directly limited by Go's `GOMEMLIMIT`, so monitor process RSS. See [runtime memory](docs/memory.md) (Chinese).
 - **Network**: Stable internet connection to Google AI Studio
@@ -133,11 +133,14 @@ cd ..
 mkdir spidermonkey
 curl.exe -L -o spidermonkey\windows.tar.gz https://github.com/Mag1cFall/firefox/releases/download/v152.0.4-aistudio2api.1/spidermonkey-v152.0.4-aistudio2api.1-windows-amd64.tar.gz
 tar -xzf spidermonkey\windows.tar.gz -C spidermonkey
+mkdir libwebp
+curl.exe -L -o libwebp\libwebp.tar.gz https://github.com/Mag1cFall/libwebp/releases/download/v1.6.0-aistudio2api.1/libwebp-v1.6.0-aistudio2api.1-windows-amd64.tar.gz
+tar -xzf libwebp\libwebp.tar.gz -C libwebp
 $env:CC = "x86_64-w64-mingw32-clang"
 $env:CXX = "x86_64-w64-mingw32-clang++"
 $env:CGO_ENABLED = "1"
-$env:CGO_CXXFLAGS = "-I$PWD\spidermonkey\include"
-$env:CGO_LDFLAGS = "-L$PWD\spidermonkey\lib"
+$env:CGO_CPPFLAGS = "-I$PWD\spidermonkey\include -I$PWD\libwebp\include"
+$env:CGO_LDFLAGS = "-L$PWD\spidermonkey\lib -L$PWD\libwebp\lib"
 go build -tags desktop,production -ldflags="-H windowsgui" -o aistudio2api.exe ./cmd/aistudio2api
 .\aistudio2api.exe
 ```
@@ -202,7 +205,9 @@ arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 platform=$([ "$(uname -s)" = Darwin ] && echo darwin || echo linux)
 mkdir -p spidermonkey
 curl -L https://github.com/Mag1cFall/firefox/releases/download/v152.0.4-aistudio2api.1/spidermonkey-v152.0.4-aistudio2api.1-$platform-$arch.tar.gz | tar -xz -C spidermonkey
-export CGO_ENABLED=1 CGO_CXXFLAGS="-I$PWD/spidermonkey/include" CGO_LDFLAGS="-L$PWD/spidermonkey/lib"
+mkdir -p libwebp
+curl -L https://github.com/Mag1cFall/libwebp/releases/download/v1.6.0-aistudio2api.1/libwebp-v1.6.0-aistudio2api.1-$platform-$arch.tar.gz | tar -xz -C libwebp
+export CGO_ENABLED=1 CGO_CPPFLAGS="-I$PWD/spidermonkey/include -I$PWD/libwebp/include" CGO_LDFLAGS="-L$PWD/spidermonkey/lib -L$PWD/libwebp/lib"
 if [ "$platform" = darwin ]; then
   go build -o aistudio2api ./cmd/aistudio2api
 else
@@ -241,7 +246,7 @@ Two image variants are available. Both default to in-process SpiderMonkey and a 
 
 The browser variant bundles the matching Camoufox for the target architecture, Windows fonts, fontconfig, Xvfb and software GL libraries at build time; unused macOS fonts and fontconfig are removed. `CAMOUFOX_PATH=/opt/camoufox/camoufox-bin` avoids runtime downloads for sign-in, browser-based cookie verification and the browser backend. Bundling the browser does not launch it. This variant requires GitHub Releases access during the build and includes the full browser size.
 
-The no-browser variant contains the application (including statically linked SpiderMonkey), system certificates and timezone data, without Camoufox, its fonts or GTK/Xvfb/GL dependencies. Its build does not download a browser. Keep `WAA_BACKEND=spidermonkey` and add accounts through **HTTP cookie verification**, existing authentication files or remote pairing. Browser sign-in, default browser-based cookie verification and `WAA_BACKEND=camoufox` require the bundled-browser variant. The no-browser image does not disable the application's on-demand downloader; do not invoke those browser features in this variant.
+The no-browser variant contains the application (including statically linked SpiderMonkey and libwebp), system certificates and timezone data, without Camoufox, its fonts or GTK/Xvfb/GL dependencies. Its build does not download a browser. Keep `WAA_BACKEND=spidermonkey` and add accounts through **HTTP cookie verification**, existing authentication files or remote pairing. Browser sign-in, default browser-based cookie verification and `WAA_BACKEND=camoufox` require the bundled-browser variant. The no-browser image does not disable the application's on-demand downloader; do not invoke those browser features in this variant.
 
 Pushes to this repository's `main` and `v*` tags build and publish separate multi-architecture images for both variants at `ghcr.io/aueron1618/aistudio2api`. A `main` push updates `latest` / `latest-no-browser` and creates the corresponding `main-<6-char SHA>` tags. Stable version tags also update latest; prerelease tags do not. The workflow does not generate bare `main` or `main-no-browser` tags, and latest is not stable-release-only; use a version tag or digest to pin a deployment. CI reuses the Linux static packages from the same run instead of rebuilding the frontend and Go binary. Every variant and architecture runs an offline, read-only smoke test, and each variant manifest requires both architecture digests. HTML previews also use port `2050`.
 
@@ -609,11 +614,13 @@ AIStudio2API/
 │   ├── setup/               # Account import and isolated-login CLI
 │   ├── aistudio/            # AI Studio protocol, authentication, models, and media
 │   ├── api/                 # OpenAI, Responses, Anthropic, and Gemini adapters
+│   ├── imagecodec/          # JPEG decoding, CatmullRom scaling, PNG and libwebp WebP encoding
+│   ├── resample/            # Kaiser-window sinc polyphase resampling for speech PCM
 │   ├── waa/                 # SpiderMonkey WAA runtime
 │   ├── camoufoxnative/      # Camoufox BiDi, login, and WAA workers
 │   ├── chromeauth/          # Windows Chrome and DBSC import
 │   ├── proxydial/           # Dialing and relaying through global and per-account proxies
-│   ├── sqlitedb/            # Local SQLite database
+│   ├── sqlitedb/            # SQLite opening, schema synchronization, and free-page reclamation
 │   ├── requestdb/           # Request usage, rollups, and body ledger
 │   ├── statedb/             # Terminal Responses / Interactions continuation state
 │   ├── promptdb/            # API playground conversation storage
@@ -689,7 +696,7 @@ Process environment variables override the same keys in `.env`, and those settin
 | `FIRST_EVENT_HEDGE` | `auto` | When a request has no first token for a while, send a backup request on an idle account (another account first, otherwise a free slot on the same account); the first to answer continues and the other is cancelled. `auto` waits for the p95 of each model and channel over the last 24 hours, and models with fewer than 20 requests are not hedged; a positive integer is the wait in seconds, and choosing Custom in settings fills in the recent p95 of the busiest model |
 | `FIRST_EVENT_HEDGE_MODELS` | `gemini-4-argon` | Comma-separated model IDs that get backup requests when `FIRST_EVENT_HEDGE` is not `off`; backup requests also count against account quota |
 | `WAA_BACKEND` | `spidermonkey` | Run WAA in-process without a browser; `camoufox` remains optional, and legacy `go` settings migrate automatically |
-| `MEDIA_OUTPUT` | `inline` | How Chat Completions and Messages include generated images and audio: `inline` embeds a data URI; `url` saves the file under `runtime/media/`, named by its content, and links to it at `/media/<file>` on this service, a path that does not check the API key |
+| `MEDIA_OUTPUT` | `inline` | How Chat Completions and Messages include generated images and audio: `inline` embeds a data URI; `url` saves the file under `runtime/media/`, named by its content, and links to it at `/media/<file>` on this service, a path that does not check the API key; when the directory exceeds 1 GiB, the least recently used files are deleted first |
 | `MEDIA_BASE_URL` | empty | Service address used in media URLs, such as `https://ai.example.com`; empty uses the address of each request and follows `X-Forwarded-Proto` behind a reverse proxy |
 
 The service loads all account metadata without creating resident workers by default. Saving the four capacity settings applies them to subsequent scheduling immediately. Startup concurrency limits both SpiderMonkey and Camoufox; lowering the peak limit closes extra idle workers, and raising the resident count prewarms more. Low-memory defaults do not overwrite saved user settings.

@@ -127,7 +127,11 @@ func (admin *runtimeAdmin) CreateAccount(ctx context.Context, input api.AccountC
 	if locale := strings.TrimSpace(input.Locale); locale != "" {
 		accountConfig.Locale = locale
 	}
-	if timezone := strings.TrimSpace(input.Timezone); timezone != "" {
+	timezone, err := accountTimezone(input.Timezone)
+	if err != nil {
+		return api.AdminAccount{}, invalidAccount(err)
+	}
+	if timezone != "" {
 		accountConfig.Timezone = timezone
 	}
 	if err := config.ValidateProxy(accountConfig.Proxy); err != nil {
@@ -313,6 +317,10 @@ func (admin *runtimeAdmin) ImportChromeAccounts(ctx context.Context, input api.C
 	if err := config.ValidateProxy(accountProxy); err != nil {
 		return nil, invalidAccount(err)
 	}
+	timezone, err := accountTimezone(input.Timezone)
+	if err != nil {
+		return nil, invalidAccount(err)
+	}
 	importChrome := admin.importChrome
 	if importChrome == nil {
 		importChrome = chromeauth.Import
@@ -346,7 +354,7 @@ func (admin *runtimeAdmin) ImportChromeAccounts(ctx context.Context, input api.C
 		} else if locale := strings.TrimSpace(result.Locale); locale != "" {
 			accountConfig.Locale = locale
 		}
-		if timezone := strings.TrimSpace(input.Timezone); timezone != "" {
+		if timezone != "" {
 			accountConfig.Timezone = timezone
 		}
 		if err := accountConfig.Validate(); err != nil {
@@ -378,6 +386,10 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 	if err := config.ValidateProxy(input.Proxy); err != nil {
 		return api.AdminAccount{}, invalidAccount(err)
 	}
+	timezone, err := accountTimezone(input.Timezone)
+	if err != nil {
+		return api.AdminAccount{}, invalidAccount(err)
+	}
 	state, err := importCookieState(input.StorageState.Cookies)
 	if err != nil {
 		return api.AdminAccount{}, invalidAccount(err)
@@ -399,7 +411,7 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 	if locale := strings.TrimSpace(input.Locale); locale != "" {
 		accountConfig.Locale = locale
 	}
-	if timezone := strings.TrimSpace(input.Timezone); timezone != "" {
+	if timezone != "" {
 		accountConfig.Timezone = timezone
 	}
 	if err := accountConfig.Validate(); err != nil {
@@ -494,7 +506,11 @@ func (admin *runtimeAdmin) UpdateAccount(ctx context.Context, accountID string, 
 	accountConfig.Enabled = input.Enabled
 	accountConfig.Proxy = strings.TrimSpace(input.Proxy)
 	accountConfig.Locale = strings.TrimSpace(input.Locale)
-	accountConfig.Timezone = strings.TrimSpace(input.Timezone)
+	timezone, err := accountTimezone(input.Timezone)
+	if err != nil {
+		return api.AdminAccount{}, invalidAccount(err)
+	}
+	accountConfig.Timezone = timezone
 	if err := accountConfig.Validate(); err != nil {
 		return api.AdminAccount{}, invalidAccount(err)
 	}
@@ -858,6 +874,18 @@ func adminAccountDTO(status aistudio.AccountStatus) api.AdminAccount {
 		Models: status.Models, BenefitTier: status.BenefitTier, Message: status.Message,
 		PairingRenewedAt: pairingRenewedAt(status.Directory),
 	}
+}
+
+// accountTimezone validates user input after removing invisible format characters.
+func accountTimezone(value string) (string, error) {
+	timezone := aistudio.NormalizeTimezone(value)
+	if timezone == "" {
+		return "", nil
+	}
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return "", fmt.Errorf("账户 timezone 无效: %q", value)
+	}
+	return timezone, nil
 }
 
 func invalidAccount(err error) error {

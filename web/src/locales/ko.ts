@@ -9,6 +9,9 @@ export const messages: Record<TranslationKey, string> = {
   'accounts.localeEnUS': '영어(미국)',
   'accounts.timezoneShanghai': '중국 표준시',
   'accounts.timezoneNewYork': '미국 동부 시간',
+  'accounts.cookieHelpTitle': '쿠키 가져오기 안내',
+  'accounts.cookieEnvironmentHelp':
+    '이 브라우저에는 입력한 언어와 시간대만 기억합니다. 쿠키, 파일 내용, 이메일 주소 또는 프록시 설정은 브라우저 환경설정에 저장하지 않습니다.',
   'accounts.cookieHelp':
     'Cookie 헤더, 여러 줄 텍스트, 확장 프로그램 JSON, storage-state JSON 및 Netscape 파일을 지원합니다. UTF-8 기준 최대 1 MiB입니다. document.cookie는 HttpOnly 쿠키를 누락하므로 전체 헤더를 복사하세요.',
   'accounts.cookieSecurity':

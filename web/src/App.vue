@@ -40,7 +40,7 @@ import UiIcon from '@/components/UiIcon.vue'
 import { useClampToggle } from '@/clamp'
 import { afterTask } from '@/lazy'
 import { readPreference, writePreference } from '@/preference'
-import { useTabParam } from '@/url'
+import { readTab, useTabParam } from '@/url'
 import { useRoute, useRouter } from 'vue-router'
 import type { IconName } from '@/icons'
 
@@ -73,7 +73,7 @@ const validTabs: TabID[] = [
   'settings',
   'version',
 ]
-const { tab: currentTab, select: selectTab } = useTabParam(validTabs, 'logs')
+const { tab: currentTab, select: selectTab } = useTabParam(validTabs, 'logs', 'app.tab')
 const router = useRouter()
 const route = useRoute()
 const sidebarCollapsed = ref(
@@ -98,8 +98,7 @@ watch(
   () => {
     mobileNavOpen.value = false
     if (route.name === 'console') {
-      const tab = route.query.tab as TabID
-      currentTab.value = validTabs.includes(tab) ? tab : 'logs'
+      currentTab.value = readTab(validTabs, 'logs', 'app.tab')
     }
   },
 )
@@ -215,13 +214,13 @@ watch(
 
 const navigation: { id: TabID; label: TranslationKey; icon: IconName }[] = [
   { id: 'accounts', label: 'nav.accounts', icon: 'accounts' },
-  { id: 'access', label: 'nav.access', icon: 'access' },
   { id: 'models', label: 'nav.models', icon: 'models' },
   { id: 'requests', label: 'nav.requests', icon: 'requests' },
   { id: 'usage', label: 'nav.usage', icon: 'usage' },
   { id: 'settings', label: 'nav.settings', icon: 'settings' },
   { id: 'playground', label: 'nav.playground', icon: 'playground' },
   { id: 'version', label: 'nav.version', icon: 'version' },
+  { id: 'access', label: 'nav.access', icon: 'access' },
   { id: 'logs', label: 'nav.logs', icon: 'logs' },
 ]
 

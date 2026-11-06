@@ -118,6 +118,12 @@ export function useUsageFormat() {
     )
   }
 
+  // Format the stored log result without recomputing its output or timing basis.
+  const outputSpeed = (value: number | null | undefined): string =>
+    typeof value === 'number' && Number.isFinite(value) && value > 0
+      ? formats.value.percent[1].format(value)
+      : '—'
+
   // dateTime 显示带月日的本地时间，seconds 为真时显示秒
   const dateTime = (value: string | Date, seconds = false): string =>
     formats.value[seconds ? 'seconds' : 'minutes'].format(new Date(value))
@@ -162,6 +168,7 @@ export function useUsageFormat() {
     usd,
     percent,
     duration,
+    outputSpeed,
     dateTime,
     clock,
     ago,

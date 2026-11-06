@@ -481,6 +481,7 @@ export interface UsageRecord {
   reply_tokens: number
   total_tokens: number
   tool_calls: number
+  average_tokens_per_second: number
   error: string
   attempts: RequestAttempt[]
   has_body: boolean

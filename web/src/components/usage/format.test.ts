@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vite-plus/test'
-import { displayModelName, showSeparateToolCalls } from './format'
+import { displayModelName, showSeparateToolCalls, useUsageFormat } from './format'
 
-vi.mock('@/i18n', () => ({}))
+vi.mock('@/i18n', () => ({
+  useI18n: () => ({ locale: { value: 'en' }, t: (key: string) => key }),
+}))
 
 const prefix = '\u6297\u622a\u65ad-'
 
@@ -77,5 +79,51 @@ describe('usage tool-call counts', () => {
       response_model: `${prefix}gemini-2.5-pro`,
     }
     expect(showSeparateToolCalls(record)).toBe(false)
+  })
+})
+
+describe('usage output speed', () => {
+  it.each([
+    [12.34, '12.3'],
+    [12.35, '12.4'],
+    [1_234.56, '1,234.6'],
+    [0.06, '0.1'],
+    [0.04, '0'],
+  ] as const)('formats the existing average %s to one decimal place', (value, expected) => {
+    expect(useUsageFormat().outputSpeed(value)).toBe(expected)
+  })
+
+  it.each([undefined, null, 0, -1, NaN, Infinity, -Infinity])(
+    'leaves missing, zero and invalid averages unavailable: %s',
+    (value) => {
+      expect(useUsageFormat().outputSpeed(value)).toBe('—')
+    },
+  )
+
+  it('uses the supplied log average regardless of token counts and first-event timing', () => {
+    const record = Object.freeze({
+      average_tokens_per_second: 73.26,
+      reply_tokens: 100,
+      reasoning_tokens: 900,
+      total_tokens: 2_000,
+      duration_ms: 5_000,
+      first_event_ms: 2_000,
+    })
+    const { outputSpeed } = useUsageFormat()
+    expect(outputSpeed(record.average_tokens_per_second)).toBe('73.3')
+    const sameAverage = { ...record, reply_tokens: 0, reasoning_tokens: 0, first_event_ms: 0 }
+    expect(outputSpeed(sameAverage.average_tokens_per_second)).toBe('73.3')
+    expect(record.average_tokens_per_second).toBe(73.26)
+  })
+
+  it('does not infer an average when the API result is missing', () => {
+    const record = {
+      average_tokens_per_second: undefined,
+      reply_tokens: 100,
+      reasoning_tokens: 900,
+      duration_ms: 5_000,
+      first_event_ms: 2_000,
+    }
+    expect(useUsageFormat().outputSpeed(record.average_tokens_per_second)).toBe('—')
   })
 })

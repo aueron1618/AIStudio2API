@@ -1,9 +1,10 @@
-import { nextTick, reactive, ref } from 'vue'
+import { createSSRApp, nextTick, reactive, ref } from 'vue'
+import { renderToString } from 'vue/server-renderer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import { api } from '@/api'
 import { messages } from '@/locales/en'
 import { mountSetup } from '@/test-component'
-import type { AccountTask, CookieBrowser } from '@/types'
+import type { AccountDraft, AccountLoginInput, AccountTask, CookieBrowser } from '@/types'
 import AccountsPanel from './AccountsPanel.vue'
 
 vi.mock('@/desktop', () => ({ keepPage: () => () => {} }))
@@ -35,6 +36,7 @@ vi.mock('./AnchoredMenu.vue', () => ({
 type Candidate = CookieBrowser & { source: number }
 interface CookieState {
   showCookieImport: boolean
+  cookieHelpOpen: boolean
   cookieText: string
   cookieMethod: 'browser' | 'http'
   cookieFiles: { name: string; text: string }[]
@@ -42,7 +44,13 @@ interface CookieState {
   selectedCookieUsers: string[]
   cookieImportError: string
   cookieDiscoveryError: string
-  accountEnvironment: { proxy: string; locale: string; timezone: string }
+  cookieEnvironment: AccountLoginInput
+  accountEnvironment: AccountLoginInput
+  draft: AccountDraft
+  showBrowserImport: boolean
+  cookieBrowsers: CookieBrowser[]
+  selectedBrowsers: string[]
+  importBrowserAccounts: () => Promise<void>
   importCookieAccounts: (direct?: boolean) => Promise<void>
   discoverCookieAccounts: () => Promise<void>
   closeCookieImport: () => void
@@ -75,6 +83,11 @@ const queued = (count = 1): AccountTask => ({
   started_at: '2026-11-04T00:00:00Z',
 })
 const cleanups: (() => void)[] = []
+const preferences = new Map<string, string>()
+const storage = {
+  getItem: vi.fn<(key: string) => string | null>(),
+  setItem: vi.fn<(key: string, value: string) => void>(),
+}
 
 function mount() {
   const taskEvents = vi.fn()
@@ -99,19 +112,228 @@ function mount() {
   return { ...instance, props, taskEvents, refresh }
 }
 
+async function renderImport(
+  browser = false,
+  help = false,
+  method: CookieState['cookieMethod'] = 'browser',
+): Promise<string> {
+  const app = createSSRApp(AccountsPanel, {
+    accounts: [],
+    tasks: [],
+    loading: false,
+    error: '',
+    chromeImport: false,
+  })
+  app.directive('tooltip', {})
+  app.mixin({
+    created() {
+      const { setupState } = this.$ as unknown as { setupState: CookieState }
+      if (!Object.hasOwn(setupState, 'showCookieImport')) return
+      if (browser) setupState.showBrowserImport = true
+      else {
+        setupState.showCookieImport = true
+        setupState.cookieHelpOpen = help
+        setupState.cookieMethod = method
+      }
+    },
+  })
+  const context = { teleports: {} as Record<string, string> }
+  await renderToString(app, context)
+  return context.teleports.body!
+}
+
 beforeEach(() => {
   vi.resetAllMocks()
+  preferences.clear()
+  storage.getItem.mockImplementation((key) => preferences.get(key) ?? null)
+  storage.setItem.mockImplementation((key, value) => {
+    preferences.set(key, value)
+  })
   vi.stubGlobal('navigator', { userAgent: 'offline-fixture', language: 'must-not-prefill' })
   vi.stubGlobal('window', {
     location: new URL('https://console.example.test'),
     isSecureContext: true,
     setTimeout,
     clearTimeout,
+    localStorage: storage,
   })
 })
 afterEach(() => {
   cleanups.splice(0).forEach((cleanup) => cleanup())
   vi.unstubAllGlobals()
+})
+
+describe('Cookie import preferences and layout', () => {
+  it('starts blank without preferences and does not remember untouched defaults', () => {
+    const { state } = mount()
+    expect(state.cookieEnvironment).toEqual({ proxy: '', locale: '', timezone: '' })
+    expect(storage.getItem).toHaveBeenCalledWith('accounts.cookie.locale')
+    expect(storage.getItem).toHaveBeenCalledWith('accounts.cookie.timezone')
+    expect(storage.setItem).not.toHaveBeenCalled()
+  })
+
+  it('remembers only edited language and timezone across reopening and remounting', () => {
+    const { state } = mount()
+    state.cookieEnvironment.locale = 'fr-CA'
+    expect([...preferences]).toEqual([['accounts.cookie.locale', '"fr-CA"']])
+    state.cookieEnvironment.timezone = 'America/Toronto'
+    state.cookieEnvironment.proxy = 'socks5://fixture-user:fixture-secret@proxy.example.test:1080'
+    state.cookieText = 'fixture-cookie=offline-secret'
+    state.cookieFiles = [{ name: 'fixture-private.txt', text: 'fixture-file=offline-secret' }]
+    state.cookieCandidates = [candidate(0)]
+    state.selectedCookieUsers = ['0:0']
+    expect([...preferences]).toEqual([
+      ['accounts.cookie.locale', '"fr-CA"'],
+      ['accounts.cookie.timezone', '"America/Toronto"'],
+    ])
+    expect(storage.setItem).toHaveBeenCalledTimes(2)
+    state.closeCookieImport()
+    state.cookieEnvironment.locale = ''
+    state.cookieEnvironment.timezone = ''
+    state.showCookieImport = true
+    expect(state.cookieEnvironment.locale).toBe('fr-CA')
+    expect(state.cookieEnvironment.timezone).toBe('America/Toronto')
+    expect(storage.setItem).toHaveBeenCalledTimes(2)
+    state.clearCookieInput()
+    expect(preferences.size).toBe(2)
+    cleanups.pop()!()
+    const reopened = mount().state
+    expect(reopened.cookieEnvironment).toEqual({
+      proxy: '',
+      locale: 'fr-CA',
+      timezone: 'America/Toronto',
+    })
+    expect(reopened.cookieText).toBe('')
+    expect(reopened.cookieFiles).toEqual([])
+    expect(reopened.cookieCandidates).toEqual([])
+    expect(storage.setItem).toHaveBeenCalledTimes(2)
+  })
+
+  it('remembers an explicit field clear without overwriting other import or edit settings', () => {
+    preferences.set('accounts.cookie.locale', '"fr-CA"')
+    preferences.set('accounts.cookie.timezone', '"America/Toronto"')
+    const { state } = mount()
+    state.accountEnvironment.locale = 'de-DE'
+    state.accountEnvironment.timezone = 'Europe/Berlin'
+    state.draft.locale = 'ko-KR'
+    state.draft.timezone = 'Asia/Seoul'
+    state.cookieEnvironment.locale = ''
+    state.closeCookieImport()
+    state.accountEnvironment.locale = 'ja-JP'
+    state.showCookieImport = true
+    expect(state.cookieEnvironment).toEqual({ proxy: '', locale: '', timezone: 'America/Toronto' })
+    expect(state.accountEnvironment).toEqual({
+      proxy: '',
+      locale: 'ja-JP',
+      timezone: 'Europe/Berlin',
+    })
+    expect(state.draft.locale).toBe('ko-KR')
+    expect(state.draft.timezone).toBe('Asia/Seoul')
+    expect([...preferences]).toEqual([
+      ['accounts.cookie.locale', '""'],
+      ['accounts.cookie.timezone', '"America/Toronto"'],
+    ])
+  })
+
+  it('ignores invalid preferences and tolerates unavailable browser storage', () => {
+    preferences.set('accounts.cookie.locale', 'false')
+    preferences.set('accounts.cookie.timezone', '{invalid-json')
+    const { state } = mount()
+    expect(state.cookieEnvironment).toEqual({ proxy: '', locale: '', timezone: '' })
+    state.closeCookieImport()
+    storage.getItem.mockImplementation(() => {
+      throw new Error('Storage unavailable')
+    })
+    state.showCookieImport = true
+    storage.setItem.mockImplementation(() => {
+      throw new Error('Storage unavailable')
+    })
+    expect(() => (state.cookieEnvironment.locale = 'en-US')).not.toThrow()
+    expect(state.cookieEnvironment.locale).toBe('en-US')
+  })
+
+  it.each(['browser', 'http'] as const)(
+    'uses remembered region only for the %s Cookie flow',
+    async (method) => {
+      preferences.set('accounts.cookie.locale', '"fr-CA"')
+      preferences.set('accounts.cookie.timezone', '"America/Toronto"')
+      const { state } = mount()
+      expect(state.accountEnvironment).toEqual({ proxy: '', locale: '', timezone: '' })
+      state.cookieText = 'fixture-cookie=offline'
+      state.cookieMethod = method
+      vi.mocked(api.importCookieAccounts).mockResolvedValue(queued())
+      await state.importCookieAccounts(true)
+      expect(api.importCookieAccounts).toHaveBeenCalledWith({
+        items: [{ email: '', cookies: 'fixture-cookie=offline', cdp: '', auth_user: 0, method }],
+        proxy: '',
+        locale: 'fr-CA',
+        timezone: 'America/Toronto',
+      })
+      expect(storage.setItem).not.toHaveBeenCalled()
+    },
+  )
+
+  it('keeps browser-discovery imports HTTP-only and does not apply Cookie region preferences', async () => {
+    preferences.set('accounts.cookie.locale', '"fr-CA"')
+    preferences.set('accounts.cookie.timezone', '"America/Toronto"')
+    const { state } = mount()
+    state.closeCookieImport()
+    state.showBrowserImport = true
+    state.cookieBrowsers = [{ ...candidate(0), address: 'http://browser.example.test:9222' }]
+    state.selectedBrowsers = ['http://browser.example.test:9222#0']
+    vi.mocked(api.importCookieAccounts).mockResolvedValue(queued())
+    await state.importBrowserAccounts()
+    expect(api.importCookieAccounts).toHaveBeenCalledWith({
+      items: [
+        {
+          email: 'fixture-0@example.test',
+          cookies: '',
+          cdp: 'http://browser.example.test:9222',
+          auth_user: 0,
+          method: 'http',
+        },
+      ],
+      proxy: '',
+      locale: '',
+      timezone: '',
+    })
+    expect(storage.setItem).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('keeps settings visible while help is expanded=%s', async (help) => {
+    const form = await renderImport(false, help, 'http')
+    const fields = form.match(/<input(?![^>]*type="file")[^>]*>/g) ?? []
+    expect(fields).toHaveLength(3)
+    expect(fields.every((field) => field.includes('value=""') && !field.includes('required'))).toBe(
+      true,
+    )
+    expect(form).toContain('id="cookie-settings-title"')
+    expect(form).toContain('<div id="cookie-import-help">')
+    expect(form).toContain('grid-cols-1 gap-4 md:grid-cols-2')
+    expect(form).toMatch(
+      new RegExp(
+        `<button[^>]*type="button"[^>]*aria-expanded="${help}"[^>]*aria-controls="cookie-import-help"`,
+      ),
+    )
+    expect(form).toMatch(/<textarea[^>]*autocomplete="off"[^>]*required/)
+    for (const key of [
+      'accounts.cookieSecurity',
+      'accounts.cookieTaskHelp',
+      'accounts.cookieEnvironmentHelp',
+      'accounts.cookieMethodHttpHelp',
+    ] as const) {
+      if (help) expect(form).toContain(messages[key])
+      else expect(form).not.toContain(messages[key])
+    }
+  })
+
+  it('keeps browser import proxy settings visible without a disclosure', async () => {
+    const form = await renderImport(true)
+    const fields = form.match(/<input[^>]*>/g) ?? []
+    expect(fields).toHaveLength(1)
+    expect(form).toMatch(/<h4[^>]*>More settings<\/h4>/)
+    expect(form).not.toContain('ui-collapse')
+  })
 })
 
 describe('background Cookie account tasks', () => {
@@ -120,6 +342,7 @@ describe('background Cookie account tasks', () => {
     async (method) => {
       const { state, props, taskEvents, refresh } = mount()
       expect(state.accountEnvironment).toEqual({ proxy: '', locale: '', timezone: '' })
+      expect(state.cookieEnvironment).toEqual({ proxy: '', locale: '', timezone: '' })
       expect(state.cookieMethod).toBe('browser')
       state.cookieMethod = method
       state.cookieText = 'fixture-cookie=offline'

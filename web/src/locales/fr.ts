@@ -9,6 +9,9 @@ export const messages: Record<TranslationKey, string> = {
   'accounts.localeEnUS': 'Anglais (États-Unis)',
   'accounts.timezoneShanghai': 'Heure de Chine',
   'accounts.timezoneNewYork': 'Heure de l’Est des États-Unis',
+  'accounts.cookieHelpTitle': 'Aide à l’importation de cookies',
+  'accounts.cookieEnvironmentHelp':
+    'Ce navigateur mémorise uniquement la langue et le fuseau horaire saisis. Les cookies, le contenu des fichiers, les adresses e-mail et les paramètres du proxy ne sont pas enregistrés dans ses préférences.',
   'accounts.cookieHelp':
     'Accepte les en-têtes Cookie, le texte multiligne, le JSON des extensions, le JSON storage-state et les fichiers Netscape, au maximum 1 MiB en UTF-8. Copiez l’en-tête complet : document.cookie omet les cookies HttpOnly.',
   'accounts.cookieSecurity':

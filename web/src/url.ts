@@ -1,4 +1,5 @@
 import { onActivated, onUnmounted, ref, watch, type Ref } from 'vue'
+import { readPreference, writePreference } from './preference'
 
 // queryValue 读取地址栏查询参数并限制在允许值内
 function queryValue<T extends string>(name: string, allowed: readonly T[], fallback: T): T {
@@ -48,14 +49,32 @@ export function useQueryText(name: string, fallback = ''): Ref<string> {
   )
 }
 
-// useTabParam 以 tab 查询参数保存当前页面，切换页面时清除上一页面的查询参数
+// readTab 优先读取显式 tab 链接，没有指定时恢复最后有效的管理页签。
+export function readTab<T extends string>(
+  allowed: readonly T[],
+  fallback: T,
+  preferenceKey?: string,
+): T {
+  const saved = preferenceKey
+    ? readPreference(preferenceKey, fallback, (value) => allowed.includes(value as T))
+    : fallback
+  const value = new URLSearchParams(window.location.search).get('tab')
+  if (value === null) return saved
+  return allowed.includes(value as T) ? (value as T) : fallback
+}
+
+// useTabParam 同步页签、可选的浏览器记忆与地址栏，切换时清除上一页面的查询参数。
 export function useTabParam<T extends string>(
   allowed: readonly T[],
   fallback: T,
+  preferenceKey?: string,
 ): { tab: Ref<T>; select: (tab: T) => void } {
-  const tab = ref(queryValue('tab', allowed, fallback)) as Ref<T>
+  const tab = ref(readTab(allowed, fallback, preferenceKey)) as Ref<T>
+  if (preferenceKey) {
+    watch(tab, (value) => writePreference(preferenceKey, value), { flush: 'sync', immediate: true })
+  }
   const sync = (): void => {
-    tab.value = queryValue('tab', allowed, fallback)
+    tab.value = readTab(allowed, fallback, preferenceKey)
   }
   window.addEventListener('popstate', sync)
   onUnmounted(() => window.removeEventListener('popstate', sync))

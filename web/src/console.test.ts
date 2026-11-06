@@ -2,6 +2,8 @@ import { nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import { api, openAdminEvents } from './api'
 import type { AccountTask } from './types'
+import { readTab } from './url'
+import { readPreference, writePreference } from './preference'
 
 vi.mock('@/api', () => ({
   api: {
@@ -35,7 +37,13 @@ let stop: (() => void) | undefined
 beforeEach(() => {
   vi.resetModules()
   vi.resetAllMocks()
+  const storage = new Map<string, string>()
   vi.stubGlobal('window', {
+    location: new URL('https://console.example.test/'),
+    localStorage: {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => storage.set(key, value)),
+    },
     setTimeout,
     clearTimeout,
     addEventListener: vi.fn(),
@@ -147,5 +155,42 @@ describe('shared account task recovery', () => {
     })
     await nextTick()
     expect(api.accounts).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('portal tab preferences', () => {
+  const tabs = ['logs', 'accounts', 'usage', 'version', 'access'] as const
+
+  it('restores the last valid tab on a new portal visit', () => {
+    expect(readTab(tabs, 'logs', 'app.tab')).toBe('logs')
+    writePreference('app.tab', 'usage')
+    expect(readTab(tabs, 'logs', 'app.tab')).toBe('usage')
+  })
+
+  it('lets an explicit tab link override the saved selection', () => {
+    writePreference('app.tab', 'usage')
+    window.location.search = '?tab=accounts'
+    expect(readTab(tabs, 'logs', 'app.tab')).toBe('accounts')
+    window.location.search = '?tab=invalid'
+    expect(readTab(tabs, 'logs', 'app.tab')).toBe('logs')
+  })
+
+  it('rejects corrupt or no longer valid saved tabs', () => {
+    writePreference('app.tab', 'removed-tab')
+    expect(readTab(tabs, 'logs', 'app.tab')).toBe('logs')
+    window.localStorage.setItem('app.tab', '{invalid-json')
+    expect(readTab(tabs, 'logs', 'app.tab')).toBe('logs')
+  })
+
+  it('keeps the portal usable when browser storage is unavailable', () => {
+    vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => {
+      throw new Error('storage disabled')
+    })
+    vi.spyOn(window.localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('storage disabled')
+    })
+    expect(readTab(tabs, 'logs', 'app.tab')).toBe('logs')
+    expect(readPreference('app.sidebarCollapsed', false, () => true)).toBe(false)
+    expect(() => writePreference('app.tab', 'usage')).not.toThrow()
   })
 })

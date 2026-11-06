@@ -56,7 +56,11 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 	if locale := strings.TrimSpace(input.Locale); locale != "" {
 		accountConfig.Locale = locale
 	}
-	if timezone := strings.TrimSpace(input.Timezone); timezone != "" {
+	timezone, err := accountTimezone(input.Timezone)
+	if err != nil {
+		return api.AdminAccount{}, invalidAccount(err)
+	}
+	if timezone != "" {
 		accountConfig.Timezone = timezone
 	}
 	if err := config.ValidateProxy(accountConfig.Proxy); err != nil {
