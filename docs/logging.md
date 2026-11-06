@@ -6,6 +6,8 @@
 
 管理 API 通过 `GET /api/events` 推送历史快照和后续增量。账户创建等尚未绑定正式账户的认证操作使用 `auth` 来源。
 
+创建、重新登录、Chrome/Cookie 导入返回 `202 {task}`，各项结果从 `GET /api/accounts/tasks` 或 SSE `account_tasks` 读取，不以接收任务日志当作导入成功。DELETE 取消并等待执行释放后返回 204、移除记录；停服取消但未 DELETE 的任务保留 `failed`，未完成项的 code 为 `account_task_canceled`。HTTP Cookie 导入完成表示认证已提交，PageCatalog、WAA 和生成就绪需后续显式启动/刷新分别确认。
+
 ## 日志结构
 
 | 列 | 含义 | 示例 |
@@ -38,15 +40,17 @@
 
 ```text
 INFO  service  运行时装配 | 1/3 | 载入账户
-INFO  service  运行时装配 | 2/3 | 校验 Camoufox | 账户=28
-INFO  service  运行时装配 | 3/3 | 创建协议客户端
+INFO  service  运行时装配 | 2/3 | WAA 后端=spidermonkey | 账户=28
+INFO  service  运行时装配 | 3/3 | 创建协议客户端 | 出口=直连
 INFO  service  协议运行时就绪 | 账户=28 | 耗时=31ms
 INFO  service  管理监听启动 | 地址=127.0.0.1:2048
 INFO  service  管理服务就绪 | 地址=http://127.0.0.1:2048
 INFO  service  管理页面已打开 | 地址=http://127.0.0.1:2048
 ```
 
-点击“启动服务”后状态进入 `LAUNCHING`。服务先读取当前 `generation`（一次启动所创建的生成服务实例）的 `CachedModels`。缓存非空时立即预热 Worker，首个 Worker 有结果后为全部 `enabled`、`ready` 或 `busy` 账户并发执行 `ListModels`；没有模型缓存的 generation 先并发执行 `ListModels`，等待首个非空真实目录后预热 Worker，其余账户继续后台同步。首个 Worker 就绪后状态进入 `RUNNING` 并开始接收请求，其余目标 Worker 继续预热；可预热的账户全部处于冷却时记录 `WAA Worker 预热等待账户冷却 | 恢复=<时间>` 并直接进入 `RUNNING`，冷却期内的请求按冷却规则排队或返回 429，冷却结束后开始预热。`LAUNCHING` 期间点击“停止服务”会取消当前阶段并回到 `STOPPED`。
+点击“启动服务”后状态进入 `LAUNCHING`。服务先读取当前 `generation`（一次启动所创建的生成服务实例）的 `CachedModels`。缓存非空时立即预热 Worker，首个 Worker 有结果后读取全部 `enabled`、`ready` 或 `busy` 账户会话页面载入时的权益与 `ListModels` 目录；没有模型缓存的 generation 先同时读取这些账户的页面目录，等待首个非空真实目录后预热 Worker，其余账户继续后台同步。首个 Worker 就绪后状态进入 `RUNNING` 并开始接收请求，其余目标 Worker 继续预热；可预热的账户全部处于冷却时记录 `WAA Worker 预热等待账户冷却 | 恢复=<时间>` 并直接进入 `RUNNING`，冷却期内的请求按冷却规则排队或返回 429，冷却结束后开始预热。`LAUNCHING` 期间点击“停止服务”会取消当前阶段并回到 `STOPPED`。
+
+下面是显式配置正数热池的示例，不是默认容量。默认 `0/1/1/1` 跳过常驻预热；启动或刷新目录所需的页面、重载和请求 Worker 仍共用活动及启动预算，多个账户可排队但不能无界同时启动。
 
 ```text
 INFO  service              生成服务启动 | 1/2 | 准备模型目录 | 缓存=0
@@ -59,15 +63,18 @@ INFO  service              WAA Worker 预热完成 | Worker=5/5 | 耗时=34.903s
 
 `准备模型目录` 的 `缓存` 是启动瞬间当前 generation 合并后的真实模型数。`模型目录后台同步完成` 的 `同步` 是本次无错误返回的账户数，包含空目录；`非空` 是返回非空真实目录的账户数；`模型` 是合并后的公共模型数；`待重试账户` 是 `pending set`（等待重试的账户 ID 集合）的大小。每个非空结果到达时已经写入公共目录、发布管理事件并在运行期预热更多 Worker，因此后台完成日志可以出现在 `生成服务就绪` 之后。
 
-目录为空、单账户同步失败或单账户同步成功但仍为空的账户进入 pending ID 集合。初次 `fan-out`（同时向全部符合条件的账户发出 `ListModels`）结束后，处于 `RUNNING` 的生成服务使用单个 30 秒 ticker（定时器）对全部 pending ID 再次并发执行 `ListModels`；非空成功立即更新账户、模型和 Worker 选择，失败与空结果继续保留：
+目录为空、单账户同步失败或单账户同步成功但仍为空的账户进入 pending ID 集合。启动期同步结束后，处于 `RUNNING` 的生成服务使用单个 30 秒 ticker（定时器）重新载入全部 pending 账户的页面再次读取目录；非空成功立即更新账户、模型和 Worker 选择，失败与空结果继续保留：
 
 ```text
 INFO  account@example.com  模型目录已更新 | 模型=39
 ```
 
-同一循环每 10 分钟对全部 `enabled`、`ready` 或 `busy` 账户并发读取权益与 `ListModels` 目录，并发槽位已满的账户跳过本轮；订阅模型遇到额度错误时同样刷新该账户。权益或模型数变化时更新账户调度与公开目录，读取失败时记录原因，登录失效的账户转为需要登录：
+同一循环从启动期同步开始时起每 24 小时逐个重新载入全部 `enabled`、`ready` 或 `busy` 账户的页面读取权益与 `ListModels` 目录，并发槽位已满的账户跳过本轮。当前 Worker 的重载与新建临时目录页都受统一活动/启动预算约束，满载时不会另开预算外页面。请求模型不在目录时，巡检正在读取一轮的首个账户则等它读完；没有进行中的一轮且距上轮开始超过 10 分钟时触发刷新，先等待首个账户结果，其余在后台继续。订阅模型额度错误也可触发该账户刷新。权益或模型数变化时更新调度与公开目录，读取失败记录原因，登录失效的账户转为需要登录：
 
 ```text
+INFO  account@example.com  WAA Worker 页面已重新载入 | 耗时=4.521s
+INFO  account@example.com  WAA Worker 临时页面已关闭 | 页面模型=gemini-flash-latest | 耗时=6.112s
+WARN  account@example.com  WAA Worker 重新载入页面失败 | 耗时=2.082s | 错误=...
 INFO  account@example.com  账户状态已更新 | 权益=Free→Ultra | 模型=46→47
 WARN  account@example.com  账户状态刷新失败 | 错误=...
 ```
@@ -99,13 +106,13 @@ INFO   service  生成服务已处于停止状态
 ERROR  service  生成服务停止失败 | 耗时=10.006s | 错误=<JOINED_ERROR>
 ```
 
-`服务配置已保存` 表示 `.env` 已写入。管理进程配置通过进程重启应用；生成服务配置通过停止、启动生成服务应用。
+`服务配置已保存` 表示 `.env` 已写入。管理认证、监听与 API key 列表通过进程重启应用；容量、路由、账户绑定和 anti/auto 等热配置保存后立即应用，其他生成服务配置通过 Stop/Start 应用，以设置页的生效提示为准。
 
 ### Worker 生命周期
 
 每个账户从自己的实时目录选择 WAA 启动模型。`gemini-flash-latest` 在目录中可用且明确支持 `generateContent` 与 `chat` 能力字段时优先，随后按实时目录顺序尝试其余合格模型。日志保留实际页面模型。
 
-WAA Bootstrap（页面初始化）在页面生成 proof 能力和动态请求头后，通过 WebDriver BiDi 终止用于初始化的 `GenerateContent`，模型输出量为零。首个候选完成后结束候选循环。
+WAA Bootstrap（页面初始化）等待官方 WAA、动态请求头与页面目录就绪，不发送额外 Hello `GenerateContent`。两个后端固定使用 `temporary=true`；初始化完成不代表实际业务生成已通过。
 
 ```text
 INFO  account@example.com  WAA Worker 启动 | 1/7 | 初始化页面 | 页面模型=gemini-flash-latest
@@ -123,9 +130,9 @@ INFO  account@example.com  WAA Worker 就绪 | 页面模型=gemini-flash-latest 
 | 事件 | 语义 |
 | --- | --- |
 | `WAA Worker 按需扩容 | Worker=N/M` | 活动 Worker 未达 `MAX_ACTIVE_WORKERS`，新 Worker 成功发布 |
-| `WAA Worker 按需替换 | Worker=N/M` | `pending Worker`（正在启动的替代 Worker）成功启动并替换一个空闲 Worker |
-| `WAA Worker 空闲回收 | Worker=N/M` | 超出热池目标的 Worker 空闲 5 分钟后关闭 |
-| `WAA Worker 旧实例停止失败` | 旧实例关闭失败，发布中止并开始关闭 pending Worker |
+| `WAA Worker 按需替换 | Worker=N/M` | 先回收空闲旧 Worker，再在已预留预算内成功启动替代 Worker |
+| `WAA Worker 空闲回收 | Worker=N/M` | 零热池约 30 秒后回收；正数热池在空闲 5 分钟后回收超出目标的 Worker |
+| `WAA Worker 旧实例停止失败` | 旧实例关闭失败，保留实体与预算，不发布替代 Worker |
 | `WAA Worker 重建 | 模型=... | 重放当前请求` | 当前账户 Worker 已失效，业务请求在新实例重放；下一行 `原因:` 为触发重建的错误 |
 | `WAA Worker 已更新 | 模型=... | 重放当前请求` | 并发路径已经替换 Worker，当前请求使用新实例 |
 
@@ -145,7 +152,7 @@ ERROR  account@example.com  WAA Worker 停止失败 | PID=18240 | 耗时=10.002s
 | 进程终止与 `command.Wait` | 5 秒 | Windows 依次执行 `taskkill /T /F` 与 `Process.Kill`，失败原因保留 |
 | 浏览器 profile 目录删除重试 | 2 秒 | 每 100ms 重试，最终返回最后一次 `RemoveAll` 错误 |
 
-`Worker.Close` 的正常总体上界约为 10 秒，另加调度开销。关闭失败时 Worker、进程句柄、`runtime lease`（Worker 占用的账户租约）、热池记录和 generation（Worker 版本号）保持可重试；再次 Stop 会重跑关闭链。热替换中旧实例与 pending Worker 都关闭失败时，两份实例都占用容量槽。
+`Worker.Close` 的正常总体上界约为 10 秒，另加调度开销。关闭失败时 Worker、进程句柄、`runtime lease`（Worker 占用的账户租约）、热池记录和 generation（Worker 版本号）保持可重试；再次 Stop 会重跑关闭链。重载的新旧资源都关闭失败时，两份实体仍占容量，不能提前计作已释放。
 
 ## API 请求
 

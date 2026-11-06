@@ -225,3 +225,36 @@ func TestContinuationControlsHaveIndependentRestartBoundaries(t *testing.T) {
 		t.Fatal("hedge model changes must be reflected in the restart marker")
 	}
 }
+
+func TestStripThoughtSignaturesConfigAndRestartBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	cfg := config.Default()
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	manager := &runtimeManager{
+		activeManagement: cfg, current: configTestGeneration(t.Context(), path, cfg), logs: &logOutput{},
+	}
+	value, err := manager.RuntimeConfig(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil || !strings.Contains(string(raw), `"strip_thought_signatures":false`) || strings.Contains(string(raw), "temporary_chat") {
+		t.Fatal("management DTO omitted the new field or retained TemporaryChat")
+	}
+	value.StripThoughtSignatures = true
+	updated, err := manager.UpdateRuntimeConfig(t.Context(), value)
+	if err != nil || !updated.StripThoughtSignatures || !updated.ServiceRestartRequired || manager.current.config.StripThoughtSignatures {
+		t.Fatal("signature setting lost its save or restart boundary")
+	}
+	saved, err := config.Load(path)
+	if err != nil || !saved.StripThoughtSignatures {
+		t.Fatal("signature setting was not persisted")
+	}
+	t.Setenv("STRIP_THOUGHT_SIGNATURES", "false")
+	updated, err = manager.UpdateRuntimeConfig(t.Context(), updated)
+	if err != nil || updated.StripThoughtSignatures || !slices.Contains(updated.Environment, "STRIP_THOUGHT_SIGNATURES") {
+		t.Fatal("signature setting ignored its environment lock")
+	}
+}

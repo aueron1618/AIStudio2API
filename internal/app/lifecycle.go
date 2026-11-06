@@ -36,6 +36,7 @@ type generationAdmin interface {
 	ImportCookieAccount(context.Context, api.CookieImportInput) (api.AdminAccount, error)
 	ImportChromeAccounts(context.Context, api.ChromeImportInput) ([]api.AdminAccount, error)
 	ImportAccountState(context.Context, api.AccountStateInput) (api.AdminAccount, error)
+	RenewAccountCookies(ctx context.Context, accountID string, token string, cookies []aistudio.StateCookie) (api.AdminAccount, error)
 	UpdateAccount(context.Context, string, api.AccountInput) (api.AdminAccount, error)
 	DeleteAccount(context.Context, string) error
 	LoginAccount(context.Context, string, *camoufoxnative.LiveView) (api.AdminAccount, error)
@@ -99,8 +100,13 @@ type runtimeManager struct {
 	requests           *requestRegistry
 	factory            runtimeFactory
 	startMu            sync.Mutex
+	taskMu             sync.Mutex
+	taskContext        context.Context
+	taskCancel         context.CancelFunc
+	taskTransitions    int
 	mu                 sync.RWMutex
 	current            *runtimeGeneration
+	closed             bool
 	liveConfigRevision uint64
 	startCancel        context.CancelFunc
 	// launching 在生成服务启动期间存在，启动结束时关闭
@@ -108,6 +114,7 @@ type runtimeManager struct {
 	autoStartCancel context.CancelFunc
 	ledger          *requestdb.Store
 	prompts         *promptdb.Store
+	states          api.StateStore
 	logs            *logOutput
 }
 
@@ -153,16 +160,24 @@ func buildRuntimeGeneration(
 
 // StartService 取消自动启动的重试后从最新配置启动生成服务
 func (manager *runtimeManager) StartService(ctx context.Context) (api.AdminStatus, error) {
+	resumeTasks := manager.cancelAccountTasks()
+	defer resumeTasks()
 	manager.stopAutoStart()
 	return manager.startService(ctx)
 }
 
 // startService 从最新配置创建并启动新生成服务
 func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatus, error) {
+	resumeTasks := manager.cancelAccountTasks()
+	defer resumeTasks()
 	manager.startMu.Lock()
 	defer manager.startMu.Unlock()
 
 	manager.mu.Lock()
+	if manager.closed {
+		manager.mu.Unlock()
+		return api.AdminStatus{}, &adminOperationError{status: http.StatusServiceUnavailable, code: "service_closed", message: "生成服务管理器已关闭"}
+	}
 	current := manager.current
 	liveConfigRevision := manager.liveConfigRevision
 	if current.service.State() != "STOPPED" {
@@ -196,13 +211,14 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 		manager.finishStart(launchCancel)
 		return api.AdminStatus{}, err
 	}
-	if launchCtx.Err() != nil {
+	manager.mu.Lock()
+	if launchCtx.Err() != nil || manager.closed {
+		manager.mu.Unlock()
 		manager.finishStart(launchCancel)
 		_ = next.Close()
 		return manager.Status(ctx)
 	}
 
-	manager.mu.Lock()
 	current = manager.current
 	if manager.liveConfigRevision != liveConfigRevision {
 		next.applyLiveConfig(runtimeConfigDTO(current.config), manager.activeManagement)
@@ -247,6 +263,8 @@ func (manager *runtimeManager) WaitLaunch(ctx context.Context) {
 
 // StopService 停止当前生成服务并保持管理监听器运行
 func (manager *runtimeManager) StopService(ctx context.Context) (api.AdminStatus, error) {
+	resumeTasks := manager.cancelAccountTasks()
+	defer resumeTasks()
 	manager.stopAutoStart()
 	manager.mu.RLock()
 	cancel := manager.startCancel
@@ -280,6 +298,17 @@ func (manager *runtimeManager) stopAutoStart() {
 
 // Close 释放当前生成服务
 func (manager *runtimeManager) Close() error {
+	manager.cancelAccountTasks()
+	manager.mu.Lock()
+	manager.closed = true
+	cancel := manager.startCancel
+	manager.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	manager.stopAutoStart()
+	manager.startMu.Lock()
+	defer manager.startMu.Unlock()
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	return manager.current.Close()
@@ -505,6 +534,13 @@ func (manager *runtimeManager) ImportAccountState(ctx context.Context, input api
 	return manager.current.admin.ImportAccountState(ctx, input)
 }
 
+// RenewAccountCookies 在当前生成服务以配对续签凭据替换账户的会话 Cookie
+func (manager *runtimeManager) RenewAccountCookies(ctx context.Context, accountID string, token string, cookies []aistudio.StateCookie) (api.AdminAccount, error) {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return manager.current.admin.RenewAccountCookies(ctx, accountID, token, cookies)
+}
+
 // UpdateAccount 在当前生成服务更新账户
 func (manager *runtimeManager) UpdateAccount(ctx context.Context, id string, input api.AccountInput) (api.AdminAccount, error) {
 	manager.mu.RLock()
@@ -655,7 +691,7 @@ func sameDataConfig(value api.RuntimeConfig, active config.Config, overrides dat
 	requestTimeout, _ := time.ParseDuration(value.RequestTimeout)
 	saved := config.Config{
 		AuthStates: value.AuthStates, Proxy: value.Proxy,
-		InitTimeout: initTimeout, RequestTimeout: requestTimeout, TemporaryChat: value.TemporaryChat,
+		InitTimeout: initTimeout, RequestTimeout: requestTimeout, StripThoughtSignatures: value.StripThoughtSignatures,
 		UpstreamChannels:      value.UpstreamChannels,
 		ModelMapping:          value.ModelMapping,
 		WAABackend:            value.WAABackend,
@@ -675,12 +711,11 @@ func sameDataConfig(value api.RuntimeConfig, active config.Config, overrides dat
 	overrides.Apply(&saved)
 	return saved.AuthStates == active.AuthStates && saved.Proxy == active.Proxy &&
 		saved.InitTimeout == active.InitTimeout && saved.RequestTimeout == active.RequestTimeout &&
-		saved.TemporaryChat == active.TemporaryChat &&
 		slices.Equal(saved.UpstreamChannels, active.UpstreamChannels) && saved.ModelMapping == active.ModelMapping &&
 		saved.WAABackend == active.WAABackend &&
 		saved.BuildNativeNonstream == active.BuildNativeNonstream &&
 		saved.NonstreamKeepalive == active.NonstreamKeepalive && saved.FakeStream == active.FakeStream &&
-		saved.YouTubeLinks == active.YouTubeLinks && saved.FirstEventHedge == active.FirstEventHedge && saved.FirstEventHedgeModels == active.FirstEventHedgeModels &&
+		saved.YouTubeLinks == active.YouTubeLinks && saved.StripThoughtSignatures == active.StripThoughtSignatures && saved.FirstEventHedge == active.FirstEventHedge && saved.FirstEventHedgeModels == active.FirstEventHedgeModels &&
 		saved.SearchModelAliases == active.SearchModelAliases && saved.GoogleSearch == active.GoogleSearch &&
 		saved.ContinuationRewrite == active.ContinuationRewrite && saved.ContinuationPrompt == active.ContinuationPrompt &&
 		saved.MediaOutput == active.MediaOutput && saved.MediaBaseURL == active.MediaBaseURL

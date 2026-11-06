@@ -61,7 +61,7 @@ func newBiDiTestClient(t *testing.T) (*bidiClient, *websocket.Conn, <-chan bidiT
 	}
 	listener.connections <- serverPipe
 	accepted := make(chan *websocket.Conn, 1)
-	commands := make(chan bidiTestCommand)
+	commands := make(chan bidiTestCommand, 16)
 	ctx := t.Context()
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		upgrader := websocket.Upgrader{}
@@ -345,6 +345,38 @@ func TestBiDiCommandTimeoutDoesNotPoisonConnection(t *testing.T) {
 		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": next.ID, "result": map[string]any{"value": "next"}})
 		if result := requireBiDiTestResult(t, nextDone, nil); result["value"] != "next" {
 			t.Fatal("timeout poisoned the next command")
+		}
+	})
+}
+
+func TestBiDiCancelDuringWriteDoesNotPoisonConnection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, peer, commands := newBiDiTestClient(t)
+		var waiting []<-chan bidiResponse
+		// Fill the fixture's bounded command queue so its next socket read blocks.
+		for range 17 {
+			waiting = append(waiting, startBiDiTestCommand(client, t.Context(), "test.waiting"))
+			synctest.Wait()
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		canceled := startBiDiTestCommand(client, ctx, "test.canceled-write")
+		synctest.Wait()
+		cancel()
+		requireBiDiTestResult(t, canceled, context.Canceled)
+		time.Sleep(2 * time.Second)
+		for range 18 {
+			command := requireBiDiTestCommand(t, commands)
+			writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": command.ID, "result": map[string]any{}})
+		}
+		for _, done := range waiting {
+			requireBiDiTestResult(t, done, nil)
+		}
+		nextDone := startBiDiTestCommand(client, t.Context(), "test.after-write")
+		next := requireBiDiTestCommand(t, commands)
+		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": next.ID, "result": map[string]any{"value": "next"}})
+		if result := requireBiDiTestResult(t, nextDone, nil); result["value"] != "next" {
+			t.Fatal("caller deadline poisoned the shared WebSocket writer")
 		}
 	})
 }

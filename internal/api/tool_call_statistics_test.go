@@ -72,9 +72,10 @@ func TestGenerationResultAntiTruncationToolCalls(t *testing.T) {
 
 func TestAwaitStreamStartPreservesToolCounter(t *testing.T) {
 	failure := errors.New("invalid transport content")
-	event := aistudio.Event{Kind: aistudio.EventError, Err: failure, AntiTruncationToolCalls: 2}
-	replay, err := awaitStreamStart(t.Context(), testEventStream(event))
-	if !errors.Is(err, failure) || replay == nil {
+	usage := &aistudio.Usage{InputTokens: 7, OutputTokens: 1, TotalTokens: 8}
+	event := aistudio.Event{Kind: aistudio.EventError, Err: failure, AntiTruncationToolCalls: 2, FrameUsage: usage}
+	replay, startUsage, err := awaitStreamStart(t.Context(), testEventStream(event))
+	if !errors.Is(err, failure) || replay == nil || startUsage != usage {
 		t.Fatalf("first error=%v replay=%v", err, replay)
 	}
 	if got := <-replay; got.Kind != event.Kind || got.Err != failure || got.AntiTruncationToolCalls != 2 {

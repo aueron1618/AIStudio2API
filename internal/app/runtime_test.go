@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -233,6 +234,65 @@ func TestCollectGenerateEventsCancellationDuringDrain(t *testing.T) {
 	}
 }
 
+func TestGenerateWithRetryPlanLimitFallbackOnce(t *testing.T) {
+	limit := &aistudio.RPCError{StatusCode: 429, Message: "You have reached your usage limit, resets in 1 hour"}
+	service := retryTestRuntime(t, func(context.Context, aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
+		return nil, limit
+	})
+	ctx, cancel := context.WithTimeout(aistudio.ContextWithChannel(t.Context(), aistudio.ChannelPlayground), 5*time.Second)
+	defer cancel()
+	request := aistudio.GenerateRequest{ID: "plan-limit-test", Model: "shared"}
+	service.requests.start(request, cancel)
+	var fallbacks []bool
+	acquire := func(ctx context.Context, selection aistudio.AccountSelection, planLimitFallback bool) (*aistudio.AccountLease, error) {
+		fallbacks = append(fallbacks, planLimitFallback)
+		return service.pool.AcquireFor(ctx, selection)
+	}
+	events := make(chan aistudio.Event)
+	go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
+	for range events {
+	}
+	if !slices.Equal(fallbacks, []bool{true, false}) {
+		t.Fatalf("plan-limit failure enabled another fallback: %v", fallbacks)
+	}
+	assertRetryLeasesReleased(t, service)
+}
+
+func TestForwardTerminalErrorFinishesRequestBeforeDrain(t *testing.T) {
+	service := retryTestRuntime(t, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	lease, err := service.pool.AcquireFor(ctx, aistudio.AccountSelection{AccountID: "a@example.test", ModelID: "shared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := aistudio.GenerateRequest{ID: "terminal-before-drain", Model: "shared"}
+	service.requests.start(request, cancel)
+	source := make(chan aistudio.Event, 1)
+	source <- aistudio.Event{Kind: aistudio.EventError, Err: errors.New("offline terminal error"), AntiTruncationToolCalls: 2}
+	destination := make(chan aistudio.Event)
+	go service.forwardEvents(ctx, ctx, cancel, request.ID,
+		aistudio.Event{Kind: aistudio.EventText, Text: "partial"}, source, destination, lease, nil, &upstreamActivity{}, request.Model)
+	if event := <-destination; event.Kind != aistudio.EventText {
+		t.Fatalf("first event=%+v", event)
+	}
+	if event := <-destination; event.Kind != aistudio.EventError {
+		t.Fatalf("terminal event=%+v", event)
+	}
+	if service.requests.count() != 0 {
+		t.Fatal("terminal error reached the client before the request was finished")
+	}
+	busyCtx, stopWaiting := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	defer stopWaiting()
+	if other, err := service.pool.AcquireAccount(busyCtx, "a@example.test"); other != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("account was released before the upstream drained: lease=%v err=%v", other, err)
+	}
+	close(source)
+	for range destination {
+	}
+	assertRetryLeasesReleased(t, service)
+}
+
 func TestVideoTaskPreservesRequestScope(t *testing.T) {
 	for _, channel := range []aistudio.Channel{aistudio.ChannelPlayground, aistudio.ChannelBuild} {
 		t.Run(string(channel), func(t *testing.T) {
@@ -243,6 +303,13 @@ func TestVideoTaskPreservesRequestScope(t *testing.T) {
 			dataCtx, stopData := context.WithCancel(t.Context())
 			defer stopData()
 			service.dataContext = dataCtx
+			service.dataCancel = stopData
+			service.workers = newAccountWorkerManager(service.pool, nil, service.requests, "", "", time.Second, 0, 1, 1)
+			t.Cleanup(func() {
+				if err := service.workers.Close(); err != nil {
+					t.Error(err)
+				}
+			})
 			service.state.Store(serviceRunning)
 			service.pool.SetAPIKeyAccounts(map[string][]string{"limited": {"a@example.test"}})
 			model := aistudio.Model{ID: "shared", Methods: []string{"generateContent"}, CapabilityOptions: map[string][]string{"video_output_resolutions": {"720p"}}}
@@ -276,11 +343,20 @@ func TestVideoTaskPreservesRequestScope(t *testing.T) {
 			if err := lease.Release(); err != nil {
 				t.Fatal(err)
 			}
+			groups, err := service.pool.ClassifyCandidates(taskCtx, selection, []string{"a@example.test", "b@example.test"})
+			if err != nil || !slices.Equal(groups.WarmReady, []string{"a@example.test"}) {
+				t.Fatalf("background worker selection escaped key scope: groups=%+v err=%v", groups, err)
+			}
 			selection.AllowedAccountIDs = []string{"b@example.test"}
 			if lease, err := service.pool.AcquireFor(taskCtx, selection); lease != nil || !errors.Is(err, aistudio.ErrNoEligibleAccount) {
 				t.Fatalf("background retry escaped key scope: lease=%v err=%v", lease, err)
 			}
-			stopData()
+			if lease, waitable, err := service.pool.TryAcquireFor(taskCtx, selection); lease != nil || waitable || err != nil {
+				t.Fatalf("background try-acquire escaped key scope: lease=%v err=%v", lease, err)
+			}
+			if stopped, err := service.Stop(); !stopped || err != nil {
+				t.Fatalf("stopping the service failed: stopped=%v err=%v", stopped, err)
+			}
 			select {
 			case <-taskCtx.Done():
 			case <-time.After(time.Second):

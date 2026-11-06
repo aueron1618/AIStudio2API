@@ -27,11 +27,14 @@ describe('merged translation catalogs', () => {
       'accounts.cookieSecurity',
       'accounts.cookieMethodBrowser',
       'accounts.cookieMethodHttp',
+      'accounts.cookieTaskHelp',
+      'error.account_task_canceled',
       'settings.antiTruncationHelp',
       'settings.autoContinuationHelp',
       'settings.apiKeyAccountsHelp',
       'settings.firstEventHedgeModelsHelp',
       'settings.environmentLocked',
+      'settings.stripThoughtSignaturesHelp',
       'settings.unitSeconds',
       'settings.unitMinutes',
       'usage.requestedModel',
@@ -48,6 +51,8 @@ describe('merged translation catalogs', () => {
     '%s is valid JSON without duplicate or lost local boolean keys',
     (_file, source) => {
       const catalog = JSON.parse(source) as Record<string, string>
+      expect(catalog['\u8d26\u6237\u4efb\u52a1\u5df2\u53d6\u6d88']).toBeTruthy()
+      expect(catalog['\u8d26\u6237\u4efb\u52a1\u5df2\u53d6\u6d88\u6216\u8d85\u65f6']).toBeTruthy()
       const keys = [...source.matchAll(/^\s*("(?:[^"\\]|\\.)*")\s*:/gm)].map(
         (match) => JSON.parse(match[1]!) as string,
       )

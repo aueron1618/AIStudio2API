@@ -25,12 +25,16 @@ func TestRuntimeCloseReleasesVM(t *testing.T) {
 	if vm.agent != nil || vm.snapshot != 0 || vm.shutdown != 0 || vm.loop.afterTask != nil || vm.results != nil {
 		t.Fatal("closed runtime retained JS state")
 	}
+	vm.resetIdle()
+	if vm.idle != nil || len(vm.loop.timers) != 0 {
+		t.Fatal("closed runtime retained or rearmed timers")
+	}
 	select {
 	case <-vm.loop.exited:
 	default:
 		t.Fatal("event loop has not exited")
 	}
-	if err := vm.FillPrompt(t.Context(), "closed", false); err == nil {
+	if err := vm.fillPrompt(t.Context(), "closed", false); err == nil {
 		t.Fatal("closed runtime accepted prompt")
 	}
 }
@@ -69,6 +73,79 @@ func TestRuntimeCanceledInitialization(t *testing.T) {
 	})
 	if vm != nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("canceled init = %v, %v", vm, err)
+	}
+}
+
+func TestRuntimeReadyCallbackDoesNotHideCanceledInitialization(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	vm, err := NewRuntime(ctx, Options{
+		Challenge: Challenge{Program: "test", GlobalName: "fixture"},
+		Interpreter: `var fixture = {a(program, ready) {
+  ready(callback => callback('!test'), () => {});
+  for (;;) {}
+}};`,
+		Profile: Profile{Locale: "en-US", TimeZone: "UTC"},
+	})
+	if vm != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ready-but-busy init = %v, %v", vm, err)
+	}
+}
+
+func TestRuntimeCanceledProofStopsBusyScript(t *testing.T) {
+	vm, err := NewRuntime(t.Context(), Options{
+		Challenge:   Challenge{Program: "test", GlobalName: "fixture"},
+		Interpreter: `var fixture = {a(program, ready) { ready(() => { for (;;) {} }, () => {}); }};`,
+		Profile:     Profile{Locale: "en-US", TimeZone: "UTC"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := vm.RunProof(ctx, "digest", "hello"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("canceled proof = %v", err)
+	}
+	select {
+	case <-vm.loop.exited:
+	default:
+		t.Fatal("cancellation only stopped the Go waiter, not the JS thread")
+	}
+	if vm.agent != nil || vm.results != nil || vm.idle != nil {
+		t.Fatal("canceled proof retained runtime roots")
+	}
+}
+
+func TestRuntimeRunProofDispatchesInputBeforeRun(t *testing.T) {
+	vm, err := NewRuntime(t.Context(), Options{
+		Challenge: Challenge{Program: "test", GlobalName: "fixture"},
+		Interpreter: `var fixture = {a(program, ready) {
+  const box = document.createElement('ms-prompt-box');
+  const textarea = document.createElement('textarea');
+  box.appendChild(textarea); document.body.appendChild(box);
+  const run = document.createElement('ms-run-button');
+  const button = document.createElement('button');
+  run.appendChild(button); document.body.appendChild(run);
+  const events = [];
+  textarea.addEventListener('input', () => events.push('input:' + textarea.value));
+  textarea.addEventListener('change', () => events.push('change'));
+  button.addEventListener('click', () => events.push('run'));
+  ready(callback => callback('!' + events.join('|') + ':' + textarea.value), () => {});
+}};`,
+		Profile: Profile{Locale: "en-US", TimeZone: "UTC"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Close()
+	proof, err := vm.RunProof(t.Context(), "digest", "a\r\nb")
+	if err != nil || proof != "!input:a\nb|change|run:a\nb" {
+		t.Fatalf("RunProof = %q, %v", proof, err)
+	}
+	proof, err = vm.RefreshSnapshot(t.Context())
+	if err != nil || proof != "!input:a\nb|change|run:" {
+		t.Fatalf("RunProof retained input or dispatched cleanup events: %q, %v", proof, err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -80,6 +81,120 @@ func TestRealmHostGlobalKeys(t *testing.T) {
 		if !seen[key] {
 			t.Errorf("missing browser global %q", key)
 		}
+	}
+}
+
+func TestRealmHostFrameNavigationUsesLoader(t *testing.T) {
+	for _, loaded := range []bool{false, true} {
+		t.Run(map[bool]string{false: "failed", true: "loaded"}[loaded], func(t *testing.T) {
+			requests := make(chan string, 1)
+			vm, err := NewRuntime(t.Context(), Options{
+				Challenge: Challenge{Program: "test", GlobalName: "fixture"},
+				Interpreter: `var fixture = {a(program, ready) {
+  const frame = document.createElement('iframe');
+  frame.src = '/frame?test=1';
+  frame.onload = event => ready(callback => callback('!' + JSON.stringify({
+    url: frame.contentWindow.location.href,
+    document: frame.contentWindow.document.URL,
+    trusted: event.isTrusted,
+    isolated: frame.contentWindow.Object !== Object
+  })), () => {});
+  document.body.appendChild(frame);
+}};`,
+				Profile:   Profile{Locale: "en-US", TimeZone: "UTC", PageURL: "https://aistudio.google.com/prompts/new_chat?temporary=true"},
+				LoadFrame: func(address string) bool { requests <- address; return loaded },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer vm.Close()
+			if address := <-requests; address != "https://aistudio.google.com/frame?test=1" {
+				t.Fatalf("frame loader address = %q", address)
+			}
+			var result struct {
+				URL, Document     string
+				Trusted, Isolated bool
+			}
+			if err := json.Unmarshal([]byte(realmResult(t, vm)), &result); err != nil {
+				t.Fatal(err)
+			}
+			want := "about:blank"
+			if loaded {
+				want = "https://aistudio.google.com/frame?test=1"
+			}
+			if result.URL != want || result.Document != want || !result.Trusted || !result.Isolated {
+				t.Fatalf("frame navigation = %+v", result)
+			}
+		})
+	}
+}
+
+func TestRuntimeSettleIncludesResourceLoadCallbacks(t *testing.T) {
+	first, callbacks, second := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	firstReturned, secondStarted := make(chan struct{}), make(chan struct{})
+	var firstOnce, callbacksOnce, secondOnce sync.Once
+	vm, err := NewRuntime(t.Context(), Options{
+		Challenge: Challenge{Program: "test", GlobalName: "fixture"},
+		Interpreter: `var fixture = {a(program, ready) {
+  const image = new Image();
+  image.onload = () => { const next = new Image(); next.src = '/second'; };
+  image.src = '/first';
+  ready(callback => callback('!fixture'), () => {});
+}};`,
+		Profile: Profile{Locale: "en-US", TimeZone: "UTC", PageURL: "https://aistudio.google.com/prompts/new_chat"},
+		LoadImage: func(address string) bool {
+			if strings.HasSuffix(address, "/first") {
+				<-first
+				close(firstReturned)
+			} else {
+				close(secondStarted)
+				<-second
+			}
+			return true
+		},
+	})
+	defer func() {
+		firstOnce.Do(func() { close(first) })
+		callbacksOnce.Do(func() { close(callbacks) })
+		secondOnce.Do(func() { close(second) })
+		if vm != nil {
+			vm.Close()
+		}
+	}()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := make(chan struct{})
+	vm.loop.post(func() { close(blocked); <-callbacks })
+	<-blocked
+	settled := make(chan error, 1)
+	go func() { settled <- vm.Settle(t.Context()) }()
+	firstOnce.Do(func() { close(first) })
+	<-firstReturned
+	select {
+	case err := <-settled:
+		t.Fatalf("Settle returned before the resource callback ran: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	callbacksOnce.Do(func() { close(callbacks) })
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("resource callback did not start its dependent image")
+	}
+	select {
+	case err := <-settled:
+		t.Fatalf("Settle ignored the callback's dependent resource: %v", err)
+	default:
+	}
+	secondOnce.Do(func() { close(second) })
+	select {
+	case err := <-settled:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("settled resources were not released")
 	}
 }
 

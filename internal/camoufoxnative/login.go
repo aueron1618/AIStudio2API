@@ -69,10 +69,6 @@ func HasDisplay() bool {
 
 // Login 启动隔离 Camoufox 供用户登录 Google，并在 AI Studio 可用后导出认证状态
 func Login(ctx context.Context, options LoginOptions) (result LoginResult, err error) {
-	options, err = validateLoginOptions(options)
-	if err != nil {
-		return LoginResult{}, err
-	}
 	if options.View == nil && !HasDisplay() {
 		return LoginResult{}, ErrNoDisplay
 	}

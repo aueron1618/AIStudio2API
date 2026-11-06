@@ -3,8 +3,12 @@ package aistudio
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -15,15 +19,51 @@ import (
 
 // NativeWorker 将单个账户的 Camoufox 或 SpiderMonkey WAA runtime 适配为受保护请求 preparer
 type NativeWorker struct {
-	accountID   string
+	accountID string
+	// runtimeMu 保护 runtime，重新载入页面后切换为新页面的 runtime
+	runtimeMu   sync.RWMutex
 	runtime     workerRuntime
+	runtimeUses map[workerRuntime]*nativeRuntimeUse
+	stopping    bool
+	closeMu     sync.Mutex
+	reloadMu    sync.Mutex
 	operationMu sync.Mutex
 	stateMu     sync.RWMutex
 	state       WorkerState
 }
 
+type nativeRuntimeUse struct {
+	requests  int
+	retired   bool
+	responses map[*nativeResponseBody]struct{}
+}
+
 var _ ProtectedPreparer = (*NativeWorker)(nil)
 var _ ProtocolHeaderProvider = (*NativeWorker)(nil)
+
+// camoufoxRuntime 是 Camoufox 后端的 workerRuntime，重新载入在同一浏览器中进行
+type camoufoxRuntime struct {
+	*camoufoxnative.Worker
+}
+
+// Reload 按官网冷启动重新载入页面：当前标签页空闲时在其中重新载入，有进行中的请求时在新标签页中载入并切换过去，原标签页在请求结束后关闭；返回同一 runtime
+func (runtime camoufoxRuntime) Reload(ctx context.Context) (workerRuntime, error) {
+	return runtime, runtime.Worker.Reload(ctx)
+}
+
+// ProtocolHeaders 返回页面的公共协议头，X-Goog-Ext-519733851-Bin 与官网页面一样由页面载入时 GetLoggingContext 的响应得出
+func (runtime camoufoxRuntime) ProtocolHeaders(ctx context.Context) (http.Header, error) {
+	headers, err := runtime.Worker.ProtocolHeaders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := encodeJSPBFields(runtime.PageCatalog().Logging)
+	if err != nil {
+		return nil, fmt.Errorf("编码官网日志上下文: %w", err)
+	}
+	headers.Set("X-Goog-Ext-519733851-Bin", base64.StdEncoding.EncodeToString(encoded))
+	return headers, nil
+}
 
 // NewNativeWorker 启动单个账户的 Camoufox WAA runtime
 func NewNativeWorker(ctx context.Context, accountID string, options camoufoxnative.Options) (*NativeWorker, error) {
@@ -34,7 +74,7 @@ func NewNativeWorker(ctx context.Context, accountID string, options camoufoxnati
 	runtimeState := runtime.State()
 	return &NativeWorker{
 		accountID: accountID,
-		runtime:   runtime,
+		runtime:   camoufoxRuntime{runtime},
 		state: WorkerState{
 			AccountID: accountID,
 			Phase:     WorkerReady,
@@ -45,13 +85,35 @@ func NewNativeWorker(ctx context.Context, accountID string, options camoufoxnati
 	}, nil
 }
 
-// Prepare 生成 fresh proof 并写入请求指定的 WAA field
+// pageGenerator 是在页面界面运行 GenerateContent 的 workerRuntime，页面应用点击 Run 后自己取 proof 并发出请求
+type pageGenerator interface {
+	Generate(context.Context, camoufoxnative.GenerateTurn) (*camoufoxnative.ProtectedResponse, error)
+}
+
+// generator 返回在页面界面运行该请求的 runtime：Camoufox 后端、GenerateContent 且最后一个轮次是带文本的 user 轮次
+func pageGeneratorFor(runtime workerRuntime, request ProtectedRequest) (pageGenerator, bool) {
+	generator, ok := runtime.(pageGenerator)
+	if !ok || !strings.HasSuffix(request.URL, "/GenerateContent") {
+		return nil, false
+	}
+	_, typed := camoufoxnative.GeneratePrompt(request.Body)
+	return generator, typed
+}
+
+// Prepare 生成 fresh proof 并写入请求指定的 WAA field；在页面界面运行的 GenerateContent 由页面应用取 proof，只返回公共协议头
 func (worker *NativeWorker) Prepare(ctx context.Context, request ProtectedRequest) (PreparedProtectedRequest, error) {
 	start, end, err := arrayElementSpan(request.Body, request.ProofField-1)
 	if err != nil {
 		return PreparedProtectedRequest{}, fmt.Errorf("受保护请求缺少 WAA field %d: %w", request.ProofField, err)
 	}
-	proof, headers, err := worker.proofAndHeaders(ctx, request.Prompt, request.PagePrompt)
+	if _, ok := pageGeneratorFor(worker.current(), request); ok {
+		headers, err := worker.current().ProtocolHeaders(ctx)
+		if err != nil {
+			return PreparedProtectedRequest{}, err
+		}
+		return PreparedProtectedRequest{Body: request.Body, Headers: headers}, nil
+	}
+	proof, headers, err := worker.proofAndHeaders(ctx, request.Prompt, request.PagePrompt, strings.HasSuffix(request.URL, "/GenerateContent") && request.PagePrompt != "")
 	if err != nil {
 		return PreparedProtectedRequest{}, err
 	}
@@ -61,16 +123,28 @@ func (worker *NativeWorker) Prepare(ctx context.Context, request ProtectedReques
 	return PreparedProtectedRequest{Body: body, Headers: headers}, nil
 }
 
-// proofAndHeaders 把 page 写入页面提示词后为 binding 的 SHA-256 生成 fresh proof，再取公共协议头
-func (worker *NativeWorker) proofAndHeaders(ctx context.Context, binding, page string) (string, http.Header, error) {
+// pageRunner 是写入提示词并点击 Run 后取 GenerateContent proof 的 workerRuntime
+type pageRunner interface {
+	RunProof(context.Context, string, string) (string, error)
+}
+
+// proofAndHeaders 把 page 写入页面提示词后为 binding 的 SHA-256 生成 fresh proof，run 时写入后点击 Run，再取公共协议头
+func (worker *NativeWorker) proofAndHeaders(ctx context.Context, binding, page string, run bool) (string, http.Header, error) {
 	worker.operationMu.Lock()
 	defer worker.operationMu.Unlock()
 	worker.setPhase(WorkerBusy)
 	digest := sha256.Sum256([]byte(binding))
-	proof, err := worker.runtime.Proof(ctx, fmt.Sprintf("%x", digest), page)
+	runtime := worker.current()
+	var proof string
+	var err error
+	if runner, ok := runtime.(pageRunner); ok && run {
+		proof, err = runner.RunProof(ctx, fmt.Sprintf("%x", digest), page)
+	} else {
+		proof, err = runtime.Proof(ctx, fmt.Sprintf("%x", digest), page)
+	}
 	var headers http.Header
 	if err == nil {
-		headers, err = worker.runtime.ProtocolHeaders(ctx)
+		headers, err = runtime.ProtocolHeaders(ctx)
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -136,12 +210,59 @@ func arrayElementSpan(body []byte, index int) (int, int, error) {
 // pageCountTokensDelay 是官网页面在 GenerateContent 发出后统计用户轮次 token 的时延
 const pageCountTokensDelay = 2200 * time.Millisecond
 
-// SendProtected 经账户 WAA runtime 流式发送已准备的请求，GenerateContent 发出 pageCountTokensDelay 后由 runtime 以相同请求头统计页面提示词的 token
+// SendProtected 经账户 WAA runtime 流式发送已准备的请求：Camoufox 后端的 GenerateContent 在页面界面运行，请求头、proof 与随后的 CountTokens 都由页面应用产生；其余 GenerateContent 带官网点击运行时的 Priority: u=0，发出 pageCountTokensDelay 后由 runtime 以相同请求头统计页面提示词的 token
 func (worker *NativeWorker) SendProtected(ctx context.Context, request ProtectedRequest) (*RPCResponse, error) {
-	if body, ok := countTokensBody(request); ok {
-		ctx = camoufoxnative.WithFollowUp(ctx, camoufoxnative.FollowUp{URL: makerSuiteRPCURL + "CountTokens", Body: body, Delay: pageCountTokensDelay})
+	if err := worker.waitClosingResponses(ctx); err != nil {
+		return nil, err
 	}
-	response, err := worker.runtime.SendProtected(ctx, request.URL, request.Headers, request.Body)
+	worker.runtimeMu.Lock()
+	if worker.stopping {
+		worker.runtimeMu.Unlock()
+		return nil, errors.New("WAA runtime 已关闭")
+	}
+	runtime := worker.runtime
+	if worker.runtimeUses == nil {
+		worker.runtimeUses = make(map[workerRuntime]*nativeRuntimeUse)
+	}
+	use := worker.runtimeUses[runtime]
+	if use == nil {
+		use = &nativeRuntimeUse{}
+		worker.runtimeUses[runtime] = use
+	}
+	use.requests++
+	worker.runtimeMu.Unlock()
+	response, err := worker.sendProtected(ctx, runtime, request)
+	if err != nil {
+		worker.releaseRuntime(runtime, nil)
+		return nil, err
+	}
+	body := &nativeResponseBody{ReadCloser: response.Body, ctx: ctx, closing: make(chan struct{}), done: make(chan struct{})}
+	body.release = func() { worker.releaseRuntime(runtime, body) }
+	worker.runtimeMu.Lock()
+	if use := worker.runtimeUses[runtime]; use != nil {
+		if use.responses == nil {
+			use.responses = make(map[*nativeResponseBody]struct{})
+		}
+		use.responses[body] = struct{}{}
+	}
+	worker.runtimeMu.Unlock()
+	response.Body = body
+	return response, nil
+}
+
+func (worker *NativeWorker) sendProtected(ctx context.Context, runtime workerRuntime, request ProtectedRequest) (*RPCResponse, error) {
+	if generator, ok := pageGeneratorFor(runtime, request); ok {
+		return worker.generate(ctx, generator, request)
+	}
+	if body, ok := countTokensBody(request); ok {
+		ctx = withFollowUp(ctx, followUp{URL: makerSuiteRPCURL + "CountTokens", Body: body, Delay: pageCountTokensDelay})
+	}
+	headers := request.Headers
+	if strings.HasSuffix(request.URL, "/GenerateContent") {
+		headers = headers.Clone()
+		headers.Set("Priority", "u=0")
+	}
+	response, err := runtime.SendProtected(ctx, request.URL, headers, request.Body)
 	if err != nil {
 		if ctx.Err() == nil {
 			worker.setPhase(WorkerFailed)
@@ -153,6 +274,85 @@ func (worker *NativeWorker) SendProtected(ctx context.Context, request Protected
 		Header:     response.Header,
 		Body:       response.Body,
 	}, nil
+}
+
+func (worker *NativeWorker) releaseRuntime(runtime workerRuntime, body *nativeResponseBody) {
+	worker.runtimeMu.Lock()
+	defer worker.runtimeMu.Unlock()
+	use := worker.runtimeUses[runtime]
+	if use == nil {
+		return
+	}
+	delete(use.responses, body)
+	use.requests--
+	if use.requests == 0 && use.retired {
+		if err := runtime.Close(); err != nil {
+			slog.Warn("关闭已替换的 WAA runtime 失败", "error", err)
+			return
+		}
+		delete(worker.runtimeUses, runtime)
+	}
+}
+
+type nativeResponseBody struct {
+	io.ReadCloser
+	ctx     context.Context
+	once    sync.Once
+	release func()
+	closing chan struct{}
+	done    chan struct{}
+	err     error
+}
+
+func (body *nativeResponseBody) Read(buffer []byte) (int, error) {
+	n, err := body.ReadCloser.Read(buffer)
+	if err != nil {
+		done := body.startClose()
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			<-done
+		}
+	}
+	return n, err
+}
+
+func (body *nativeResponseBody) Close() error {
+	<-body.startClose()
+	return body.err
+}
+
+// Cancellation returns promptly, while Close and runtime release join the same
+// source cleanup instead of making a still-stopping page available for reuse.
+func (body *nativeResponseBody) startClose() <-chan struct{} {
+	body.once.Do(func() {
+		close(body.closing)
+		go func() {
+			defer close(body.done)
+			body.err = body.ReadCloser.Close()
+			body.release()
+		}()
+	})
+	return body.done
+}
+
+// generate 在页面界面运行 GenerateContent，proof 绑定 request.Prompt 的 SHA-256
+func (worker *NativeWorker) generate(ctx context.Context, generator pageGenerator, request ProtectedRequest) (*RPCResponse, error) {
+	start, end, err := arrayElementSpan(request.Body, request.ProofField-1)
+	if err != nil {
+		return nil, fmt.Errorf("受保护请求缺少 WAA field %d: %w", request.ProofField, err)
+	}
+	digest := sha256.Sum256([]byte(request.Prompt))
+	worker.setPhase(WorkerBusy)
+	response, err := generator.Generate(ctx, camoufoxnative.GenerateTurn{Body: request.Body, ProofStart: start, ProofEnd: end, Digest: fmt.Sprintf("%x", digest)})
+	if err != nil {
+		if ctx.Err() != nil {
+			worker.setPhase(WorkerReady)
+		} else {
+			worker.setPhase(WorkerFailed)
+		}
+		return nil, err
+	}
+	worker.setPhase(WorkerReady)
+	return &RPCResponse{StatusCode: response.StatusCode, Header: response.Header, Body: response.Body}, nil
 }
 
 // countTokensBody 按官网页面对用户轮次的统计，以 GenerateContent 的模型构造页面提示词的 CountTokens 正文；不是带页面提示词的 GenerateContent 时返回 false
@@ -171,7 +371,7 @@ func countTokensBody(generate ProtectedRequest) ([]byte, bool) {
 
 // BrowserStorageState 返回账户 WAA runtime 当前 Cookie 状态
 func (worker *NativeWorker) BrowserStorageState(ctx context.Context) (StorageState, error) {
-	encoded, err := worker.runtime.StorageCookies(ctx)
+	encoded, err := worker.current().StorageCookies(ctx)
 	if err != nil {
 		return StorageState{}, err
 	}
@@ -186,9 +386,111 @@ func (worker *NativeWorker) BrowserStorageState(ctx context.Context) (StorageSta
 	return state, nil
 }
 
+// PageCatalog 返回账户当前页面载入时目录 RPC 的响应正文
+func (worker *NativeWorker) PageCatalog() camoufoxnative.PageCatalog {
+	return worker.current().PageCatalog()
+}
+
 // ProtocolHeaders 返回当前账户官网请求的动态公共头
 func (worker *NativeWorker) ProtocolHeaders(ctx context.Context, _ string) (http.Header, error) {
-	return worker.runtime.ProtocolHeaders(ctx)
+	return worker.current().ProtocolHeaders(ctx)
+}
+
+// current 返回账户当前页面的 runtime
+func (worker *NativeWorker) current() workerRuntime {
+	worker.runtimeMu.RLock()
+	defer worker.runtimeMu.RUnlock()
+	return worker.runtime
+}
+
+func (worker *NativeWorker) waitClosingResponses(ctx context.Context) error {
+	worker.runtimeMu.RLock()
+	var closing []*nativeResponseBody
+	for _, use := range worker.runtimeUses {
+		for body := range use.responses {
+			select {
+			case <-body.closing:
+			case <-body.ctx.Done():
+			default:
+				continue
+			}
+			closing = append(closing, body)
+		}
+	}
+	worker.runtimeMu.RUnlock()
+	// Closing responses must not consume a page alongside their replacements.
+	// Keep genuinely live responses available for configured concurrency.
+	for _, body := range closing {
+		select {
+		case <-body.startClose():
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return ctx.Err()
+}
+
+// Reload 按官网冷启动重新载入账户页面，新页面就绪后切换，切换前已发出的请求在原页面上完成
+func (worker *NativeWorker) Reload(ctx context.Context) error {
+	worker.reloadMu.Lock()
+	defer worker.reloadMu.Unlock()
+	if err := worker.waitClosingResponses(ctx); err != nil {
+		return err
+	}
+	previous := worker.current()
+	next, err := previous.Reload(ctx)
+	if err != nil || next == previous {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, worker.discardRuntime(next))
+	}
+	worker.operationMu.Lock()
+	worker.runtimeMu.Lock()
+	if worker.stopping {
+		worker.runtimeMu.Unlock()
+		worker.operationMu.Unlock()
+		return errors.Join(errors.New("WAA runtime 已关闭"), worker.discardRuntime(next))
+	}
+	worker.runtime = next
+	worker.stateMu.Lock()
+	worker.state.PageURL = next.State().PageURL
+	worker.stateMu.Unlock()
+	use := worker.runtimeUses[previous]
+	if use != nil && use.requests != 0 {
+		use.retired = true
+		worker.runtimeMu.Unlock()
+		worker.operationMu.Unlock()
+		return nil
+	}
+	err = previous.Close()
+	if err == nil {
+		delete(worker.runtimeUses, previous)
+	} else {
+		if worker.runtimeUses == nil {
+			worker.runtimeUses = make(map[workerRuntime]*nativeRuntimeUse)
+		}
+		worker.runtimeUses[previous] = &nativeRuntimeUse{retired: true}
+	}
+	worker.runtimeMu.Unlock()
+	worker.operationMu.Unlock()
+	return err
+}
+
+func (worker *NativeWorker) discardRuntime(runtime workerRuntime) error {
+	worker.runtimeMu.Lock()
+	defer worker.runtimeMu.Unlock()
+	err := runtime.Close()
+	if err != nil {
+		if worker.runtimeUses == nil {
+			worker.runtimeUses = make(map[workerRuntime]*nativeRuntimeUse)
+		}
+		worker.runtimeUses[runtime] = &nativeRuntimeUse{retired: true}
+		if worker.stopping {
+			worker.setPhase(WorkerClosing)
+		}
+	}
+	return err
 }
 
 // State 返回账户 WAA runtime 状态
@@ -200,11 +502,23 @@ func (worker *NativeWorker) State() WorkerState {
 
 // Close 关闭账户 WAA runtime
 func (worker *NativeWorker) Close() error {
-	worker.operationMu.Lock()
-	defer worker.operationMu.Unlock()
+	worker.closeMu.Lock()
+	defer worker.closeMu.Unlock()
+	worker.runtimeMu.Lock()
+	defer worker.runtimeMu.Unlock()
+	if worker.State().Phase == WorkerClosed {
+		return nil
+	}
+	worker.stopping = true
 	worker.setPhase(WorkerClosing)
 	err := worker.runtime.Close()
+	for runtime := range worker.runtimeUses {
+		if runtime != worker.runtime {
+			err = errors.Join(err, runtime.Close())
+		}
+	}
 	if err == nil {
+		clear(worker.runtimeUses)
 		worker.setPhase(WorkerClosed)
 	}
 	return err
@@ -214,5 +528,8 @@ func (worker *NativeWorker) Close() error {
 func (worker *NativeWorker) setPhase(phase WorkerPhase) {
 	worker.stateMu.Lock()
 	defer worker.stateMu.Unlock()
+	if (worker.state.Phase == WorkerClosing || worker.state.Phase == WorkerClosed) && phase != WorkerClosing && phase != WorkerClosed {
+		return
+	}
 	worker.state.Phase = phase
 }

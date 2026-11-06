@@ -29,9 +29,9 @@ type runtimeAdmin struct {
 	service       *trackedService
 	requests      *requestRegistry
 	login         aistudio.IsolatedLoginDriver
-	verifyCookies func(context.Context, *aistudio.StorageState, string) (chromeauth.Verification, error)
+	importChrome  func(context.Context, chromeauth.ImportOptions) ([]chromeauth.ImportResult, error)
+	verifyCookies func(context.Context, *aistudio.StorageState, string, int) (chromeauth.Verification, error)
 	workers       *accountWorkerManager
-	headers       *accountHeaderProvider
 	configPath    string
 	config        config.Config
 	proxies       *aistudio.ProxyPool
@@ -70,12 +70,11 @@ func newRuntimeAdmin(
 	registry *requestRegistry,
 	login aistudio.IsolatedLoginDriver,
 	workers *accountWorkerManager,
-	headers *accountHeaderProvider,
 	cfg config.Config,
 ) *runtimeAdmin {
 	return &runtimeAdmin{
 		lifecycle: lifecycle, pool: pool, store: store, service: service, requests: registry, login: login,
-		workers: workers, headers: headers,
+		workers:    workers,
 		configPath: ".env", config: cfg,
 	}
 }
@@ -105,6 +104,7 @@ func (admin *runtimeAdmin) Status(context.Context) (api.AdminStatus, error) {
 		ActiveRequests: admin.requests.count(),
 		Accounts:       counts,
 		Camoufox:       api.AdminCamoufox{Ready: camoufoxnative.Installed()},
+		ChromeImport:   chromeauth.Supported,
 	}
 	if download, ok := camoufoxnative.DownloadProgress(); ok {
 		status.Camoufox.Download = &download
@@ -146,16 +146,16 @@ func (admin *runtimeAdmin) CreateAccount(ctx context.Context, input api.AccountC
 	})
 	if err != nil {
 		admin.requests.log("auth", "ERROR", fmt.Sprintf(
-			"账户添加失败 | 耗时=%s | 错误=%s",
-			time.Since(startedAt).Round(time.Millisecond), strings.TrimSpace(err.Error()),
+			"账户添加失败 | 耗时=%s",
+			time.Since(startedAt).Round(time.Millisecond),
 		))
 		return api.AdminAccount{}, err
 	}
 	if result.DriveError != "" {
-		admin.requests.log("auth", "WARN", "账户添加 | Drive 授权失败 | 错误="+result.DriveError)
+		admin.requests.log("auth", "WARN", "账户添加 | Drive 授权失败")
 	}
 	if result.CloseError != "" {
-		admin.requests.log("auth", "WARN", "账户添加 | 关闭 Camoufox 失败 | 错误="+result.CloseError)
+		admin.requests.log("auth", "WARN", "账户添加 | 关闭 Camoufox 失败")
 	}
 	admin.requests.log("auth", "INFO", "账户添加 | 2/2 | 保存认证状态")
 	if _, err := aistudio.NewSigner().Authorization(result.StorageState); err != nil {
@@ -165,10 +165,11 @@ func (admin *runtimeAdmin) CreateAccount(ctx context.Context, input api.AccountC
 	if err := accountConfig.Validate(); err != nil {
 		return api.AdminAccount{}, invalidAccount(err)
 	}
-	created, err := admin.addAccount(ctx, accountConfig, result.StorageState, directory)
+	created, err := admin.addAccount(ctx, accountConfig, result.StorageState, directory, "")
 	if err != nil {
 		return api.AdminAccount{}, err
 	}
+	admin.syncAccountModelCatalog(ctx, created.ID)
 	admin.requests.log("auth", "INFO", fmt.Sprintf(
 		"账户添加完成 | 账户=%s | 耗时=%s",
 		created.Label, time.Since(startedAt).Round(time.Millisecond),
@@ -217,7 +218,7 @@ func (admin *runtimeAdmin) CookieBrowsers(ctx context.Context) ([]api.CookieBrow
 			browser := api.CookieBrowser{Address: address}
 			name, err := chromeauth.DebugBrowserName(ctx, address)
 			if err != nil {
-				browser.Error = err.Error()
+				browser.Error = "无法读取浏览器调试信息"
 				browsers[index] = []api.CookieBrowser{browser}
 				return
 			}
@@ -225,7 +226,7 @@ func (admin *runtimeAdmin) CookieBrowsers(ctx context.Context) ([]api.CookieBrow
 			accounts, err := admin.readCookieBrowser(ctx, &browser)
 			browser.SignedOut = errors.Is(err, chromeauth.ErrSignedOut) || errors.Is(err, aistudio.ErrLoginCookieMissing)
 			if err != nil && !browser.SignedOut {
-				browser.Error = err.Error()
+				browser.Error = "无法验证浏览器 Cookie"
 			}
 			browsers[index] = cookieAccountEntries(browser, accounts, existing)
 		})
@@ -245,11 +246,15 @@ func (admin *runtimeAdmin) readCookieBrowser(ctx context.Context, browser *api.C
 	if err != nil {
 		return nil, err
 	}
+	browser.DeviceBound = deviceBoundSession(state)
 	return chromeauth.DiscoverCookieAccounts(ctx, &state, admin.effectiveProxy(""))
 }
 
 // DiscoverCookieAccounts 解析粘贴的 Cookie，返回其中各会话登录 AI Studio 的账户
 func (admin *runtimeAdmin) DiscoverCookieAccounts(ctx context.Context, input api.CookieImportInput) ([]api.CookieBrowser, error) {
+	if err := config.ValidateProxy(input.Proxy); err != nil {
+		return nil, invalidAccount(err)
+	}
 	state, err := aistudio.ParseCookieText(input.Cookies)
 	if err != nil {
 		return nil, &adminOperationError{status: http.StatusBadRequest, code: "invalid_cookies", message: err.Error()}
@@ -262,9 +267,14 @@ func (admin *runtimeAdmin) DiscoverCookieAccounts(ctx context.Context, input api
 		return nil, &adminOperationError{status: http.StatusBadRequest, code: "signed_out", message: err.Error()}
 	}
 	if err != nil {
-		return nil, invalidAccount(err)
+		return nil, invalidAccount(fmt.Errorf("无法识别 Cookie 登录的账户"))
 	}
-	return cookieAccountEntries(api.CookieBrowser{}, accounts, admin.accountIDs()), nil
+	return cookieAccountEntries(api.CookieBrowser{DeviceBound: deviceBoundSession(state)}, accounts, admin.accountIDs()), nil
+}
+
+// deviceBoundSession 表示 Cookie 带 __Secure-1PSIDRTS，会话绑定签发它的设备
+func deviceBoundSession(state aistudio.StorageState) bool {
+	return slices.ContainsFunc(state.Cookies, func(cookie aistudio.StateCookie) bool { return cookie.Name == "__Secure-1PSIDRTS" })
 }
 
 // cookieAccountEntries 以 template 为模板为每个会话账户生成一项并标记已导入的账户，没有账户时只返回 template
@@ -300,7 +310,14 @@ func (admin *runtimeAdmin) ImportChromeAccounts(ctx context.Context, input api.C
 		return nil, err
 	}
 	accountProxy := strings.TrimSpace(input.Proxy)
-	results, err := chromeauth.Import(ctx, chromeauth.ImportOptions{
+	if err := config.ValidateProxy(accountProxy); err != nil {
+		return nil, invalidAccount(err)
+	}
+	importChrome := admin.importChrome
+	if importChrome == nil {
+		importChrome = chromeauth.Import
+	}
+	results, err := importChrome(ctx, chromeauth.ImportOptions{
 		ChromeRoot: root, Proxy: admin.effectiveProxy(accountProxy), AccountIDs: input.AccountIDs,
 	})
 	if err != nil {
@@ -308,8 +325,16 @@ func (admin *runtimeAdmin) ImportChromeAccounts(ctx context.Context, input api.C
 	}
 	configs := make([]aistudio.AccountConfig, len(results))
 	seen := make(map[string]struct{}, len(results))
-	for index, result := range results {
+	for index := range results {
+		result := &results[index]
 		email := strings.ToLower(strings.TrimSpace(result.Email))
+		verified, err := admin.verifyCookieState(ctx, &result.State, admin.effectiveProxy(accountProxy), 0)
+		if err != nil {
+			return nil, cookieVerificationError(err, "http")
+		}
+		if !strings.EqualFold(strings.TrimSpace(verified.Email), email) {
+			return nil, invalidAccount(fmt.Errorf("Chrome Cookie 登录邮箱与所选账户不一致"))
+		}
 		if _, exists := seen[email]; exists {
 			return nil, invalidAccount(fmt.Errorf("Chrome 账号重复: %s", email))
 		}
@@ -334,11 +359,12 @@ func (admin *runtimeAdmin) ImportChromeAccounts(ctx context.Context, input api.C
 	}
 	accounts := make([]api.AdminAccount, 0, len(results))
 	for index, result := range results {
-		account, err := admin.addAccount(ctx, configs[index], result.State, "")
+		account, err := admin.addAccount(ctx, configs[index], result.State, "", "")
 		if err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, account)
+		admin.syncAccountModelCatalog(ctx, account.ID)
 		admin.requests.log("auth", "INFO", "Chrome 账户已导入 | 账户="+account.Label)
 	}
 	return accounts, nil
@@ -346,16 +372,26 @@ func (admin *runtimeAdmin) ImportChromeAccounts(ctx context.Context, input api.C
 
 // ImportAccountState 导入远程配对上传或 Cookie 导入的认证状态与 Camoufox 指纹，未给标签时以 Cookie 中第 auth_user 个会话登录的账户邮箱为标签
 func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.AccountStateInput) (api.AdminAccount, error) {
-	label := strings.TrimSpace(input.Label)
-	if label == "" {
-		verification, err := chromeauth.VerifyAuthUser(ctx, &input.StorageState, admin.effectiveProxy(input.Proxy), input.AuthUser)
-		if errors.Is(err, chromeauth.ErrSignedOut) {
-			return api.AdminAccount{}, &adminOperationError{status: http.StatusBadRequest, code: "signed_out", message: err.Error()}
-		}
-		if err != nil {
-			return api.AdminAccount{}, invalidAccount(err)
-		}
-		label = strings.ToLower(verification.Email)
+	if input.AuthUser < 0 || input.AuthUser > 9 {
+		return api.AdminAccount{}, invalidAccount(fmt.Errorf("账户 auth_user 必须在 0..9 之间"))
+	}
+	if err := config.ValidateProxy(input.Proxy); err != nil {
+		return api.AdminAccount{}, invalidAccount(err)
+	}
+	state, err := importCookieState(input.StorageState.Cookies)
+	if err != nil {
+		return api.AdminAccount{}, invalidAccount(err)
+	}
+	verification, err := admin.verifyCookieState(ctx, &state, admin.effectiveProxy(input.Proxy), input.AuthUser)
+	if err != nil {
+		return api.AdminAccount{}, cookieVerificationError(err, "http")
+	}
+	if _, err := aistudio.NewSigner().Authorization(state); err != nil {
+		return api.AdminAccount{}, invalidAccount(fmt.Errorf("验证后的 Cookie 不完整或已过期"))
+	}
+	label := strings.ToLower(strings.TrimSpace(verification.Email))
+	if input.Label != "" && !strings.EqualFold(strings.TrimSpace(input.Label), label) {
+		return api.AdminAccount{}, invalidAccount(fmt.Errorf("上传邮箱与 Cookie 登录账户不一致"))
 	}
 	accountConfig := aistudio.DefaultAccountConfig(label)
 	accountConfig.AuthUser = input.AuthUser
@@ -369,25 +405,8 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 	if err := accountConfig.Validate(); err != nil {
 		return api.AdminAccount{}, invalidAccount(err)
 	}
-	if err := input.StorageState.Validate(); err != nil {
-		return api.AdminAccount{}, invalidAccount(err)
-	}
-	if _, err := aistudio.NewSigner().Authorization(input.StorageState); err != nil {
-		return api.AdminAccount{}, invalidAccount(fmt.Errorf("认证状态无法用于 AI Studio: %w", err))
-	}
-	email := accountConfig.Label
-	if extension, exists, err := input.StorageState.AuthExtension(); err != nil {
-		return api.AdminAccount{}, invalidAccount(err)
-	} else if exists && strings.TrimSpace(extension.Source.Email) != "" {
-		email = extension.Source.Email
-	}
-	for _, status := range admin.pool.Status() {
-		if strings.EqualFold(status.ID, strings.TrimSpace(email)) {
-			return api.AdminAccount{}, &adminOperationError{
-				status: http.StatusConflict, code: "account_exists", message: "账户已存在: " + status.ID,
-			}
-		}
-	}
+	// Remote OAuth/localStorage cannot establish identity; renewal material stays on the source computer.
+	state.SetAuthExtension(aistudio.AuthExtension{Source: aistudio.AuthSource{Browser: "cookie", Email: label}})
 	fingerprintDirectory := ""
 	if len(input.Fingerprint) != 0 {
 		directory, err := os.MkdirTemp("", "aistudio2api-pairing-*")
@@ -400,7 +419,7 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 		}
 		fingerprintDirectory = directory
 	}
-	account, err := admin.addAccount(ctx, accountConfig, input.StorageState, fingerprintDirectory)
+	account, err := admin.addAccount(ctx, accountConfig, state, fingerprintDirectory, input.RenewalToken)
 	if err != nil {
 		return api.AdminAccount{}, err
 	}
@@ -413,10 +432,17 @@ func (admin *runtimeAdmin) addAccount(
 	accountConfig aistudio.AccountConfig,
 	state aistudio.StorageState,
 	fingerprintDirectory string,
+	renewalToken string,
 ) (created api.AdminAccount, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return api.AdminAccount{}, err
+	}
+	if _, exists := admin.accountIDs()[strings.ToLower(accountConfig.Label)]; exists {
+		return api.AdminAccount{}, &adminOperationError{status: http.StatusConflict, code: "account_exists", message: "账户已存在"}
+	}
 	account, publishLease, err := admin.store.Create(accountConfig, state)
 	if err != nil {
-		return api.AdminAccount{}, err
+		return api.AdminAccount{}, accountOperationError(err)
 	}
 	defer func() {
 		if publishLease != nil {
@@ -428,30 +454,35 @@ func (admin *runtimeAdmin) addAccount(
 			return api.AdminAccount{}, errors.Join(err, admin.store.Delete(account))
 		}
 	}
+	if renewalToken != "" {
+		if err := writePairingRenewal(account.Directory, pairingRenewal{TokenSHA256: pairingTokenDigest(renewalToken)}); err != nil {
+			return api.AdminAccount{}, errors.Join(err, admin.store.Delete(account))
+		}
+	}
 	if strings.TrimSpace(account.Config.Proxy) == "" {
 		account.SetPoolProxy(admin.proxies.Next())
 	}
-	if err := admin.headers.Add(account); err != nil {
+	if err := admin.workers.Add(account); err != nil {
 		return api.AdminAccount{}, errors.Join(err, admin.store.Delete(account))
 	}
-	if err := admin.workers.Add(account); err != nil {
-		return api.AdminAccount{}, errors.Join(err, admin.headers.Remove(account.ID), admin.store.Delete(account))
+	if _, err := admin.proxies.Assign(); err != nil {
+		return api.AdminAccount{}, errors.Join(err, admin.workers.Remove(account.ID), admin.store.Delete(account))
+	}
+	if err := ctx.Err(); err != nil {
+		return api.AdminAccount{}, errors.Join(err, admin.workers.Remove(account.ID), admin.store.Delete(account))
 	}
 	if err := admin.service.changeModels(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return admin.pool.Add(account)
 	}); err != nil {
-		return api.AdminAccount{}, errors.Join(
-			err, admin.workers.Remove(account.ID), admin.headers.Remove(account.ID), admin.store.Delete(account),
-		)
+		return api.AdminAccount{}, errors.Join(err, admin.workers.Remove(account.ID), admin.store.Delete(account))
 	}
 	if err := publishLease.Release(); err != nil {
 		return api.AdminAccount{}, err
 	}
 	publishLease = nil
-	if _, err := admin.proxies.Assign(); err != nil {
-		return api.AdminAccount{}, err
-	}
-	admin.syncAccountModelCatalog(ctx, account)
 	return admin.account(account.ID)
 }
 
@@ -477,24 +508,17 @@ func (admin *runtimeAdmin) UpdateAccount(ctx context.Context, accountID string, 
 	if accountConfig.Proxy == "" && !admin.proxies.Available(account.PoolProxy("")) {
 		account.SetPoolProxy(admin.proxies.Next())
 	}
-	headerUpdate, err := admin.headers.prepareUpdate(account, accountConfig)
-	if err != nil {
-		return api.AdminAccount{}, errors.Join(err, lease.Release())
-	}
 	workerUpdate, err := admin.workers.prepareUpdate(account, accountConfig)
 	if err != nil {
-		headerUpdate.Discard()
 		return api.AdminAccount{}, errors.Join(err, lease.Release())
 	}
 	if err := admin.service.changeModels(func() error {
 		return lease.SaveConfig(accountConfig)
 	}); err != nil {
 		workerUpdate.Discard()
-		headerUpdate.Discard()
 		return api.AdminAccount{}, errors.Join(err, lease.Release())
 	}
 	workerUpdate.Commit()
-	headerUpdate.Commit()
 	if err := lease.Release(); err != nil {
 		return api.AdminAccount{}, err
 	}
@@ -503,7 +527,7 @@ func (admin *runtimeAdmin) UpdateAccount(ctx context.Context, accountID string, 
 	}
 	admin.syncModelCache()
 	if enabling {
-		admin.syncAccountModelCatalog(ctx, account)
+		admin.syncAccountModelCatalog(ctx, account.ID)
 	}
 	admin.requests.log("auth", "INFO", "账户配置已更新 | 账户="+accountConfig.Label)
 	return admin.account(account.ID)
@@ -528,7 +552,7 @@ func (admin *runtimeAdmin) DeleteAccount(_ context.Context, accountID string) er
 		return accountOperationError(err)
 	}
 	admin.service.removeAccountModelRetry(accountID)
-	if err := errors.Join(admin.workers.Remove(accountID), admin.headers.Remove(accountID)); err != nil {
+	if err := admin.workers.Remove(accountID); err != nil {
 		return err
 	}
 	admin.requests.log("auth", "INFO", "账户已删除 | 账户="+account.Label)
@@ -559,25 +583,28 @@ func (admin *runtimeAdmin) LoginAccount(ctx context.Context, accountID string, v
 	result, err := admin.login.Login(ctx, request)
 	if err != nil {
 		admin.requests.log(account.Config.Label, "ERROR", fmt.Sprintf(
-			"账户登录失败 | 耗时=%s | 错误=%s",
-			time.Since(startedAt).Round(time.Millisecond), strings.TrimSpace(err.Error()),
+			"账户登录失败 | 耗时=%s",
+			time.Since(startedAt).Round(time.Millisecond),
 		))
 		return api.AdminAccount{}, errors.Join(err, lease.Release())
 	}
 	if !strings.EqualFold(strings.TrimSpace(result.Email), account.ID) {
 		return api.AdminAccount{}, errors.Join(
-			invalidAccount(fmt.Errorf("登录邮箱与账户不一致: %s", result.Email)), lease.Release(),
+			invalidAccount(fmt.Errorf("登录邮箱与账户不一致")), lease.Release(),
 		)
 	}
 	if result.DriveError != "" {
-		admin.requests.log(account.Config.Label, "WARN", "账户登录 | Drive 授权失败 | 错误="+result.DriveError)
+		admin.requests.log(account.Config.Label, "WARN", "账户登录 | Drive 授权失败")
 	}
 	if result.CloseError != "" {
-		admin.requests.log(account.Config.Label, "WARN", "账户登录 | 关闭 Camoufox 失败 | 错误="+result.CloseError)
+		admin.requests.log(account.Config.Label, "WARN", "账户登录 | 关闭 Camoufox 失败")
 	}
 	admin.requests.log(account.Config.Label, "INFO", "账户登录 | 2/2 | 保存认证状态")
 	if _, err := aistudio.NewSigner().Authorization(result.StorageState); err != nil {
 		return api.AdminAccount{}, errors.Join(fmt.Errorf("认证状态无法用于 AI Studio: %w", err), lease.Release())
+	}
+	if err := ctx.Err(); err != nil {
+		return api.AdminAccount{}, errors.Join(err, lease.Release())
 	}
 	if err := camoufoxnative.PersistAccountFingerprint(directory, account.Directory); err != nil {
 		return api.AdminAccount{}, errors.Join(err, lease.Release())
@@ -586,11 +613,15 @@ func (admin *runtimeAdmin) LoginAccount(ctx context.Context, accountID string, v
 	if err := keepAuthExtension(&state, account.StorageState); err != nil {
 		return api.AdminAccount{}, errors.Join(err, lease.Release())
 	}
+	if err := ctx.Err(); err != nil {
+		return api.AdminAccount{}, errors.Join(err, lease.Release())
+	}
+	previousState := account.StorageState
 	if err := lease.SaveStorageState(state); err != nil {
 		return api.AdminAccount{}, errors.Join(err, lease.Release())
 	}
 	if err := resetCookieAuthUser(lease, admin.workers.prepareUpdate); err != nil {
-		return api.AdminAccount{}, errors.Join(err, lease.Release())
+		return api.AdminAccount{}, errors.Join(err, lease.SaveStorageState(previousState), lease.Release())
 	}
 	if err := admin.service.changeModels(func() error {
 		return errors.Join(
@@ -604,7 +635,7 @@ func (admin *runtimeAdmin) LoginAccount(ctx context.Context, accountID string, v
 	if err := lease.Release(); err != nil {
 		return api.AdminAccount{}, err
 	}
-	admin.syncAccountModelCatalog(ctx, account)
+	admin.syncAccountModelCatalog(ctx, account.ID)
 	admin.requests.log(account.Config.Label, "INFO", fmt.Sprintf(
 		"账户登录完成 | 耗时=%s",
 		time.Since(startedAt).Round(time.Millisecond),
@@ -762,14 +793,14 @@ func (admin *runtimeAdmin) syncModelCache() {
 	admin.publishRuntimeSnapshot(ctx, status)
 }
 
-func (admin *runtimeAdmin) syncAccountModelCatalog(ctx context.Context, account *aistudio.Account) {
-	models, err := admin.service.syncAccountModels(ctx, account.ID)
+func (admin *runtimeAdmin) syncAccountModelCatalog(ctx context.Context, accountID string) {
+	models, err := admin.service.syncAccountModels(ctx, accountID)
 	if err != nil {
 		admin.service.publishModelAccess()
 		return
 	}
 	if len(models) > 0 {
-		admin.requests.log(account.Config.Label, "INFO", fmt.Sprintf("账户模型目录同步完成 | 模型=%d", len(models)))
+		admin.requests.log(accountID, "INFO", fmt.Sprintf("账户模型目录同步完成 | 模型=%d", len(models)))
 	}
 	admin.service.publishModelAccess()
 }
@@ -825,6 +856,7 @@ func adminAccountDTO(status aistudio.AccountStatus) api.AdminAccount {
 		ID: status.ID, Label: status.Label, Enabled: status.Enabled, State: string(status.State),
 		Proxy: status.Proxy, Egress: status.Egress, Locale: status.Locale, Timezone: status.Timezone,
 		Models: status.Models, BenefitTier: status.BenefitTier, Message: status.Message,
+		PairingRenewedAt: pairingRenewedAt(status.Directory),
 	}
 }
 
@@ -888,7 +920,7 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 		AdminAuthEnabled: value.AdminAuthEnabled, AdminUsername: strings.TrimSpace(value.AdminUsername), AdminPassword: password,
 		BuildNativeNonstream: value.BuildNativeNonstream,
 		NonstreamKeepalive:   value.NonstreamKeepalive, FakeStream: value.FakeStream, YouTubeLinks: value.YouTubeLinks,
-		SearchModelAliases: value.SearchModelAliases, GoogleSearch: value.GoogleSearch,
+		SearchModelAliases: value.SearchModelAliases, GoogleSearch: value.GoogleSearch, StripThoughtSignatures: value.StripThoughtSignatures,
 		AntiTruncation:      value.AntiTruncation,
 		AutoContinuation:    autoContinuation,
 		ContinuationRewrite: value.ContinuationRewrite, ContinuationPrompt: strings.TrimSpace(value.ContinuationPrompt),
@@ -902,7 +934,6 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 		ModelMapping:           strings.TrimSpace(value.ModelMapping),
 		ModelChannels:          strings.TrimSpace(value.ModelChannels),
 		APIKeyAccounts:         strings.TrimSpace(value.APIKeyAccounts),
-		TemporaryChat:          value.TemporaryChat,
 		WAABackend:             value.WAABackend,
 		MediaOutput:            strings.ToLower(strings.TrimSpace(value.MediaOutput)),
 		MediaBaseURL:           strings.TrimSpace(value.MediaBaseURL),
@@ -1194,7 +1225,7 @@ func runtimeConfigDTO(cfg config.Config) api.RuntimeConfig {
 		AdminPasswordSet: cfg.AdminPassword != "", SavedAdminPassword: cfg.AdminPassword,
 		BuildNativeNonstream: cfg.BuildNativeNonstream,
 		NonstreamKeepalive:   cfg.NonstreamKeepalive, FakeStream: cfg.FakeStream, YouTubeLinks: cfg.YouTubeLinks,
-		SearchModelAliases: cfg.SearchModelAliases, GoogleSearch: cfg.GoogleSearch,
+		SearchModelAliases: cfg.SearchModelAliases, GoogleSearch: cfg.GoogleSearch, StripThoughtSignatures: cfg.StripThoughtSignatures,
 		AntiTruncation:      cfg.AntiTruncation,
 		AutoContinuation:    &cfg.AutoContinuation,
 		ContinuationRewrite: cfg.ContinuationRewrite, ContinuationPrompt: cfg.ContinuationPrompt,
@@ -1210,7 +1241,6 @@ func runtimeConfigDTO(cfg config.Config) api.RuntimeConfig {
 		ModelMapping:           cfg.ModelMapping,
 		ModelChannels:          cfg.ModelChannels,
 		APIKeyAccounts:         cfg.APIKeyAccounts,
-		TemporaryChat:          cfg.TemporaryChat,
 		WAABackend:             cfg.WAABackend,
 		MediaOutput:            cfg.MediaOutput,
 		MediaBaseURL:           cfg.MediaBaseURL,

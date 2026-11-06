@@ -7,15 +7,20 @@ import { liveCode } from './media/live-code'
 import { openLiveSocket } from './media/live-socket'
 import { realtimeMusicCode } from './media/music-code'
 import { speechCode } from './media/speech-code'
-import { protocolCall } from './protocols'
-import { apiKey, publicAPIBase } from './request'
+import { protocolCall, protocolsFor } from './protocols'
+import { agentConfig, apiKey, buildRequest, publicAPIBase } from './request'
+import { defaultSettings } from './session'
 
 vi.mock('@/desktop', () => ({ keepPage: () => {} }))
 vi.mock('@/i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
 
 vi.mock('@/console', () => ({
   useConsole: () => ({
-    models: { value: [{ id: 'build-only', channels: ['build'] }] },
+    models: {
+      value: [
+        { id: 'build-only', name: 'Build', methods: ['generateContent'], channels: ['build'] },
+      ],
+    },
     config: { value: { proxy_api_key: 'first-key,second-key' } },
   }),
 }))
@@ -35,6 +40,8 @@ const input: Parameters<typeof generateCode>[1] = {
   protocol: 'openai-chat',
   stream: false,
   images: { count: 1, size: 'auto', quality: 'auto' },
+  agent: undefined,
+  previous: undefined,
 }
 
 afterEach(() => vi.unstubAllGlobals())
@@ -55,6 +62,9 @@ describe('fixed public channel URLs', () => {
   it('uses the same catalog channel for anti-truncation variants without rewriting request models', () => {
     const requested = 'models/\u6297\u622a\u65ad-build-only(high)-search'
     expect(publicAPIBase(requested)).toBe('/build/v1')
+    expect(
+      publicAPIBase(requested, { id: requested, name: 'Alias', methods: ['generateContent'] }),
+    ).toBe('/build/v1')
     const call = protocolCall(
       'openai-chat',
       buildModel,
@@ -63,6 +73,8 @@ describe('fixed public channel URLs', () => {
       input.request,
       false,
       input.images,
+      undefined,
+      undefined,
     )
     expect(call.path).toBe('/build/v1/chat/completions')
     expect(call.body).toMatchObject({ model: requested })
@@ -79,6 +91,8 @@ describe('fixed public channel URLs', () => {
         input.request,
         false,
         input.images,
+        undefined,
+        undefined,
       )
       expect(call.path).toMatch(/^\/build\/v1\//)
       const normal = protocolCall(
@@ -89,6 +103,8 @@ describe('fixed public channel URLs', () => {
         input.request,
         false,
         input.images,
+        undefined,
+        undefined,
       )
       expect(normal.path).toMatch(/^\/v1\//)
     },
@@ -103,6 +119,8 @@ describe('fixed public channel URLs', () => {
       input.request,
       true,
       input.images,
+      undefined,
+      undefined,
     )
     expect(call.path).toBe('/v1beta/models/build-only:streamGenerateContent?alt=sse')
   })
@@ -216,6 +234,181 @@ describe('fixed public channel URLs', () => {
           }),
         ).toContain(url)
       }
+    },
+  )
+})
+
+describe('Interactions and current media capabilities', () => {
+  const agent: Model = {
+    ...model,
+    id: 'antigravity',
+    agent_model: 'gemini-base',
+    capabilities: {
+      secondary_capability_code_19: true,
+      capability_code_9: true,
+      capability_code_12: true,
+      default_capability_code_9: true,
+      default_capability_code_12: true,
+    },
+  }
+
+  it('distinguishes omitted agent tools from an explicit empty list', () => {
+    const omitted = protocolCall(
+      'interactions',
+      agent,
+      agent.id,
+      'key',
+      input.request,
+      false,
+      input.images,
+      undefined,
+      undefined,
+    )
+    expect(omitted.path).toBe('/v1beta/interactions')
+    expect(omitted.body).not.toHaveProperty('tools')
+    const disabled = protocolCall(
+      'interactions',
+      agent,
+      agent.id,
+      'key',
+      { ...input.request, tools: [] },
+      false,
+      input.images,
+      undefined,
+      'previous-id',
+    )
+    expect(disabled.body).toMatchObject({
+      agent: 'antigravity',
+      tools: [],
+      previous_interaction_id: 'previous-id',
+    })
+  })
+
+  it('sends explicit empty tools when the user disables the agent defaults', () => {
+    const settings = defaultSettings(agent)
+    expect(settings.tools).toEqual(['code_execution', 'google_search'])
+    const enabled = buildRequest(settings, agent, [])
+    expect(enabled.tools).toEqual([{ codeExecution: {} }, { googleSearch: {} }])
+    expect(enabled.toolConfig).toEqual({ includeServerSideToolInvocations: true })
+    settings.tools = []
+    expect(buildRequest(settings, agent, []).tools).toEqual([])
+    expect(buildRequest(defaultSettings(model), model, [])).not.toHaveProperty('tools')
+  })
+
+  it('keeps Antigravity model/token configuration separate from Build assistant routing', () => {
+    const settings = defaultSettings(agent)
+    expect(agentConfig(settings, agent)).toBeUndefined()
+    settings.agentModel = 'gemini-chosen'
+    settings.maxTotalTokens = 4096
+    expect(agentConfig(settings, agent)).toEqual({
+      type: 'antigravity',
+      model: 'gemini-chosen',
+      max_total_tokens: '4096',
+    })
+    expect(protocolsFor(agent).map((item) => item.value)).toEqual(['interactions'])
+    const assistant: Model = { ...model, channels: ['assistant'], agent_model: 'not-an-agent' }
+    expect(agentConfig(settings, assistant)).toBeUndefined()
+    expect(protocolsFor(assistant).some((item) => item.value === 'interactions')).toBe(false)
+    expect(publicAPIBase(assistant.id, assistant)).toBe('/build/v1')
+  })
+
+  it('keeps Deep Research capability switches in its own configuration type', () => {
+    const research: Model = {
+      ...model,
+      capabilities: {
+        secondary_capability_code_19: true,
+        capability_code_59: true,
+        capability_code_60: true,
+        capability_code_61: true,
+      },
+    }
+    const settings = defaultSettings(research)
+    settings.thinkingSummaries = true
+    settings.visualization = false
+    settings.collaborativePlanning = true
+    expect(agentConfig(settings, research)).toEqual({
+      type: 'deep-research',
+      thinking_summaries: 'auto',
+      visualization: 'off',
+      collaborative_planning: true,
+    })
+  })
+
+  it('decodes real server tool steps and terminal interaction usage', () => {
+    const call = protocolCall(
+      'interactions',
+      agent,
+      agent.id,
+      'key',
+      input.request,
+      true,
+      input.images,
+      undefined,
+      undefined,
+    )
+    expect(
+      call.decoder.event({
+        event_type: 'step.start',
+        step: {
+          type: 'google_search_call',
+          id: 'tool-id',
+          arguments: { queries: ['offline'] },
+        },
+      }).parts,
+    ).toEqual([
+      {
+        toolCall: { toolType: 'GOOGLE_SEARCH_WEB', id: 'tool-id', args: { queries: ['offline'] } },
+      },
+    ])
+    expect(
+      call.decoder.event({
+        event_type: 'step.start',
+        step: {
+          type: 'function_call',
+          id: 'function-id',
+          name: 'fixture',
+          arguments: { n: 1 },
+        },
+      }).parts,
+    ).toEqual([{ functionCall: { id: 'function-id', name: 'fixture', args: { n: 1 } } }])
+    const completed = {
+      event_type: 'interaction.completed',
+      interaction: {
+        id: 'interaction-id',
+        status: 'completed',
+        usage: { total_input_tokens: 2, total_output_tokens: 3, total_thought_tokens: 4 },
+      },
+    }
+    expect(call.decoder.event(completed)).toMatchObject({
+      interactionId: 'interaction-id',
+      tokens: 7,
+      thoughtTokens: 4,
+      promptTokens: 2,
+    })
+    expect(call.decoder.done(completed)).toBe(true)
+  })
+
+  it.each(['openai-python', 'openai-typescript'] as const)(
+    'keeps default MP3 and explicit WAV in %s speech examples',
+    (language) => {
+      const speech = {
+        baseURL: 'https://example.test',
+        model: 'build-only',
+        prompt: 'offline',
+        temperature: 1,
+        speakers: [],
+        openAI: { input: 'offline', voice: 'fixture' },
+      }
+      const mp3 = speechCode(language, speech)
+      expect(mp3).toContain('speech.mp3')
+      expect(mp3).not.toContain('response_format')
+      const wav = speechCode(language, {
+        ...speech,
+        openAI: { ...speech.openAI, response_format: 'wav' },
+      })
+      expect(wav).toContain('speech.wav')
+      expect(wav).toContain('response_format')
+      expect(wav).toContain('https://example.test/build/v1')
     },
   )
 })

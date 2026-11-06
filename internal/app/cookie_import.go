@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -64,24 +65,9 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 	var result aistudio.IsolatedLoginResult
 	var directory string
 	if method == "http" {
-		verify := admin.verifyCookies
-		if verify == nil {
-			verify = func(ctx context.Context, state *aistudio.StorageState, proxy string) (chromeauth.Verification, error) {
-				return chromeauth.VerifyAuthUser(ctx, state, proxy, input.AuthUser)
-			}
-		}
-		timeout := admin.config.InitTimeout
-		if timeout <= 0 {
-			timeout = config.Default().InitTimeout
-		}
-		verifyCtx, cancel := context.WithTimeout(ctx, timeout)
 		admin.requests.log("auth", "INFO", "Cookie 导入 | 验证 AI Studio 登录状态 | method=http")
 		var verification chromeauth.Verification
-		verification, err = verify(verifyCtx, &state, admin.effectiveProxy(accountConfig.Proxy))
-		if err == nil {
-			err = verifyCtx.Err()
-		}
-		cancel()
+		verification, err = admin.verifyCookieState(ctx, &state, admin.effectiveProxy(accountConfig.Proxy), input.AuthUser)
 		result = aistudio.IsolatedLoginResult{Email: verification.Email, StorageState: state}
 	} else {
 		importer, ok := admin.login.(aistudio.CookieLoginDriver)
@@ -104,23 +90,7 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 	if err != nil {
 		// 浏览器协议或 HTTP 错误可能包含凭据，不向日志或调用方回传原文。
 		admin.requests.log("auth", "WARN", "Cookie 导入失败 | 未保存账户")
-		switch {
-		case errors.Is(err, camoufoxnative.ErrAuthenticationRequired), errors.Is(err, chromeauth.ErrSignedOut):
-			return api.AdminAccount{}, invalidAccount(fmt.Errorf("Cookie 登录已失效，请重新导出完整 Cookie"))
-		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-			return api.AdminAccount{}, &adminOperationError{
-				status: http.StatusGatewayTimeout, code: "cookie_import_timeout", message: "Cookie 验证已取消或超时，请检查网络、代理和登录状态",
-			}
-		default:
-			if method == "http" {
-				return api.AdminAccount{}, &adminOperationError{
-					status: http.StatusBadGateway, code: "cookie_import_http_failed", message: "无法通过 HTTP 验证 Cookie 或识别邮箱，请检查代理和 AI Studio 登录状态，或改用浏览器验证",
-				}
-			}
-			return api.AdminAccount{}, &adminOperationError{
-				status: http.StatusBadGateway, code: "cookie_import_failed", message: "无法验证 Cookie 或识别邮箱，请检查 Camoufox、代理及 AI Studio 登录状态",
-			}
-		}
+		return api.AdminAccount{}, cookieVerificationError(err, method)
 	}
 	if result.CloseError != "" {
 		admin.requests.log("auth", "WARN", "Cookie 导入 | 关闭 Camoufox 失败 | 已验证的认证状态将继续保存")
@@ -149,10 +119,60 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 	if err := ctx.Err(); err != nil {
 		return api.AdminAccount{}, err
 	}
-	account, err := admin.addAccount(ctx, accountConfig, result.StorageState, directory)
+	account, err := admin.addAccount(ctx, accountConfig, result.StorageState, directory, "")
 	if err != nil {
 		return api.AdminAccount{}, err
 	}
+	if method == "browser" {
+		admin.syncAccountModelCatalog(ctx, account.ID)
+		account, err = admin.account(account.ID)
+		if err != nil {
+			return api.AdminAccount{}, err
+		}
+	} else {
+		// PageCatalog may need a browser; HTTP import only commits verified authentication.
+		admin.service.publishModelAccess()
+	}
 	admin.requests.log("auth", "INFO", "Cookie 账户已导入 | 账户="+account.Label)
 	return account, nil
+}
+
+func (admin *runtimeAdmin) verifyCookieState(ctx context.Context, state *aistudio.StorageState, proxy string, authUser int) (chromeauth.Verification, error) {
+	verify := admin.verifyCookies
+	if verify == nil {
+		verify = chromeauth.VerifyAuthUser
+	}
+	timeout := admin.config.InitTimeout
+	if timeout <= 0 {
+		timeout = config.Default().InitTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := verify(ctx, state, proxy, authUser)
+	if err == nil {
+		err = ctx.Err()
+	}
+	return result, err
+}
+
+func importCookieState(cookies []aistudio.StateCookie) (aistudio.StorageState, error) {
+	data, err := json.Marshal(cookies)
+	if err != nil {
+		return aistudio.StorageState{}, fmt.Errorf("Cookie 格式无效")
+	}
+	return aistudio.ParseCookieImport(string(data))
+}
+
+func cookieVerificationError(err error, method string) error {
+	switch {
+	case errors.Is(err, camoufoxnative.ErrAuthenticationRequired), errors.Is(err, chromeauth.ErrSignedOut):
+		return invalidAccount(fmt.Errorf("Cookie 登录已失效，请重新导出完整 Cookie"))
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return &adminOperationError{status: http.StatusGatewayTimeout, code: "cookie_import_timeout", message: "Cookie 验证已取消或超时，请检查网络、代理和登录状态"}
+	default:
+		if method == "http" {
+			return &adminOperationError{status: http.StatusBadGateway, code: "cookie_import_http_failed", message: "无法通过 HTTP 验证 Cookie 或识别邮箱，请检查代理和 AI Studio 登录状态，或改用浏览器验证"}
+		}
+		return &adminOperationError{status: http.StatusBadGateway, code: "cookie_import_failed", message: "无法验证 Cookie 或识别邮箱，请检查 Camoufox、代理及 AI Studio 登录状态"}
+	}
 }

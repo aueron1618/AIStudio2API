@@ -1,12 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
 import { api } from './api'
-import type { ServiceConfig } from './types'
+import type { AccountTask, ServiceConfig } from './types'
 
 vi.mock('@/desktop', () => ({ keepPage: () => () => {} }))
 
 afterEach(() => vi.unstubAllGlobals())
 
-describe('stage-one management API contracts', () => {
+const task: AccountTask = {
+  id: 'fixture/task',
+  kind: 'cookies',
+  state: 'running',
+  items: [{ label: '', state: 'pending' }],
+  started_at: '2026-11-04T00:00:00Z',
+}
+
+describe('management API contracts', () => {
   it.each([
     [false, false],
     [false, true],
@@ -17,6 +25,7 @@ describe('stage-one management API contracts', () => {
       anti_truncation: anti,
       auto_continuation: auto,
       continuation_rewrite: false,
+      strip_thought_signatures: true,
       api_key_accounts: 'first-key:account-a|account-b',
       first_event_hedge_models: 'gemini-test',
     } as ServiceConfig
@@ -39,23 +48,18 @@ describe('stage-one management API contracts', () => {
   })
 
   it.each(['browser', 'http'] as const)(
-    'keeps %s Cookie imports synchronous, cancellable and region-neutral',
+    'queues %s Cookie items without treating 202 as imported accounts',
     async (method) => {
       const input = {
-        label: '',
-        cookies: 'fixture-cookie=offline',
-        cdp: '',
-        method,
-        auth_user: 2,
+        items: [{ email: '', cookies: 'fixture-cookie=offline', cdp: '', method, auth_user: 2 }],
         proxy: '',
         locale: '',
         timezone: '',
       }
-      const result = { account: { id: 'fixture-account' } }
-      const fetch = vi.fn().mockResolvedValue(Response.json(result))
+      const fetch = vi.fn().mockResolvedValue(Response.json({ task }, { status: 202 }))
       vi.stubGlobal('fetch', fetch)
       const signal = new AbortController().signal
-      expect(await api.importCookieAccount(input, signal)).toEqual(result)
+      expect(await api.importCookieAccounts(input, signal)).toEqual(task)
       const [path, init] = fetch.mock.calls[0] as [string, RequestInit]
       expect(path).toBe('/api/accounts/import/cookies')
       expect(init.signal).toBe(signal)
@@ -63,14 +67,55 @@ describe('stage-one management API contracts', () => {
     },
   )
 
-  it('keeps Chrome imports on the synchronous account_ids DTO', async () => {
-    const input = { account_ids: ['fixture-id'], proxy: '', locale: '', timezone: '' }
-    const result = { accounts: [{ id: 'fixture-account' }] }
-    const fetch = vi.fn().mockResolvedValue(Response.json(result))
+  it('queues Chrome accounts with source IDs and discovery emails', async () => {
+    const input = {
+      accounts: [{ id: 'fixture-id', email: 'fixture@example.test' }],
+      proxy: '',
+      locale: '',
+      timezone: '',
+    }
+    const fetch = vi
+      .fn()
+      .mockResolvedValue(Response.json({ task: { ...task, kind: 'chrome' } }, { status: 202 }))
     vi.stubGlobal('fetch', fetch)
-    expect(await api.importChromeAccounts(input)).toEqual(result)
+    expect(await api.importChromeAccounts(input)).toEqual({ ...task, kind: 'chrome' })
     const [path, init] = fetch.mock.calls[0] as [string, RequestInit]
     expect(path).toBe('/api/accounts/import/chrome')
     expect(JSON.parse(await (init.body as Blob).text())).toEqual(input)
+  })
+
+  it('recovers accepted tasks with GET and cancels only with DELETE', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ tasks: [task] }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetch)
+    expect(await api.accountTasks()).toEqual([task])
+    await api.dismissAccountTask(task.id)
+    expect(fetch.mock.calls).toEqual([
+      ['/api/accounts/tasks', undefined],
+      ['/api/accounts/tasks/fixture%2Ftask', { method: 'DELETE' }],
+    ])
+    expect('importCookieAccount' in api).toBe(false)
+  })
+
+  it('keeps discovery cancellable without canceling an accepted background task', async () => {
+    const fetch = vi.fn().mockImplementation(
+      (_path: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal!.addEventListener('abort', () => reject(init.signal!.reason))
+        }),
+    )
+    vi.stubGlobal('fetch', fetch)
+    const controller = new AbortController()
+    const request = api.discoverCookieAccounts(
+      { cookies: 'fixture=offline', proxy: '' },
+      controller.signal,
+    )
+    const rejected = expect(request).rejects.toThrow()
+    controller.abort()
+    await rejected
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch.mock.calls[0]![0]).toBe('/api/accounts/import/cookies/discover')
   })
 })

@@ -14,6 +14,7 @@ import (
 
 // prepareWAABackend 按 WAA 后端准备运行依赖与账户登录驱动
 func prepareWAABackend(ctx context.Context, cfg config.Config, requests *requestRegistry, accounts int, proxy string) (string, aistudio.IsolatedLoginDriver, error) {
+	removeStaleCamoufoxProfiles(requests)
 	if cfg.WAABackend == config.WAABackendSpiderMonkey {
 		requests.log("service", "INFO", fmt.Sprintf("运行时装配 | 2/3 | WAA 后端=spidermonkey | 账户=%d", accounts))
 		return "", &lazyLoginDriver{timeout: cfg.RequestTimeout, proxy: proxy}, nil
@@ -23,7 +24,6 @@ func prepareWAABackend(ctx context.Context, cfg config.Config, requests *request
 	if err != nil {
 		return "", nil, err
 	}
-	removeStaleCamoufoxProfiles(requests)
 	login, err := aistudio.NewNativeLoginDriver(camoufoxPath, cfg.RequestTimeout)
 	if err != nil {
 		return "", nil, err
@@ -43,11 +43,18 @@ func removeStaleCamoufoxProfiles(requests *requestRegistry) {
 }
 
 // newWAAWorker 启动账户的 Camoufox 或 SpiderMonkey Worker
-func newWAAWorker(ctx context.Context, accountID string, options camoufoxnative.Options) (*aistudio.NativeWorker, error) {
+func newWAAWorker(ctx context.Context, accountID string, options camoufoxnative.Options) (managedWorker, error) {
+	var worker *aistudio.NativeWorker
+	var err error
 	if options.ExecutablePath == "" {
-		return aistudio.NewSpiderMonkeyWorker(ctx, accountID, options)
+		worker, err = aistudio.NewSpiderMonkeyWorker(ctx, accountID, options)
+	} else {
+		worker, err = aistudio.NewNativeWorker(ctx, accountID, options)
 	}
-	return aistudio.NewNativeWorker(ctx, accountID, options)
+	if err != nil {
+		return nil, err
+	}
+	return worker, nil
 }
 
 // lazyLoginDriver 在第一次登录或校验账户时定位 Camoufox 并创建登录驱动

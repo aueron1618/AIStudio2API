@@ -55,7 +55,7 @@ func TestProtectedResponseBodyReadContext(t *testing.T) {
 					t.Fatal(err)
 				}
 				body := &protectedResponseBody{
-					ctx: ctx, cancel: cancel, requestID: "test-request",
+					ctx: ctx, cancel: cancel, requestID: "test-request", contextID: "test-context", page: "test-page",
 					worker: &Worker{client: client, contextID: "test-context", page: "test-page"}, channel: channel,
 				}
 				var data []byte
@@ -135,7 +135,7 @@ func TestProtectedResponseMalformedChunkCancelsXHR(t *testing.T) {
 				}
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
-				body := &protectedResponseBody{ctx: ctx, cancel: cancel, requestID: "test-request", channel: channel,
+				body := &protectedResponseBody{ctx: ctx, cancel: cancel, requestID: "test-request", channel: channel, contextID: "test-context", page: "test-page",
 					worker: &Worker{client: client, contextID: "test-context", page: "test-page"}}
 				done := make(chan error, 1)
 				go func() { _, err := io.ReadAll(body); done <- err }()
@@ -165,7 +165,7 @@ func TestProtectedResponseCreditWaitsForConsumedBlocks(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		body := &protectedResponseBody{ctx: ctx, cancel: cancel, requestID: "test-request", channel: channel,
+		body := &protectedResponseBody{ctx: ctx, cancel: cancel, requestID: "test-request", channel: channel, contextID: "test-context", page: "test-page",
 			worker: &Worker{client: client, contextID: "test-context", page: "test-page"}}
 		for range 8 {
 			writeProtectedTestMessage(t, peer, "test-request", "YWI=")
@@ -217,7 +217,7 @@ func TestProtectedResponseCloseAfterConnectionFailureReleasesQueue(t *testing.T)
 		}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		body := &protectedResponseBody{ctx: ctx, cancel: cancel, requestID: "test-request", channel: channel,
+		body := &protectedResponseBody{ctx: ctx, cancel: cancel, requestID: "test-request", channel: channel, contextID: "test-context", page: "test-page",
 			worker: &Worker{client: client, contextID: "test-context", page: "test-page"}}
 		writeProtectedTestMessage(t, peer, "test-request", "YWI=")
 		if err := peer.Close(); err != nil {
@@ -232,5 +232,136 @@ func TestProtectedResponseCloseAfterConnectionFailureReleasesQueue(t *testing.T)
 		if channel.queue != nil || body.buffer != nil {
 			t.Fatal("Close retained data after the disconnected client unregistered its channel")
 		}
+	})
+}
+
+func TestProtectedResponseStaysOnOriginalTabAfterReload(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, peer, commands := newBiDiTestClient(t)
+		channel, err := client.openChannel("test-request")
+		if err != nil {
+			t.Fatal(err)
+		}
+		worker := &Worker{client: client, contextID: "test-context", page: "test-page", tabs: map[string]*tabUse{"test-context": {requests: 1}}, chats: []*chatTab{{contextID: "test-context", page: "test-page"}}}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		body := &protectedResponseBody{ctx: ctx, cancel: cancel, worker: worker, contextID: "test-context", page: "test-page", requestID: "test-request", channel: channel, consumed: 4}
+		if err := worker.switchTab("new-context", loadedPage{page: "new-page"}); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { _, err := body.Read(make([]byte, 1)); done <- err }()
+		grant := requireBiDiTestCommand(t, commands)
+		target := grant.Params["target"].(map[string]any)
+		arguments := grant.Params["arguments"].([]any)
+		if grant.Params["functionDeclaration"] != protectedGrant || target["context"] != "test-context" || arguments[0].(map[string]any)["handle"] != "test-page" {
+			t.Fatalf("old stream sent credit to the replacement page: %+v", grant)
+		}
+		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": grant.ID, "result": map[string]any{"type": "success", "result": map[string]any{"type": "undefined"}}})
+		writeProtectedTestMessage(t, peer, "test-request", "YQ==")
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		go func() { done <- body.Close() }()
+		completeProtectedTestCancel(t, peer, commands)
+		closeTab := requireBiDiTestCommand(t, commands)
+		if closeTab.Method != "browsingContext.close" || closeTab.Params["context"] != "test-context" {
+			t.Fatalf("old response closed the wrong tab: %+v", closeTab)
+		}
+		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": closeTab.ID, "result": map[string]any{}})
+		if err := <-done; err != nil || len(worker.tabs) != 0 || worker.contextID != "new-context" {
+			t.Fatal("retired tab survived its last response or damaged the replacement")
+		}
+		requireNoBiDiTestCommand(t, commands)
+	})
+}
+
+func TestProtectedCanceledCloseJoinsStopBeforeNextTurn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, peer, commands := newBiDiTestClient(t)
+		tab := &chatTab{contextID: "test-context", page: "test-page", busy: true}
+		worker := &Worker{client: client, contextID: tab.contextID, selected: tab.contextID, page: tab.page,
+			chats: []*chatTab{tab}, tabs: map[string]*tabUse{tab.contextID: {requests: 1}}}
+		channel, err := client.openChannel("test-request")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		stopStarted, released := make(chan struct{}, 2), make(chan bool, 2)
+		allowStop := make(chan struct{})
+		body := &protectedResponseBody{
+			ctx: ctx, cancel: cancel, worker: worker, contextID: tab.contextID, page: tab.page, requestID: "test-request", channel: channel,
+			stop: func() error { stopStarted <- struct{}{}; <-allowStop; return worker.stopTurn(tab) },
+			release: func(completed bool) {
+				worker.releaseChat(tab, completed)
+				released <- completed
+			},
+		}
+		// Delay the old Stop before it can acquire inputMu and inspect the tab.
+		read := make(chan error, 1)
+		go func() { _, err := body.Read(make([]byte, 1)); read <- err }()
+		cancel()
+		synctest.Wait()
+		select {
+		case err := <-read:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("Read error = %v", err)
+			}
+		default:
+			t.Error("canceled Read waited for Stop")
+		}
+		<-stopStarted
+		closed, duplicate := make(chan error, 1), make(chan error, 1)
+		next := make(chan *chatTab, 1)
+		go func() {
+			closed <- body.Close()
+			acquired, err := worker.acquireChat(t.Context())
+			if err != nil {
+				t.Error(err)
+			}
+			next <- acquired
+		}()
+		go func() { duplicate <- body.Close() }()
+		synctest.Wait()
+		if len(closed) != 0 || len(duplicate) != 0 || len(next) != 0 || len(released) != 0 {
+			t.Error("Close released the canceled turn before its blocked Stop completed")
+		}
+		close(allowStop)
+		running := requireBiDiTestCommand(t, commands)
+		if running.Method != "script.evaluate" || running.Params["expression"] != generationRunningExpression {
+			t.Fatalf("Stop did not inspect the original turn: %+v", running)
+		}
+		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": running.ID,
+			"result": map[string]any{"type": "success", "result": map[string]any{"type": "boolean", "value": true}}})
+		target := requireBiDiTestCommand(t, commands)
+		if target.Params["functionDeclaration"] != pointerTargetFunction {
+			t.Fatalf("Stop target = %+v", target)
+		}
+		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": target.ID,
+			"result": map[string]any{"type": "success", "result": map[string]any{"type": "string", "value": `{"x":1,"y":1}`}}})
+		click := requireBiDiTestCommand(t, commands)
+		if click.Method != "input.performActions" || click.Params["context"] != tab.contextID {
+			t.Fatalf("Stop click = %+v", click)
+		}
+		if len(next) != 0 {
+			t.Error("the old Stop reached a tab already reused by the next turn")
+		}
+		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": click.ID, "result": map[string]any{}})
+		completeProtectedTestCancel(t, peer, commands)
+		if err := <-closed; err != nil {
+			t.Error(err)
+		}
+		if err := <-duplicate; err != nil {
+			t.Error(err)
+		}
+		if acquired := <-next; acquired != tab {
+			t.Fatal("next turn did not reuse the cleaned primary tab")
+		}
+		if completed := <-released; completed || len(released) != 0 || len(stopStarted) != 0 {
+			t.Fatal("cancellation was completed or stopped/released more than once")
+		}
+		worker.releaseChat(tab, false)
+		requireNoBiDiTestCommand(t, commands)
 	})
 }

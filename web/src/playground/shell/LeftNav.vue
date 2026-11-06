@@ -24,6 +24,7 @@ interface NavEntry {
 // entries 为导航，条目与顺序和管理端主页面一致
 const entries: NavEntry[] = [
   { tab: 'accounts', label: 'nav.accounts', icon: 'accounts' },
+  { tab: 'access', label: 'nav.access', icon: 'access' },
   { tab: 'models', label: 'nav.models', icon: 'models' },
   { tab: 'requests', label: 'nav.requests', icon: 'requests' },
   { tab: 'usage', label: 'nav.usage', icon: 'usage' },
