@@ -387,16 +387,21 @@ function stateClass(record: UsageRecord): string {
                   </div>
                 </td>
                 <td v-else-if="column === 'latency'" class="px-4 py-0.5">
-                  <div class="h-9 w-36 leading-3 whitespace-nowrap tabular-nums">
-                    <div class="text-gray-200">
-                      {{ t('usage.duration') }} {{ duration(record.duration_ms) }}
-                    </div>
-                    <div class="text-gray-500">
-                      {{ t('logs.firstToken') }} {{ duration(record.first_event_ms) }}
-                    </div>
-                    <div class="text-gray-500">
-                      {{ outputSpeed(record.average_tokens_per_second) }} tk/s
-                    </div>
+                  <div
+                    class="grid h-9 w-36 grid-cols-[auto_1fr] grid-rows-3 items-center gap-x-2 text-[11px] leading-3 whitespace-nowrap tabular-nums"
+                  >
+                    <span class="text-[10px] text-gray-500">{{ t('usage.duration') }}</span>
+                    <span class="text-right font-medium text-gray-200">{{
+                      duration(record.duration_ms)
+                    }}</span>
+                    <span class="text-[10px] text-gray-500">{{ t('logs.firstToken') }}</span>
+                    <span class="text-right text-gray-400">{{
+                      duration(record.first_event_ms)
+                    }}</span>
+                    <span class="col-span-2 text-right text-gray-400">
+                      {{ outputSpeed(record.average_tokens_per_second) }}
+                      <span class="ml-1 text-[10px] text-gray-500">tk/s</span>
+                    </span>
                   </div>
                 </td>
                 <td
@@ -467,16 +472,19 @@ function stateClass(record: UsageRecord): string {
                   <span class="ml-auto shrink-0">{{ compact(record.total_tokens) }}</span>
                 </div>
               </div>
-              <div class="h-9 shrink-0 leading-3 whitespace-nowrap tabular-nums">
-                <div class="text-gray-200">
-                  {{ t('usage.duration') }} {{ duration(record.duration_ms) }}
-                </div>
-                <div class="text-gray-500">
-                  {{ t('logs.firstToken') }} {{ duration(record.first_event_ms) }}
-                </div>
-                <div class="text-gray-500">
-                  {{ outputSpeed(record.average_tokens_per_second) }} tk/s
-                </div>
+              <div
+                class="grid h-9 shrink-0 grid-cols-[auto_1fr] grid-rows-3 items-center gap-x-2 text-[11px] leading-3 whitespace-nowrap tabular-nums"
+              >
+                <span class="text-[10px] text-gray-500">{{ t('usage.duration') }}</span>
+                <span class="text-right font-medium text-gray-200">{{
+                  duration(record.duration_ms)
+                }}</span>
+                <span class="text-[10px] text-gray-500">{{ t('logs.firstToken') }}</span>
+                <span class="text-right text-gray-400">{{ duration(record.first_event_ms) }}</span>
+                <span class="col-span-2 text-right text-gray-400">
+                  {{ outputSpeed(record.average_tokens_per_second) }}
+                  <span class="ml-1 text-[10px] text-gray-500">tk/s</span>
+                </span>
               </div>
             </div>
           </button>
