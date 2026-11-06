@@ -36,7 +36,7 @@ func requestLogData(entry api.AccessLog) *api.RequestLog {
 			ReplyTokens: usage.OutputTokens, OutputTokens: output, TotalTokens: usage.TotalTokens,
 		}
 		if entry.Latency > 0 {
-			data.Usage.AverageTokensPerSecond = float64(output) / entry.Latency.Seconds()
+			data.Usage.AverageTokensPerSecond = api.AverageTokensPerSecond(output, entry.Latency)
 		}
 	}
 	return data
@@ -95,6 +95,7 @@ func requestRow(entry api.AccessLog, finished time.Time) requestdb.Row {
 		Attempts: entry.Attempts,
 	}
 	if usage := data.Usage; usage != nil {
+		row.AverageTokensPerSecond = usage.AverageTokensPerSecond
 		row.InputTokens, row.CachedTokens, row.ReasoningTokens, row.ReplyTokens, row.TotalTokens =
 			usage.InputTokens, usage.CachedTokens, usage.ReasoningTokens, usage.ReplyTokens, usage.TotalTokens
 	}

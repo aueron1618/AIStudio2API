@@ -28,7 +28,7 @@ REQUEST_BODY_LOG=false
 - 浏览器受保护响应按 64 KiB 编码并使用背压；消费后释放缓冲，失败、取消和关闭会清理 XHR 与回调。
 - 账户 DOM、JS 原型和 Cookie 相互隔离，不共享可变页面状态。
 - 大日志折叠时卸载详情；请求正文显式加载，关闭或切换记录时取消未完成的请求并释放原文与格式化副本。
-- 默认不记录请求正文；启用后使用 gzip 压缩存储，但不加密。旧正文在事务中迁移，失败时保留原数据。
+- 默认不记录请求正文；启用后使用 gzip 压缩存储，但不加密。数据库按上游 schema 自动补列并清理未声明对象，旧 `bodies` 表不再额外迁移；当前 `request_bodies` 正文继续保留。
 - `no-browser` Docker 目标保留 HTTP Cookie 导入与 SpiderMonkey，不包含 Camoufox 的系统依赖；默认 `browser` 目标支持浏览器功能。CI 的 `release-no-browser` / `release-browser` 复用同次构建的静态发行程序，运行时边界相同。
 - HTTP Cookie 导入只验证并提交认证状态，不为同步新 PageCatalog 启动 WAA 或浏览器；目录由后续显式启动/刷新取得。两个后端页面固定 `temporary=true`，不发送额外 Hello 预热生成。
 

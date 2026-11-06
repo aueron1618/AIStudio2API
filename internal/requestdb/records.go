@@ -17,7 +17,8 @@ import (
 // recordColumns 是请求记录查询读取的列，最后一列表示是否保存了正文
 const recordColumns = `r.id, r.time, r.protocol, r.path, r.model, r.account, r.channel, r.status, r.state,
  r.duration_ms, r.first_event_ms, r.queue_ms, r.input_tokens, r.cached_tokens, r.reasoning_tokens, r.reply_tokens, r.total_tokens,
- r.tool_calls, r.error, r.attempts, r.requested_model, r.response_model, EXISTS(SELECT 1 FROM request_bodies b WHERE b.id = r.id)`
+ r.tool_calls, r.error, r.attempts, r.requested_model, r.response_model, r.average_tokens_per_second,
+ EXISTS(SELECT 1 FROM request_bodies b WHERE b.id = r.id)`
 
 // recordFilter 返回请求记录的范围、维度筛选、状态码与关键字条件
 func recordFilter(query api.UsageRecordQuery) (string, []any) {
@@ -44,11 +45,15 @@ func scanRecord(rows *sql.Rows) (api.UsageRecord, error) {
 	err := rows.Scan(&record.ID, &at, &record.Protocol, &record.Path, &record.Model, &record.Account, &record.Channel,
 		&record.Status, &record.State, &record.DurationMS, &record.FirstEventMS, &record.QueueMS, &record.InputTokens, &record.CachedTokens,
 		&record.ReasoningTokens, &record.ReplyTokens, &record.TotalTokens, &record.ToolCalls, &record.Error, &attempts,
-		&record.RequestedModel, &record.ResponseModel, &record.HasBody)
+		&record.RequestedModel, &record.ResponseModel, &record.AverageTokensPerSecond, &record.HasBody)
 	if err != nil {
 		return record, err
 	}
 	record.Time = time.UnixMilli(at).UTC()
+	if record.AverageTokensPerSecond == 0 {
+		record.AverageTokensPerSecond = api.AverageTokensPerSecond(record.ReplyTokens+record.ReasoningTokens,
+			time.Duration(record.DurationMS)*time.Millisecond)
+	}
 	if err := json.Unmarshal([]byte(attempts), &record.Attempts); err != nil {
 		return record, err
 	}

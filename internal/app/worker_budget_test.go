@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
@@ -214,6 +215,68 @@ func assertRuntimeLeaseFree(t *testing.T, id string) {
 	}
 	if err := lease.Release(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWorkerOpeningWaitDoesNotHideActiveRequests(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%t", canceled), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				account := &aistudio.Account{ID: "fixture", Config: aistudio.AccountConfig{Enabled: true}, State: aistudio.AccountReady}
+				pool := aistudio.NewAccountPool([]*aistudio.Account{account}, 3)
+				leases := make([]*aistudio.AccountLease, 3)
+				for index := range leases {
+					lease, err := pool.AcquireFor(t.Context(), aistudio.AccountSelection{AccountID: account.ID})
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer lease.Release()
+					leases[index] = lease
+				}
+				starter, waiter, active := leases[0], leases[1], leases[2]
+				endRefresh, ok := starter.BeginAuthRefresh()
+				if !ok {
+					t.Fatal("could not begin authentication refresh")
+				}
+				defer endRefresh()
+				generation := starter.AuthGeneration()
+				opening := make(chan struct{})
+				manager := &accountWorkerManager{openings: map[string]chan struct{}{account.ID: opening}}
+				ctx, cancel := context.WithCancel(aistudio.ContextWithAccountLease(t.Context(), waiter))
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- manager.waitOpening(ctx, account.ID) }()
+				synctest.Wait()
+				check, stop := context.WithTimeout(t.Context(), time.Millisecond)
+				err := starter.WaitForAuthRefresh(check, generation)
+				stop()
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("opening wait hid an active request: %v", err)
+				}
+				if err := active.Release(); err != nil {
+					t.Fatal(err)
+				}
+				if err := starter.WaitForAuthRefresh(t.Context(), generation); err != nil {
+					t.Fatalf("opening waiter blocked authentication refresh: %v", err)
+				}
+				if canceled {
+					cancel()
+				} else {
+					manager.rebalanceMu.Lock()
+					manager.openings[account.ID] = make(chan struct{})
+					close(opening)
+					manager.rebalanceMu.Unlock()
+				}
+				if err := <-done; canceled && !errors.Is(err, context.Canceled) || !canceled && err != nil {
+					t.Fatalf("opening completion: %v", err)
+				}
+				check, stop = context.WithTimeout(t.Context(), time.Millisecond)
+				defer stop()
+				if err := starter.WaitForAuthRefresh(check, generation); !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("finished opening left its lease excluded: %v", err)
+				}
+			})
+		})
 	}
 }
 

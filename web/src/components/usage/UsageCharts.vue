@@ -457,128 +457,132 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="root" class="grid grid-cols-1 gap-4 xl:grid-cols-2">
-    <figure class="min-w-0 rounded-lg border border-line bg-panel p-4 xl:col-span-2">
-      <div class="mb-2 flex flex-wrap items-center gap-2">
-        <figcaption class="mr-auto">
-          <span class="text-sm font-medium text-gray-200">{{ t('usage.chartTraffic') }}</span>
-          <span class="ml-2 text-xs text-gray-500">{{ t('usage.chartTrafficHelp') }}</span>
-        </figcaption>
-        <UiSelect
-          :model-value="stack"
-          :aria-label="t('usage.stackBy')"
-          class="w-32 rounded-md border border-line bg-canvas px-2 py-1 text-xs text-gray-200"
-          @update:model-value="emit('update:stack', $event as UsageDimension)"
-        >
-          <option v-for="item in dimensions" :key="item" :value="item">
-            {{ t(`usage.dimension.${item}`) }}
-          </option>
-        </UiSelect>
-        <div
-          class="inline-flex rounded-md border border-line bg-canvas p-0.5"
-          role="radiogroup"
-          :aria-label="t('usage.chartTraffic')"
-        >
-          <button
-            v-for="item in ['requests', 'tokens'] as const"
-            :key="item"
-            type="button"
-            role="radio"
-            :aria-checked="metric === item"
-            class="rounded px-2.5 py-0.5 text-xs transition-colors"
-            :class="metric === item ? 'bg-raised text-white' : 'text-gray-400 hover:text-gray-200'"
-            @click="metric = item"
+  <div ref="root" class="@container min-w-0">
+    <div class="grid grid-cols-1 gap-4 @min-[56rem]:grid-cols-2">
+      <figure class="min-w-0 rounded-lg border border-line bg-panel p-4 @min-[56rem]:col-span-2">
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+          <figcaption class="mr-auto">
+            <span class="text-sm font-medium text-gray-200">{{ t('usage.chartTraffic') }}</span>
+            <span class="ml-2 text-xs text-gray-500">{{ t('usage.chartTrafficHelp') }}</span>
+          </figcaption>
+          <UiSelect
+            :model-value="stack"
+            :aria-label="t('usage.stackBy')"
+            class="w-32 rounded-md border border-line bg-canvas px-2 py-1 text-xs text-gray-200"
+            @update:model-value="emit('update:stack', $event as UsageDimension)"
           >
-            {{ t(item === 'requests' ? 'usage.metricRequests' : 'usage.metricTokens') }}
-          </button>
+            <option v-for="item in dimensions" :key="item" :value="item">
+              {{ t(`usage.dimension.${item}`) }}
+            </option>
+          </UiSelect>
+          <div
+            class="inline-flex rounded-md border border-line bg-canvas p-0.5"
+            role="radiogroup"
+            :aria-label="t('usage.chartTraffic')"
+          >
+            <button
+              v-for="item in ['requests', 'tokens'] as const"
+              :key="item"
+              type="button"
+              role="radio"
+              :aria-checked="metric === item"
+              class="rounded px-2.5 py-0.5 text-xs transition-colors"
+              :class="
+                metric === item ? 'bg-raised text-white' : 'text-gray-400 hover:text-gray-200'
+              "
+              @click="metric = item"
+            >
+              {{ t(item === 'requests' ? 'usage.metricRequests' : 'usage.metricTokens') }}
+            </button>
+          </div>
         </div>
-      </div>
-      <ChartLegend
-        :items="legendItems(trafficOption)"
-        :hidden="hidden.traffic"
-        @toggle="toggle('traffic', $event)"
-        @focus="focus('traffic', $event)"
-      />
-      <div data-chart="traffic" class="h-72">
-        <VChart v-if="shown.traffic" ref="traffic" :option="shown.traffic" autoresize />
-      </div>
-    </figure>
-    <figure class="flex min-w-0 flex-col rounded-lg border border-line bg-panel p-4">
-      <figcaption class="mb-2 text-sm font-medium text-gray-200">
-        {{ t('usage.chartOutcomes') }}
-      </figcaption>
-      <ChartLegend
-        :items="legendItems(outcomesOption)"
-        :hidden="hidden.outcomes"
-        @toggle="toggle('outcomes', $event)"
-        @focus="focus('outcomes', $event)"
-      />
-      <div data-chart="outcomes" class="min-h-60 flex-1">
-        <VChart v-if="shown.outcomes" ref="outcomes" :option="shown.outcomes" autoresize />
-      </div>
-    </figure>
-    <figure class="flex min-w-0 flex-col rounded-lg border border-line bg-panel p-4">
-      <figcaption class="mb-2 text-sm font-medium text-gray-200">
-        {{ t('usage.chartLatency') }}
-      </figcaption>
-      <table class="mb-3 w-full text-xs tabular-nums">
-        <thead class="text-gray-500">
-          <tr>
-            <th scope="col" class="py-1 pr-2 text-left font-normal">
-              <span class="sr-only">{{ t('usage.metric') }}</span>
-            </th>
-            <th
-              v-for="column in ['P50', 'P95', 'P99', t('usage.average')]"
-              :key="column"
-              scope="col"
-              class="py-1 pl-2 text-right font-normal"
-            >
-              {{ column }}
-            </th>
-          </tr>
-        </thead>
-        <tbody class="text-gray-300">
-          <tr v-for="row in latencyRows" :key="row.label" class="border-t border-line/60">
-            <th scope="row" class="py-1 pr-2 text-left font-normal text-gray-400">
-              <span
-                v-tooltip="row.help"
-                class="cursor-help underline decoration-gray-700 decoration-dotted underline-offset-4"
-                >{{ row.label }}</span
+        <ChartLegend
+          :items="legendItems(trafficOption)"
+          :hidden="hidden.traffic"
+          @toggle="toggle('traffic', $event)"
+          @focus="focus('traffic', $event)"
+        />
+        <div data-chart="traffic" class="h-72">
+          <VChart v-if="shown.traffic" ref="traffic" :option="shown.traffic" autoresize />
+        </div>
+        <div class="mt-4 border-t border-line/60 pt-3">
+          <h4 class="mb-2 text-xs font-medium text-gray-400">
+            {{ t('usage.chartOutcomes') }}
+          </h4>
+          <ChartLegend
+            :items="legendItems(outcomesOption)"
+            :hidden="hidden.outcomes"
+            @toggle="toggle('outcomes', $event)"
+            @focus="focus('outcomes', $event)"
+          />
+          <div data-chart="outcomes" class="h-60">
+            <VChart v-if="shown.outcomes" ref="outcomes" :option="shown.outcomes" autoresize />
+          </div>
+        </div>
+      </figure>
+      <figure class="flex min-w-0 flex-col rounded-lg border border-line bg-panel p-4">
+        <figcaption class="mb-2 text-sm font-medium text-gray-200">
+          {{ t('usage.chartLatency') }}
+        </figcaption>
+        <table class="mb-3 w-full text-xs tabular-nums">
+          <thead class="text-gray-500">
+            <tr>
+              <th scope="col" class="py-1 pr-2 text-left font-normal">
+                <span class="sr-only">{{ t('usage.metric') }}</span>
+              </th>
+              <th
+                v-for="column in ['P50', 'P95', 'P99', t('usage.average')]"
+                :key="column"
+                scope="col"
+                class="py-1 pl-2 text-right font-normal"
               >
-            </th>
-            <td
-              v-for="(value, index) in row.values"
-              :key="index"
-              class="py-1 pl-2 text-right whitespace-nowrap"
-            >
-              {{ value === null ? '' : duration(value) }}
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <ChartLegend
-        :items="legendItems(latencyOption)"
-        :hidden="hidden.latency"
-        @toggle="toggle('latency', $event)"
-        @focus="focus('latency', $event)"
-      />
-      <div data-chart="latency" class="min-h-60 flex-1">
-        <VChart v-if="shown.latency" ref="latency" :option="shown.latency" autoresize />
-      </div>
-    </figure>
-    <figure class="min-w-0 rounded-lg border border-line bg-panel p-4 xl:col-span-2">
-      <figcaption class="mb-2 text-sm font-medium text-gray-200">
-        {{ t('usage.chartTokens') }}
-      </figcaption>
-      <ChartLegend
-        :items="legendItems(tokensOption)"
-        :hidden="hidden.tokens"
-        @toggle="toggle('tokens', $event)"
-        @focus="focus('tokens', $event)"
-      />
-      <div data-chart="tokens" class="h-56">
-        <VChart v-if="shown.tokens" ref="tokens" :option="shown.tokens" autoresize />
-      </div>
-    </figure>
+                {{ column }}
+              </th>
+            </tr>
+          </thead>
+          <tbody class="text-gray-300">
+            <tr v-for="row in latencyRows" :key="row.label" class="border-t border-line/60">
+              <th scope="row" class="py-1 pr-2 text-left font-normal text-gray-400">
+                <span
+                  v-tooltip="row.help"
+                  class="cursor-help underline decoration-gray-700 decoration-dotted underline-offset-4"
+                  >{{ row.label }}</span
+                >
+              </th>
+              <td
+                v-for="(value, index) in row.values"
+                :key="index"
+                class="py-1 pl-2 text-right whitespace-nowrap"
+              >
+                {{ value === null ? '' : duration(value) }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <ChartLegend
+          :items="legendItems(latencyOption)"
+          :hidden="hidden.latency"
+          @toggle="toggle('latency', $event)"
+          @focus="focus('latency', $event)"
+        />
+        <div data-chart="latency" class="min-h-60 flex-1">
+          <VChart v-if="shown.latency" ref="latency" :option="shown.latency" autoresize />
+        </div>
+      </figure>
+      <figure class="flex min-w-0 flex-col rounded-lg border border-line bg-panel p-4">
+        <figcaption class="mb-2 text-sm font-medium text-gray-200">
+          {{ t('usage.chartTokens') }}
+        </figcaption>
+        <ChartLegend
+          :items="legendItems(tokensOption)"
+          :hidden="hidden.tokens"
+          @toggle="toggle('tokens', $event)"
+          @focus="focus('tokens', $event)"
+        />
+        <div data-chart="tokens" class="min-h-56 flex-1">
+          <VChart v-if="shown.tokens" ref="tokens" :option="shown.tokens" autoresize />
+        </div>
+      </figure>
+    </div>
   </div>
 </template>

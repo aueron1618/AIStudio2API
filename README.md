@@ -63,10 +63,10 @@
 ## 系统要求
 
 - **Windows Release 运行**: Windows 10 或更高版本；系统没有 WebView2 运行时时，桌面版询问是否从微软下载安装，安装进度显示在微软安装程序的窗口中，安装完成后打开桌面窗口；取消或安装失败时在默认浏览器中打开管理页面
-- **macOS 桌面版**: macOS 12 或更高版本，Apple 芯片与 Intel 通用
+- **macOS 桌面版**: macOS 13 或更高版本，Apple 芯片与 Intel 通用
 - **Linux 桌面版**: 基于 Ubuntu 22.04 构建，使用 GTK 3 与 WebKit2GTK 4.1，例如 Ubuntu 22.04、Debian 12 或更新版本；deb 安装这些依赖与 Camoufox 运行库，AppImage 另需下一行的 Camoufox 运行库
 - **Linux Release 运行**: 解压 `aistudio2api-<版本>-linux-<amd64或arm64>.tar.gz`，进入同名目录后运行 `./aistudio2api`；选择 Camoufox 时需要 Firefox 系运行库与 Xvfb，Debian/Ubuntu 执行 `sudo apt-get update && sudo apt-get satisfy -y "libgtk-3-0, libasound2t64 | libasound2, libx11-xcb1, xvfb"`
-- **源码运行**: Go 1.27+，推荐 Node.js 24.15 与 npm 11；启用 CGO，Windows 使用 [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releases) 的 UCRT clang，macOS 使用 Xcode Command Line Tools，Linux 使用 [Zig](https://ziglang.org/download/) 0.16；当前平台的 SpiderMonkey 静态库从 [Mag1cFall/firefox Releases](https://github.com/Mag1cFall/firefox/releases) 下载
+- **源码运行**: Go 1.27+，推荐 Node.js 24.15 与 npm 11；启用 CGO，Windows 使用 [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releases) 的 UCRT clang，macOS 使用 Xcode Command Line Tools，Linux 使用 [Zig](https://ziglang.org/download/) 0.16；当前平台的 SpiderMonkey 与 libwebp 静态库分别从 [Mag1cFall/firefox](https://github.com/Mag1cFall/firefox/releases) 与 [Mag1cFall/libwebp](https://github.com/Mag1cFall/libwebp/releases) 的 Releases 下载
 - **操作系统**: Windows、macOS、Linux
 - **内存**: 默认进程内 SpiderMonkey、零常驻 Worker；首次请求和大上下文仍需要额外内存。原生 JS 堆不由 Go 的 `GOMEMLIMIT` 直接约束，需观察进程 RSS。配置取舍见 [运行时内存](docs/memory.md)
 - **网络**: 稳定的互联网连接访问 Google AI Studio
@@ -94,11 +94,14 @@ cd ..
 mkdir spidermonkey
 curl.exe -L -o spidermonkey\windows.tar.gz https://github.com/Mag1cFall/firefox/releases/download/v152.0.4-aistudio2api.1/spidermonkey-v152.0.4-aistudio2api.1-windows-amd64.tar.gz
 tar -xzf spidermonkey\windows.tar.gz -C spidermonkey
+mkdir libwebp
+curl.exe -L -o libwebp\libwebp.tar.gz https://github.com/Mag1cFall/libwebp/releases/download/v1.6.0-aistudio2api.1/libwebp-v1.6.0-aistudio2api.1-windows-amd64.tar.gz
+tar -xzf libwebp\libwebp.tar.gz -C libwebp
 $env:CC = "x86_64-w64-mingw32-clang"
 $env:CXX = "x86_64-w64-mingw32-clang++"
 $env:CGO_ENABLED = "1"
-$env:CGO_CXXFLAGS = "-I$PWD\spidermonkey\include"
-$env:CGO_LDFLAGS = "-L$PWD\spidermonkey\lib"
+$env:CGO_CPPFLAGS = "-I$PWD\spidermonkey\include -I$PWD\libwebp\include"
+$env:CGO_LDFLAGS = "-L$PWD\spidermonkey\lib -L$PWD\libwebp\lib"
 go build -tags desktop,production -ldflags="-H windowsgui" -o aistudio2api.exe ./cmd/aistudio2api
 .\aistudio2api.exe
 ```
@@ -163,7 +166,9 @@ arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 platform=$([ "$(uname -s)" = Darwin ] && echo darwin || echo linux)
 mkdir -p spidermonkey
 curl -L https://github.com/Mag1cFall/firefox/releases/download/v152.0.4-aistudio2api.1/spidermonkey-v152.0.4-aistudio2api.1-$platform-$arch.tar.gz | tar -xz -C spidermonkey
-export CGO_ENABLED=1 CGO_CXXFLAGS="-I$PWD/spidermonkey/include" CGO_LDFLAGS="-L$PWD/spidermonkey/lib"
+mkdir -p libwebp
+curl -L https://github.com/Mag1cFall/libwebp/releases/download/v1.6.0-aistudio2api.1/libwebp-v1.6.0-aistudio2api.1-$platform-$arch.tar.gz | tar -xz -C libwebp
+export CGO_ENABLED=1 CGO_CPPFLAGS="-I$PWD/spidermonkey/include -I$PWD/libwebp/include" CGO_LDFLAGS="-L$PWD/spidermonkey/lib -L$PWD/libwebp/lib"
 if [ "$platform" = darwin ]; then
   go build -o aistudio2api ./cmd/aistudio2api
 else
@@ -202,7 +207,7 @@ docker compose up -d
 
 内置浏览器版在构建时打包对应架构、版本匹配的 Camoufox，以及 Windows 字体、fontconfig、Xvfb 和软件 GL 运行库；移除未使用的 macOS 字体与 fontconfig。路径为 `/opt/camoufox/camoufox-bin`，通过镜像内 `CAMOUFOX_PATH` 指定；浏览器 Cookie 验证、登录及 Camoufox 后端无需运行时再下载，也不会因预装浏览器而常驻浏览器进程。该版本构建需要访问 GitHub Releases，镜像包含完整浏览器体积。
 
-无浏览器版仅保留应用（含静态链接的 SpiderMonkey）、系统证书与时区数据，不包含 Camoufox、配套字体或 GTK/Xvfb/GL 依赖，构建时也不下载浏览器。请保持 `WAA_BACKEND=spidermonkey`，通过 Cookie **HTTP 验证**、已有登录态文件或远程添加导入账户。浏览器登录、默认 Cookie 浏览器验证及 `WAA_BACKEND=camoufox` 需要内置浏览器版；无浏览器版没有改变应用的按需下载机制，不应在该版本触发这些浏览器功能。
+无浏览器版仅保留应用（含静态链接的 SpiderMonkey 与 libwebp）、系统证书与时区数据，不包含 Camoufox、配套字体或 GTK/Xvfb/GL 依赖，构建时也不下载浏览器。请保持 `WAA_BACKEND=spidermonkey`，通过 Cookie **HTTP 验证**、已有登录态文件或远程添加导入账户。浏览器登录、默认 Cookie 浏览器验证及 `WAA_BACKEND=camoufox` 需要内置浏览器版；无浏览器版没有改变应用的按需下载机制，不应在该版本触发这些浏览器功能。
 
 CI 在本仓库 `main` 与 `v*` tag 推送时，为两种版本分别构建并发布 `ghcr.io/aueron1618/aistudio2api` 的双架构镜像。`main` 推送会更新 `latest` / `latest-no-browser` 并生成对应的 `main-<6位SHA>` 标签；正式版本标签也更新 latest，预发布标签不覆盖 latest。当前工作流不生成裸 `main` 或 `main-no-browser` 标签，latest 不代表仅稳定发行版；需固定版本时使用版本标签或 digest。CI 复用同次构建的 Linux 静态发行程序，不重复编译前端与 Go；每个变体、架构均执行断网只读冒烟，每个变体收齐两个架构 digest 后才发布 manifest。HTML 预览另使用 `2050` 端口。
 
@@ -570,11 +575,13 @@ AIStudio2API/
 │   ├── setup/               # 账户导入和独立登录 CLI
 │   ├── aistudio/            # AI Studio 协议、认证、模型与媒体
 │   ├── api/                 # OpenAI、Responses、Anthropic 与 Gemini 适配
+│   ├── imagecodec/          # JPEG 解码、CatmullRom 缩放、PNG 与 libwebp WebP 编码
+│   ├── resample/            # 语音 PCM 的 Kaiser 窗 sinc 多相重采样
 │   ├── waa/                 # SpiderMonkey WAA 运行时
 │   ├── camoufoxnative/      # Camoufox BiDi、登录与 WAA Worker
 │   ├── chromeauth/          # Windows Chrome 与 DBSC 导入
 │   ├── proxydial/           # 全局与账户代理的拨号与转发
-│   ├── sqlitedb/            # 本地 SQLite 数据库
+│   ├── sqlitedb/            # SQLite 打开、表结构同步与空闲页回收
 │   ├── requestdb/           # 请求用量、汇总与正文账本
 │   ├── statedb/             # 已结束 Responses / Interactions 续接状态
 │   ├── promptdb/            # API 试用页对话存储
@@ -650,7 +657,7 @@ cp .env.example .env
 | `FIRST_EVENT_HEDGE` | `auto` | 原请求迟迟没有首字时用空闲账户（其他账户优先，没有时用原账户的空闲槽位）发起一个备用请求，先出首字的一方继续、另一方取消；`auto` 按各模型与通道近 24 小时首字等待的 p95，请求少于 20 次的模型与通道不发起；正整数为等待秒数，设置页选自定义时填入请求最多的模型的近期 p95 |
 | `FIRST_EVENT_HEDGE_MODELS` | `gemini-4-argon` | 发起备用请求的模型 ID，逗号分隔；仅在 `FIRST_EVENT_HEDGE` 非 `off` 时使用，备用请求同样计入账户额度 |
 | `WAA_BACKEND` | `spidermonkey` | 默认在进程内执行 WAA，不启动浏览器；可选择 `camoufox`，旧配置 `go` 自动迁移 |
-| `MEDIA_OUTPUT` | `inline` | Chat Completions 与 Messages 正文中生成图片与音频的引用方式：`inline` 以 data URI 内联；`url` 按内容命名保存到 `runtime/media/`，以本服务的 `/media/<文件名>` URL 引用，该路径不校验 API key |
+| `MEDIA_OUTPUT` | `inline` | Chat Completions 与 Messages 正文中生成图片与音频的引用方式：`inline` 以 data URI 内联；`url` 按内容命名保存到 `runtime/media/`，以本服务的 `/media/<文件名>` URL 引用，该路径不校验 API key；目录总量超过 1 GiB 时从最久未使用的文件开始删除 |
 | `MEDIA_BASE_URL` | 空 | 媒体 URL 使用的服务地址，例如 `https://ai.example.com`；留空时使用每个请求访问的地址，经反向代理时跟随 `X-Forwarded-Proto` |
 
 服务启动时载入全部账户元数据，但默认不创建常驻 Worker。四项容量设置保存后立即作用于后续调度；启动并发限制对 SpiderMonkey 和 Camoufox 都生效，峰值上限调低时关闭多出的空闲 Worker，常驻数调高时补足预热。低内存默认值不强制覆盖用户已保存的配置。

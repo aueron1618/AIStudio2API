@@ -119,6 +119,14 @@ type RequestLogUsage struct {
 	AverageTokensPerSecond float64 `json:"average_tokens_per_second"`
 }
 
+// AverageTokensPerSecond 是日志与账本共用的端到端输出速率。
+func AverageTokensPerSecond(output int64, latency time.Duration) float64 {
+	if latency <= 0 {
+		return 0
+	}
+	return float64(output) / latency.Seconds()
+}
+
 // AccessLog 表示一次公开 API 请求的最终访问记录
 type AccessLog struct {
 	Status          int

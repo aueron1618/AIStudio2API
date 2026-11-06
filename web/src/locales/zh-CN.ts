@@ -4,6 +4,9 @@ export const messages = {
   'accounts.localeEnUS': '英语（美国）',
   'accounts.timezoneShanghai': '中国标准时间',
   'accounts.timezoneNewYork': '美国东部时间',
+  'accounts.cookieHelpTitle': 'Cookie 导入说明',
+  'accounts.cookieEnvironmentHelp':
+    '此浏览器仅记住你填写的语言与时区；不会在浏览器偏好中保存 Cookie、文件内容、邮箱或代理。',
   'accounts.cookieHelp':
     '支持 Cookie 请求头、多行文本、扩展 JSON、storage-state JSON 和 Netscape 文件，UTF-8 最多 1 MiB。请复制完整 Cookie，document.cookie 会遗漏 HttpOnly 字段。',
   'accounts.cookieSecurity':

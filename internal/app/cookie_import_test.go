@@ -72,7 +72,7 @@ func (catalog *cookieCatalogStub) RefreshAccountState(ctx context.Context, id st
 	return aistudio.AccountRefresh{Models: len(models)}, err
 }
 
-func (*cookieCatalogStub) ReclaimIdleInlineMedia(context.Context) error { return nil }
+func (*cookieCatalogStub) ReclaimExpiredResources(context.Context) error { return nil }
 
 func (*cookieCatalogStub) ReclaimIdleAssistantApplets(context.Context) error { return nil }
 
@@ -153,7 +153,7 @@ func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 			}
 			account, err := admin.ImportCookieAccount(ctx, api.CookieImportInput{
 				Cookies: strings.Replace(header, "refreshed-secret", "original-secret", 1),
-				Locale:  "zh-CN", Timezone: "Asia/Shanghai", Method: test.method,
+				Locale:  "zh-CN", Timezone: " \ufeffAsia/\u200bShanghai\u2066 ", Method: test.method,
 				AuthUser: 2,
 			})
 			if test.method == "http" {

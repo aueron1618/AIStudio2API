@@ -80,6 +80,9 @@ const WAABackendCamoufox = "camoufox"
 // WAABackendSpiderMonkey 表示由进程内的 SpiderMonkey 承担 WAA 生命周期
 const WAABackendSpiderMonkey = "spidermonkey"
 
+// WAAInterpreterCacheName 是账户状态目录中 SpiderMonkey 缓存 WAA 解释器的子目录名
+const WAAInterpreterCacheName = ".waa-interpreters"
+
 // FirstEventHedgeOff 表示首事件超时不发起备用请求
 const FirstEventHedgeOff = "off"
 

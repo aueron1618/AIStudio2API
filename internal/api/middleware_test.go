@@ -185,9 +185,12 @@ func TestAccessLogResponseModelAfterTruncatedStream(t *testing.T) {
 	ledger := &modelLogLedger{enabled: true}
 	handler := requestLoggingMiddleware(admin, requestBodyMiddleware(ledger, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setAccessLogRequestedModel(r.Context(), "requested-alias")
-		if err := streamHeaders(w); err != nil {
+		stream, err := openStream(w, sseHeartbeat)
+		defer stream.stop()
+		if err != nil {
 			t.Fatal(err)
 		}
+		w = stream
 		for _, frame := range []struct {
 			event   string
 			payload map[string]any
@@ -204,9 +207,7 @@ func TestAccessLogResponseModelAfterTruncatedStream(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if err := writeSSEHeartbeat(w); err != nil {
-			t.Fatal(err)
-		}
+		stream.beat()
 		if err := writeSSEText(w, "[DONE]"); err != nil {
 			t.Fatal(err)
 		}

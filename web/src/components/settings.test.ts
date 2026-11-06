@@ -250,7 +250,7 @@ describe('merged settings controls', () => {
 
 describe('Cookie import form', () => {
   it.each([false, true])(
-    'keeps optional blank Cookie region fields with expanded=%s',
+    'keeps optional blank Cookie region fields visible with help expanded=%s',
     async (expanded) => {
       vi.stubGlobal('navigator', { userAgent: 'offline-fixture' })
       vi.stubGlobal('window', {
@@ -270,7 +270,7 @@ describe('Cookie import form', () => {
           const { setupState } = this.$ as unknown as { setupState: Record<string, unknown> }
           if (Object.hasOwn(setupState, 'showCookieImport')) {
             setupState.showCookieImport = true
-            setupState.moreSettingsOpen = expanded
+            setupState.cookieHelpOpen = expanded
           }
         },
       })
@@ -278,10 +278,11 @@ describe('Cookie import form', () => {
       await renderToString(app, context)
       const form = context.teleports.body!
       const fields = form.match(/<input(?![^>]*type="file")[^>]*>/g) ?? []
-      expect(fields).toHaveLength(expanded ? 3 : 0)
+      expect(fields).toHaveLength(3)
       expect(fields.every((field) => field.includes('value=""'))).toBe(true)
       expect(fields.every((field) => !field.includes('required'))).toBe(true)
-      expect(form).toContain(messages['accounts.cookieTaskHelp'])
+      if (expanded) expect(form).toContain(messages['accounts.cookieTaskHelp'])
+      else expect(form).not.toContain(messages['accounts.cookieTaskHelp'])
       expect(form).toMatch(/<textarea[^>]*required/)
       expect(form).not.toMatch(/<form[^>]*novalidate/)
     },

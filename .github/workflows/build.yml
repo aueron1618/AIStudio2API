@@ -16,108 +16,14 @@ concurrency:
 
 env:
   GOTOOLCHAIN: local
-  SPIDERMONKEY: v152.0.4-aistudio2api.1
   DOCKER_METADATA_SHORT_SHA_LENGTH: '6'
 
 jobs:
-  frontend:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24.15.0'
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: Build Frontend
-        working-directory: web
-        run: |
-          npm ci
-          npx vp build
-      - uses: actions/upload-artifact@v7
-        with:
-          name: frontend
-          path: internal/webui/dist
-          retention-days: 1
-
-  web-checks:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24.15.0'
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: Check Frontend
-        working-directory: web
-        run: |
-          npm ci
-          npm run typecheck
-          npm run test
-          npm run lint
-          npm run format:check
-
   checks:
-    needs: frontend
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        check: [test, vet]
-    env:
-      CGO_ENABLED: '1'
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: frontend
-          path: internal/webui/dist
-      - uses: actions/setup-go@v7
-        id: go
-        with:
-          go-version-file: go.mod
-          cache: false
-      - uses: actions/cache/restore@v5
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
-          restore-keys: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
-      - uses: ./.github/actions/spidermonkey
-        with:
-          target: linux-amd64-gnu
-      - name: Run Unit Tests
-        if: matrix.check == 'test'
-        run: go test -mod=readonly -trimpath -vet=off ./cmd/... ./internal/...
-      - name: Check Minimum Go Version
-        if: matrix.check == 'vet'
-        run: |
-          go version
-          go vet -mod=readonly -trimpath ./...
-          go build -mod=readonly -trimpath ./cmd/aistudio2api
-      - name: Install Windows C Compiler
-        if: matrix.check == 'vet'
-        run: |
-          curl -fsSL https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64/bin" >> "$GITHUB_PATH"
-      - uses: ./.github/actions/spidermonkey
-        if: matrix.check == 'vet'
-        with:
-          target: windows-amd64
-      - name: Vet Windows Build
-        if: matrix.check == 'vet'
-        run: CC=x86_64-w64-mingw32-clang CXX=x86_64-w64-mingw32-clang++ GOOS=windows go vet -mod=readonly -trimpath -tags desktop,production ./...
-      - uses: actions/cache/save@v5
-        if: github.ref == 'refs/heads/main'
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+    uses: ./.github/workflows/checks.yml
 
   build-linux:
-    needs: frontend
+    needs: checks
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -149,7 +55,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - uses: ./.github/actions/spidermonkey
+      - uses: ./.github/actions/static-libraries
         with:
           target: linux-${{ matrix.arch }}
       - name: Build Packages
@@ -181,7 +87,7 @@ jobs:
           retention-days: 7
 
   build-windows:
-    needs: frontend
+    needs: checks
     runs-on: ubuntu-24.04
     env:
       CGO_ENABLED: '1'
@@ -207,7 +113,7 @@ jobs:
         run: |
           curl -fsSL https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64/bin" >> "$GITHUB_PATH"
-      - uses: ./.github/actions/spidermonkey
+      - uses: ./.github/actions/static-libraries
         with:
           target: windows-amd64
       - name: Build Package
@@ -240,7 +146,7 @@ jobs:
           retention-days: 7
 
   desktop-macos:
-    needs: frontend
+    needs: checks
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
@@ -260,18 +166,17 @@ jobs:
             ~/Library/Caches/go-build
           key: go-macos-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
           restore-keys: go-macos-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
-      - uses: ./.github/actions/spidermonkey
+      - uses: ./.github/actions/static-libraries
         with:
           target: darwin-arm64
-      - uses: ./.github/actions/spidermonkey
+      - uses: ./.github/actions/static-libraries
         with:
           target: darwin-amd64
       - name: Build App
         shell: bash
         env:
           CGO_ENABLED: '1'
-          MACOSX_DEPLOYMENT_TARGET: '12.0'
-          CGO_CFLAGS: -mmacosx-version-min=12.0
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
         run: |
           version="${GITHUB_SHA:0:7}"
           number=0.0.0
@@ -280,8 +185,8 @@ jobs:
           mkdir -p dist
           build() {
             export GOARCH=$1
-            export CGO_CXXFLAGS="-mmacosx-version-min=12.0 -I$RUNNER_TEMP/spidermonkey/darwin-$1/include"
-            export CGO_LDFLAGS="-mmacosx-version-min=12.0 -L$RUNNER_TEMP/spidermonkey/darwin-$1/lib"
+            export CGO_CPPFLAGS="-mmacosx-version-min=13.0 -I$RUNNER_TEMP/spidermonkey/darwin-$1/include -I$RUNNER_TEMP/libwebp/darwin-$1/include"
+            export CGO_LDFLAGS="-mmacosx-version-min=13.0 -L$RUNNER_TEMP/spidermonkey/darwin-$1/lib -L$RUNNER_TEMP/libwebp/darwin-$1/lib"
             go build -mod=readonly -trimpath -tags desktop,production -ldflags="-s -w -extldflags -Wl,-dead_strip $link" -o "dist/aistudio2api-$1" ./cmd/aistudio2api
             name="aistudio2api-${version}-darwin-$1"
             mkdir -p "dist/$name"
@@ -328,7 +233,7 @@ jobs:
           retention-days: 7
 
   desktop-linux:
-    needs: frontend
+    needs: checks
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -352,7 +257,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config file libgtk-3-dev libwebkit2gtk-4.1-dev
-      - uses: ./.github/actions/spidermonkey
+      - uses: ./.github/actions/static-libraries
         with:
           target: linux-amd64-gnu
       - name: Build Packages
@@ -387,7 +292,7 @@ jobs:
 
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: [web-checks, checks, build-linux, build-windows, desktop-macos, desktop-linux]
+    needs: [checks, build-linux, build-windows, desktop-macos, desktop-linux]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -410,7 +315,7 @@ jobs:
 
   docker:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs: [web-checks, checks, build-linux]
+    needs: [checks, build-linux]
     strategy:
       fail-fast: false
       matrix:

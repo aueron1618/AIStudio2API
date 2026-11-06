@@ -11,6 +11,7 @@ import {
 import { api, ApiError } from '@/api'
 import { useI18n, type TranslationKey } from '@/i18n'
 import { usePaged } from '@/paging'
+import { readPreference, writePreference } from '@/preference'
 import { maskedProxy } from '@/proxy'
 import type {
   Account,
@@ -89,9 +90,7 @@ const cookieTaskRunning = computed(() =>
 )
 watch(cookieMethod, () => (cookieImportError.value = ''))
 const showBrowserImport = ref(false)
-// moreSettingsOpen 是导入对话框的更多设置是否展开，每次打开对话框时收起
-const moreSettingsOpen = ref(false)
-watch([showCookieImport, showBrowserImport], () => (moreSettingsOpen.value = false))
+const cookieHelpOpen = ref(false)
 // cookieBrowsers 是本机找到的调试浏览器与其中登录 AI Studio 的账户
 const cookieBrowsers = ref<CookieBrowser[]>([])
 const scanningBrowsers = ref(false)
@@ -162,6 +161,36 @@ const accountEnvironment = reactive({
   locale: defaultAccountLocale,
   timezone: '',
 })
+const cookieEnvironment = reactive({ proxy: '', locale: '', timezone: '' })
+// 恢复偏好不触发写回，只有 Cookie 流程中编辑的语言与时区会保存。
+let restoringCookieEnvironment = false
+watch(
+  showCookieImport,
+  (open) => {
+    cookieHelpOpen.value = false
+    if (!open) return
+    restoringCookieEnvironment = true
+    for (const field of ['locale', 'timezone'] as const) {
+      cookieEnvironment[field] = readPreference(
+        `accounts.cookie.${field}`,
+        '',
+        (value) => typeof value === 'string',
+      )
+    }
+    restoringCookieEnvironment = false
+  },
+  { flush: 'sync' },
+)
+for (const field of ['locale', 'timezone'] as const) {
+  watch(
+    () => cookieEnvironment[field],
+    (value) => {
+      if (!showCookieImport.value || restoringCookieEnvironment) return
+      writePreference(`accounts.cookie.${field}`, value)
+    },
+    { flush: 'sync' },
+  )
+}
 const draft = reactive<AccountDraft>({
   label: '',
   enabled: true,
@@ -626,7 +655,7 @@ async function discoverCookieAccounts(): Promise<void> {
     for (const [source, item] of sources.entries()) {
       failed = item.name
       const discovered = await api.discoverCookieAccounts(
-        { cookies: item.text, proxy: accountEnvironment.proxy },
+        { cookies: item.text, proxy: cookieEnvironment.proxy },
         controller.signal,
       )
       if (sequence !== cookieDiscovery) return
@@ -825,7 +854,7 @@ async function importCookieAccounts(direct = false): Promise<void> {
         auth_user: item.auth_user,
         method: cookieMethod.value,
       })),
-      ...accountEnvironment,
+      ...cookieEnvironment,
     })
     if (version === cookieSourceVersion) {
       submittedCookies.value = {
@@ -1593,11 +1622,16 @@ async function refreshAllAccounts(): Promise<void> {
 
         <div v-if="showCookieImport" class="modal-overlay" @click.self="closeCookieImport">
           <form
-            class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto rounded-lg border border-line bg-panel p-6 shadow-xl"
+            class="mx-4 max-h-[calc(100dvh-2rem)] w-full max-w-3xl overflow-y-auto rounded-lg border border-line bg-panel p-4 shadow-xl sm:p-6"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cookie-import-title"
             @submit.prevent="importCookieAccounts()"
           >
             <div class="mb-4 flex items-center justify-between">
-              <h3 class="text-lg font-bold text-white">{{ t('accounts.pasteCookie') }}</h3>
+              <h3 id="cookie-import-title" class="text-lg font-bold text-white">
+                {{ t('accounts.pasteCookie') }}
+              </h3>
               <button
                 class="rounded p-1 text-gray-500 hover:bg-line hover:text-white disabled:opacity-50"
                 type="button"
@@ -1607,188 +1641,214 @@ async function refreshAllAccounts(): Promise<void> {
                 <UiIcon name="close" :size="16" />
               </button>
             </div>
-            <ol class="mb-5 list-decimal space-y-1 pl-5 text-sm leading-6 text-gray-300">
-              <li v-for="step in pasteSteps" :key="step">{{ t(step) }}</li>
-            </ol>
-            <div class="space-y-4">
-              <p class="text-xs leading-5 text-gray-400">{{ t('accounts.cookieHelp') }}</p>
-              <p class="text-xs leading-5 text-amber-200">{{ t('accounts.cookieSecurity') }}</p>
-              <p class="text-xs leading-5 text-gray-400">{{ t('accounts.cookieTaskHelp') }}</p>
-              <div>
-                <div class="mb-1 flex items-center justify-between gap-3">
-                  <label for="cookie-text" class="text-sm font-medium text-gray-300">{{
-                    t('accounts.cookies')
-                  }}</label>
-                  <button
-                    class="inline-flex shrink-0 items-center gap-1.5 rounded px-2 py-1 text-sm text-blue-400 transition hover:bg-line hover:text-blue-300 disabled:opacity-50"
-                    type="button"
-                    :disabled="pendingAction !== '' || cookieTaskRunning"
-                    @click="cookieFiles.length > 0 ? clearCookieFiles() : cookieFileInput!.click()"
-                  >
-                    <UiIcon :name="cookieFiles.length > 0 ? 'edit' : 'chooseFiles'" :size="14" />
-                    {{
-                      cookieFiles.length > 0
-                        ? t('accounts.pasteCookieText')
-                        : t('accounts.chooseCookieFiles')
-                    }}
-                  </button>
-                  <input
-                    ref="cookieFileInput"
-                    class="hidden"
-                    type="file"
-                    multiple
-                    accept=".json,.txt,.cookies,application/json,text/plain"
-                    :disabled="pendingAction !== '' || cookieTaskRunning"
-                    @change="readCookieFiles"
-                  />
-                </div>
-                <ul
-                  v-if="cookieFiles.length > 0"
-                  class="max-h-36 space-y-1 overflow-auto rounded border border-line bg-canvas px-3 py-2"
-                >
-                  <li
-                    v-for="(file, index) in cookieFiles"
-                    :key="index"
-                    v-tooltip.overflow="file.name"
-                    class="truncate font-mono text-xs text-white"
-                  >
-                    {{ file.name }}
-                  </li>
-                </ul>
-                <textarea
-                  v-else
-                  id="cookie-text"
-                  v-model="cookieText"
-                  class="h-36 w-full resize-y rounded border border-line bg-canvas px-3 py-2 font-mono text-xs text-white transition focus:border-blue-500 focus:outline-none"
-                  spellcheck="false"
-                  autocomplete="off"
-                  :placeholder="t('accounts.cookiePlaceholder')"
-                  :maxlength="maxCookieBytes"
-                  :readonly="pendingAction !== '' || cookieTaskRunning"
-                  required
-                  @input="scheduleCookieDiscovery"
-                />
-                <p
-                  v-if="discoveringCookies"
-                  class="mt-2 flex items-center gap-2 text-xs text-gray-400"
-                  aria-live="polite"
-                >
-                  <UiIcon name="spinner" :size="13" />
-                  {{ t('accounts.cookieDiscovering') }}
-                </p>
-                <p
-                  v-else-if="cookieDiscoveryError"
-                  class="mt-2 max-h-24 overflow-y-auto text-xs leading-5 whitespace-pre-wrap [overflow-wrap:anywhere] text-red-300"
-                  role="alert"
-                >
-                  {{ cookieDiscoveryError }}
-                </p>
-              </div>
-
+            <div class="mb-4 rounded border border-line">
               <button
                 type="button"
-                class="text-xs text-gray-400 hover:text-white disabled:opacity-50"
-                :disabled="pendingAction !== ''"
-                @click="clearCookieInput"
+                class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-400 hover:text-gray-200"
+                :aria-expanded="cookieHelpOpen"
+                aria-controls="cookie-import-help"
+                @click="cookieHelpOpen = !cookieHelpOpen"
               >
-                {{ t('pg.reset') }}
+                <DisclosureChevron :open="cookieHelpOpen"
+                  ><UiIcon name="chevronRight" :size="14"
+                /></DisclosureChevron>
+                {{ t('accounts.cookieHelpTitle') }}
               </button>
-              <p v-if="cookieTaskRunning" role="status" class="text-xs text-blue-300">
-                {{ t('accounts.tasks') }} · {{ t('accounts.taskRunning') }}
-              </p>
-              <label class="block text-sm text-gray-300">
-                <span class="mb-1 block">{{ t('accounts.cookieMethod') }}</span>
-                <UiSelect
-                  v-model="cookieMethod"
-                  class="w-full rounded border border-line bg-canvas px-3 py-2"
-                  :disabled="pendingAction !== '' || cookieTaskRunning"
-                >
-                  <option value="browser">{{ t('accounts.cookieMethodBrowser') }}</option>
-                  <option value="http">{{ t('accounts.cookieMethodHttp') }}</option>
-                </UiSelect>
-              </label>
-              <p v-if="cookieMethod === 'http'" class="text-xs leading-5 text-gray-400">
-                {{ t('accounts.cookieMethodHttpHelp') }}
-              </p>
-              <p v-if="cookieImportError" role="alert" class="text-sm break-words text-red-300">
-                {{ cookieImportError }}
-              </p>
-
-              <div v-if="cookieCandidates.length > 0" class="space-y-2">
-                <div class="flex items-center justify-between">
-                  <span class="text-xs font-medium text-gray-400">
-                    {{ t('accounts.cookieAccounts') }} ({{ cookieCandidates.length }})
-                  </span>
-                  <button
-                    class="text-xs text-blue-400 transition hover:text-blue-300"
-                    type="button"
-                    @click="toggleAllCookieCandidates"
-                  >
-                    {{
-                      allCookieCandidatesSelected
-                        ? t('accounts.deselectAll')
-                        : t('accounts.selectAll')
-                    }}
-                  </button>
-                </div>
-                <div class="max-h-[35vh] space-y-2 overflow-auto">
-                  <label
-                    v-for="candidate in cookieCandidates"
-                    :key="cookieKey(candidate)"
-                    class="flex items-center gap-3 rounded border border-line bg-canvas p-3 transition"
-                    :class="
-                      candidate.imported ? 'opacity-60' : 'cursor-pointer hover:border-gray-600'
-                    "
-                  >
-                    <input
-                      v-model="selectedCookieUsers"
-                      class="h-4 w-4 shrink-0 accent-blue-600"
-                      type="checkbox"
-                      :value="cookieKey(candidate)"
-                      :disabled="candidate.imported || pendingAction !== '' || cookieTaskRunning"
-                    />
-                    <span class="min-w-0 flex-1">
-                      <strong
-                        v-tooltip.overflow="candidate.email"
-                        class="block truncate text-sm text-white"
-                      >
-                        {{ candidate.email }}
-                      </strong>
-                      <span class="block truncate font-mono text-xs text-gray-400">
-                        {{
-                          cookieFiles.length > 0 ? `${cookieFiles[candidate.source]!.name} · ` : ''
-                        }}u/{{ candidate.auth_user }}
-                      </span>
-                      <span
-                        v-if="candidate.device_bound"
-                        class="mt-1 block text-xs leading-5 text-amber-200"
-                        >{{ t('accounts.deviceBound') }}</span
-                      >
-                    </span>
-                    <span v-if="candidate.imported" class="shrink-0 text-xs text-gray-400">{{
-                      t('accounts.alreadyImported')
-                    }}</span>
-                  </label>
-                </div>
-              </div>
-
-              <div class="rounded border border-line">
-                <button
-                  type="button"
-                  class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-400 hover:text-gray-200"
-                  :aria-expanded="moreSettingsOpen"
-                  @click="moreSettingsOpen = !moreSettingsOpen"
-                >
-                  <DisclosureChevron :open="moreSettingsOpen"
-                    ><UiIcon name="chevronRight" :size="14"
-                  /></DisclosureChevron>
-                  {{ t('accounts.moreSettings') }}
-                </button>
-                <UiCollapse :open="moreSettingsOpen">
-                  <div class="space-y-4 border-t border-line p-3">
-                    <AccountEnvironmentFields :model-value="accountEnvironment" optional />
+              <div id="cookie-import-help">
+                <UiCollapse :open="cookieHelpOpen">
+                  <div class="space-y-3 border-t border-line p-3">
+                    <ol class="list-decimal space-y-1 pl-5 text-xs leading-5 text-gray-300">
+                      <li v-for="step in pasteSteps" :key="step">{{ t(step) }}</li>
+                    </ol>
+                    <p class="text-xs leading-5 text-gray-400">{{ t('accounts.cookieHelp') }}</p>
+                    <p class="text-xs leading-5 text-amber-200">
+                      {{ t('accounts.cookieSecurity') }}
+                    </p>
+                    <p class="text-xs leading-5 text-gray-400">
+                      {{ t('accounts.cookieTaskHelp') }}
+                    </p>
+                    <p class="text-xs leading-5 text-gray-400">
+                      {{ t('accounts.cookieEnvironmentHelp') }}
+                    </p>
+                    <p v-if="cookieMethod === 'http'" class="text-xs leading-5 text-gray-400">
+                      {{ t('accounts.cookieMethodHttpHelp') }}
+                    </p>
                   </div>
                 </UiCollapse>
+              </div>
+            </div>
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div class="min-w-0 space-y-3">
+                <div>
+                  <div class="mb-1 flex items-center justify-between gap-3">
+                    <label for="cookie-text" class="text-sm font-medium text-gray-300">{{
+                      t('accounts.cookies')
+                    }}</label>
+                    <button
+                      class="inline-flex shrink-0 items-center gap-1.5 rounded px-2 py-1 text-sm text-blue-400 transition hover:bg-line hover:text-blue-300 disabled:opacity-50"
+                      type="button"
+                      :disabled="pendingAction !== '' || cookieTaskRunning"
+                      @click="
+                        cookieFiles.length > 0 ? clearCookieFiles() : cookieFileInput!.click()
+                      "
+                    >
+                      <UiIcon :name="cookieFiles.length > 0 ? 'edit' : 'chooseFiles'" :size="14" />
+                      {{
+                        cookieFiles.length > 0
+                          ? t('accounts.pasteCookieText')
+                          : t('accounts.chooseCookieFiles')
+                      }}
+                    </button>
+                    <input
+                      ref="cookieFileInput"
+                      class="hidden"
+                      type="file"
+                      multiple
+                      accept=".json,.txt,.cookies,application/json,text/plain"
+                      :disabled="pendingAction !== '' || cookieTaskRunning"
+                      @change="readCookieFiles"
+                    />
+                  </div>
+                  <ul
+                    v-if="cookieFiles.length > 0"
+                    class="max-h-36 space-y-1 overflow-auto rounded border border-line bg-canvas px-3 py-2"
+                  >
+                    <li
+                      v-for="(file, index) in cookieFiles"
+                      :key="index"
+                      v-tooltip.overflow="file.name"
+                      class="truncate font-mono text-xs text-white"
+                    >
+                      {{ file.name }}
+                    </li>
+                  </ul>
+                  <textarea
+                    v-else
+                    id="cookie-text"
+                    v-model="cookieText"
+                    class="h-36 w-full resize-y rounded border border-line bg-canvas px-3 py-2 font-mono text-xs text-white transition focus:border-blue-500 focus:outline-none"
+                    spellcheck="false"
+                    autocomplete="off"
+                    :placeholder="t('accounts.cookiePlaceholder')"
+                    :maxlength="maxCookieBytes"
+                    :readonly="pendingAction !== '' || cookieTaskRunning"
+                    required
+                    @input="scheduleCookieDiscovery"
+                  />
+                  <p
+                    v-if="discoveringCookies"
+                    class="mt-2 flex items-center gap-2 text-xs text-gray-400"
+                    aria-live="polite"
+                  >
+                    <UiIcon name="spinner" :size="13" />
+                    {{ t('accounts.cookieDiscovering') }}
+                  </p>
+                  <p
+                    v-else-if="cookieDiscoveryError"
+                    class="mt-2 max-h-24 overflow-y-auto text-xs leading-5 whitespace-pre-wrap [overflow-wrap:anywhere] text-red-300"
+                    role="alert"
+                  >
+                    {{ cookieDiscoveryError }}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  class="text-xs text-gray-400 hover:text-white disabled:opacity-50"
+                  :disabled="pendingAction !== ''"
+                  @click="clearCookieInput"
+                >
+                  {{ t('pg.reset') }}
+                </button>
+                <p v-if="cookieTaskRunning" role="status" class="text-xs text-blue-300">
+                  {{ t('accounts.tasks') }} · {{ t('accounts.taskRunning') }}
+                </p>
+                <div v-if="cookieCandidates.length > 0" class="space-y-2">
+                  <div class="flex items-center justify-between">
+                    <span class="text-xs font-medium text-gray-400">
+                      {{ t('accounts.cookieAccounts') }} ({{ cookieCandidates.length }})
+                    </span>
+                    <button
+                      class="text-xs text-blue-400 transition hover:text-blue-300"
+                      type="button"
+                      @click="toggleAllCookieCandidates"
+                    >
+                      {{
+                        allCookieCandidatesSelected
+                          ? t('accounts.deselectAll')
+                          : t('accounts.selectAll')
+                      }}
+                    </button>
+                  </div>
+                  <div class="max-h-[35vh] space-y-2 overflow-auto">
+                    <label
+                      v-for="candidate in cookieCandidates"
+                      :key="cookieKey(candidate)"
+                      class="flex items-center gap-3 rounded border border-line bg-canvas p-3 transition"
+                      :class="
+                        candidate.imported ? 'opacity-60' : 'cursor-pointer hover:border-gray-600'
+                      "
+                    >
+                      <input
+                        v-model="selectedCookieUsers"
+                        class="h-4 w-4 shrink-0 accent-blue-600"
+                        type="checkbox"
+                        :value="cookieKey(candidate)"
+                        :disabled="candidate.imported || pendingAction !== '' || cookieTaskRunning"
+                      />
+                      <span class="min-w-0 flex-1">
+                        <strong
+                          v-tooltip.overflow="candidate.email"
+                          class="block truncate text-sm text-white"
+                        >
+                          {{ candidate.email }}
+                        </strong>
+                        <span class="block truncate font-mono text-xs text-gray-400">
+                          {{
+                            cookieFiles.length > 0
+                              ? `${cookieFiles[candidate.source]!.name} · `
+                              : ''
+                          }}u/{{ candidate.auth_user }}
+                        </span>
+                        <span
+                          v-if="candidate.device_bound"
+                          class="mt-1 block text-xs leading-5 text-amber-200"
+                          >{{ t('accounts.deviceBound') }}</span
+                        >
+                      </span>
+                      <span v-if="candidate.imported" class="shrink-0 text-xs text-gray-400">{{
+                        t('accounts.alreadyImported')
+                      }}</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+              <div class="min-w-0 space-y-3">
+                <label class="block text-sm text-gray-300">
+                  <span class="mb-1 block">{{ t('accounts.cookieMethod') }}</span>
+                  <UiSelect
+                    v-model="cookieMethod"
+                    class="w-full rounded border border-line bg-canvas px-3 py-2"
+                    :disabled="pendingAction !== '' || cookieTaskRunning"
+                  >
+                    <option value="browser">{{ t('accounts.cookieMethodBrowser') }}</option>
+                    <option value="http">{{ t('accounts.cookieMethodHttp') }}</option>
+                  </UiSelect>
+                </label>
+                <section class="rounded border border-line" aria-labelledby="cookie-settings-title">
+                  <h4
+                    id="cookie-settings-title"
+                    class="px-3 py-2 text-sm font-medium text-gray-300"
+                  >
+                    {{ t('accounts.moreSettings') }}
+                  </h4>
+                  <div class="space-y-3 border-t border-line p-3 text-sm">
+                    <AccountEnvironmentFields :model-value="cookieEnvironment" optional />
+                  </div>
+                </section>
+                <p v-if="cookieImportError" role="alert" class="text-sm break-words text-red-300">
+                  {{ cookieImportError }}
+                </p>
               </div>
             </div>
             <div class="mt-6 flex gap-2">
@@ -1938,31 +1998,21 @@ async function refreshAllAccounts(): Promise<void> {
               </label>
             </div>
             <div class="mt-4 rounded border border-line">
-              <button
-                type="button"
-                class="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-300 hover:text-white"
-                :aria-expanded="moreSettingsOpen"
-                @click="moreSettingsOpen = !moreSettingsOpen"
-              >
-                <DisclosureChevron :open="moreSettingsOpen"
-                  ><UiIcon name="chevronRight" :size="14"
-                /></DisclosureChevron>
+              <h4 class="px-3 py-2 text-sm font-medium text-gray-300">
                 {{ t('accounts.moreSettings') }}
-              </button>
-              <UiCollapse :open="moreSettingsOpen">
-                <div class="space-y-4 border-t border-line p-3">
-                  <label class="block">
-                    <span class="mb-1 block text-sm font-medium text-gray-300">{{
-                      t('accounts.proxy')
-                    }}</span>
-                    <input
-                      v-model.trim="accountEnvironment.proxy"
-                      class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
-                      placeholder="socks5://127.0.0.1:1080"
-                    />
-                  </label>
-                </div>
-              </UiCollapse>
+              </h4>
+              <div class="border-t border-line p-3">
+                <label class="block">
+                  <span class="mb-1 block text-sm font-medium text-gray-300">{{
+                    t('accounts.proxy')
+                  }}</span>
+                  <input
+                    v-model.trim="accountEnvironment.proxy"
+                    class="w-full rounded border border-line bg-canvas px-3 py-2 text-white transition focus:border-blue-500 focus:outline-none"
+                    placeholder="socks5://127.0.0.1:1080"
+                  />
+                </label>
+              </div>
             </div>
             <div class="mt-6 flex gap-2">
               <button

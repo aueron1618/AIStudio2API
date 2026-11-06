@@ -194,29 +194,30 @@ func decodeUsageCursor(value string) (*UsageCursor, error) {
 
 // UsageRecord 是一条已完成请求的账本记录
 type UsageRecord struct {
-	ID              string           `json:"id"`
-	Time            time.Time        `json:"time"`
-	Protocol        string           `json:"protocol"`
-	Path            string           `json:"path"`
-	Model           string           `json:"model"`
-	RequestedModel  string           `json:"requested_model"`
-	ResponseModel   string           `json:"response_model"`
-	Account         string           `json:"account"`
-	Channel         string           `json:"channel"`
-	Status          int              `json:"status"`
-	State           string           `json:"state"`
-	DurationMS      int64            `json:"duration_ms"`
-	FirstEventMS    int64            `json:"first_event_ms"`
-	QueueMS         int64            `json:"queue_ms"`
-	InputTokens     int64            `json:"input_tokens"`
-	CachedTokens    int64            `json:"cached_tokens"`
-	ReasoningTokens int64            `json:"reasoning_tokens"`
-	ReplyTokens     int64            `json:"reply_tokens"`
-	TotalTokens     int64            `json:"total_tokens"`
-	ToolCalls       int              `json:"tool_calls"`
-	Error           string           `json:"error"`
-	Attempts        []RequestAttempt `json:"attempts"`
-	HasBody         bool             `json:"has_body"`
+	ID                     string           `json:"id"`
+	Time                   time.Time        `json:"time"`
+	Protocol               string           `json:"protocol"`
+	Path                   string           `json:"path"`
+	Model                  string           `json:"model"`
+	RequestedModel         string           `json:"requested_model"`
+	ResponseModel          string           `json:"response_model"`
+	Account                string           `json:"account"`
+	Channel                string           `json:"channel"`
+	Status                 int              `json:"status"`
+	State                  string           `json:"state"`
+	DurationMS             int64            `json:"duration_ms"`
+	FirstEventMS           int64            `json:"first_event_ms"`
+	QueueMS                int64            `json:"queue_ms"`
+	InputTokens            int64            `json:"input_tokens"`
+	CachedTokens           int64            `json:"cached_tokens"`
+	ReasoningTokens        int64            `json:"reasoning_tokens"`
+	ReplyTokens            int64            `json:"reply_tokens"`
+	TotalTokens            int64            `json:"total_tokens"`
+	ToolCalls              int              `json:"tool_calls"`
+	AverageTokensPerSecond float64          `json:"average_tokens_per_second"`
+	Error                  string           `json:"error"`
+	Attempts               []RequestAttempt `json:"attempts"`
+	HasBody                bool             `json:"has_body"`
 }
 
 // UsageRecordPage 是按完成时间倒序的一页请求记录，NextCursor 为空表示没有更早的记录

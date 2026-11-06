@@ -9,6 +9,9 @@ export const messages: Record<TranslationKey, string> = {
   'accounts.localeEnUS': '英語（美國）',
   'accounts.timezoneShanghai': '中國標準時間',
   'accounts.timezoneNewYork': '美國東部時間',
+  'accounts.cookieHelpTitle': 'Cookie 匯入說明',
+  'accounts.cookieEnvironmentHelp':
+    '此瀏覽器僅記住你填寫的語言與時區；不會在瀏覽器偏好中儲存 Cookie、檔案內容、電子郵件或代理。',
   'accounts.cookieHelp':
     '支援 Cookie 請求標頭、多行文字、擴充套件 JSON、storage-state JSON 與 Netscape 檔案，UTF-8 最多 1 MiB。請複製完整 Cookie，document.cookie 會遺漏 HttpOnly 欄位。',
   'accounts.cookieSecurity':

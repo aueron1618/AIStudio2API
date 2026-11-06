@@ -9,7 +9,6 @@ import UiSelect from '../UiSelect.vue'
 import RecordDrawer from './RecordDrawer.vue'
 import { displayModelName, showSeparateToolCalls, useUsageFormat } from './format'
 import { readPreference, writePreference } from '@/preference'
-import { latencyTone } from './model'
 
 type Column =
   | 'model'
@@ -33,7 +32,7 @@ const props = defineProps<{
 const emit = defineEmits<{ 'update:status': [value: string]; 'update:search': [value: string] }>()
 
 const { t, errorText } = useI18n()
-const { compact, integer, duration, dateTime, dimensionLabel } = useUsageFormat()
+const { compact, integer, duration, outputSpeed, dateTime, dimensionLabel } = useUsageFormat()
 const id = useId()
 const pageSizes = [20, 50, 100]
 const allColumns: Column[] = [
@@ -175,11 +174,6 @@ function stateClass(record: UsageRecord): string {
   if (record.state === 'completed' || record.state === 'tool_calls')
     return 'bg-green-500/15 text-green-300'
   return 'bg-yellow-500/15 text-yellow-300'
-}
-
-// latencyWidth 把耗时映射到 0 到 100 的条形宽度，3 分钟为满格
-function latencyWidth(milliseconds: number): number {
-  return Math.min(100, Math.max(4, (milliseconds / 180_000) * 100))
 }
 </script>
 
@@ -392,17 +386,17 @@ function latencyWidth(milliseconds: number): number {
                     {{ compact(record.reply_tokens) }}
                   </div>
                 </td>
-                <td v-else-if="column === 'latency'" class="px-4 py-2">
-                  <div class="flex w-36 items-center justify-between gap-2 tabular-nums">
-                    <span class="text-gray-200">{{ duration(record.duration_ms) }}</span>
-                    <span class="text-xs text-gray-500">{{ duration(record.first_event_ms) }}</span>
-                  </div>
-                  <div class="mt-1 h-1 w-36 rounded-full bg-raised">
-                    <div
-                      class="h-1 rounded-full"
-                      :class="latencyTone(record.duration_ms, 'duration')"
-                      :style="{ width: `${latencyWidth(record.duration_ms)}%` }"
-                    ></div>
+                <td v-else-if="column === 'latency'" class="px-4 py-0.5">
+                  <div class="h-9 w-36 leading-3 whitespace-nowrap tabular-nums">
+                    <div class="text-gray-200">
+                      {{ t('usage.duration') }} {{ duration(record.duration_ms) }}
+                    </div>
+                    <div class="text-gray-500">
+                      {{ t('logs.firstToken') }} {{ duration(record.first_event_ms) }}
+                    </div>
+                    <div class="text-gray-500">
+                      {{ outputSpeed(record.average_tokens_per_second) }} tk/s
+                    </div>
                   </div>
                 </td>
                 <td
@@ -446,30 +440,44 @@ function latencyWidth(milliseconds: number): number {
             <div v-if="showSeparateToolCalls(record)" class="mt-0.5 text-gray-500 tabular-nums">
               {{ t('usage.toolCalls') }} {{ integer(record.tool_calls) }}
             </div>
-            <div
-              v-if="record.status !== 401"
-              v-tooltip="displayModelName(record.requested_model || record.model)"
-              class="mt-1.5 truncate text-gray-200"
-            >
-              <span class="sr-only">{{ t('usage.requestedModel') }}: </span>
-              {{ displayModelName(record.requested_model || record.model) || '—' }}
-            </div>
-            <div
-              v-if="record.status !== 401"
-              v-tooltip="displayModelName(record.response_model)"
-              class="mt-0.5 truncate text-xs text-gray-500"
-            >
-              <span class="sr-only">{{ t('usage.responseModel') }}: </span>
-              {{ displayModelName(record.response_model) || '—' }}
-            </div>
-            <div class="mt-0.5 flex gap-3 text-gray-500 tabular-nums">
-              <span
-                v-tooltip.overflow="record.status === 401 ? '' : record.account"
-                class="truncate"
-                >{{ record.status === 401 ? '—' : record.account || '—' }}</span
-              >
-              <span class="ml-auto shrink-0">{{ duration(record.duration_ms) }}</span>
-              <span class="shrink-0">{{ compact(record.total_tokens) }}</span>
+            <div class="mt-1.5 flex min-w-0 gap-3">
+              <div class="min-w-0 flex-1">
+                <div
+                  v-if="record.status !== 401"
+                  v-tooltip="displayModelName(record.requested_model || record.model)"
+                  class="truncate text-gray-200"
+                >
+                  <span class="sr-only">{{ t('usage.requestedModel') }}: </span>
+                  {{ displayModelName(record.requested_model || record.model) || '—' }}
+                </div>
+                <div
+                  v-if="record.status !== 401"
+                  v-tooltip="displayModelName(record.response_model)"
+                  class="mt-0.5 truncate text-xs text-gray-500"
+                >
+                  <span class="sr-only">{{ t('usage.responseModel') }}: </span>
+                  {{ displayModelName(record.response_model) || '—' }}
+                </div>
+                <div class="mt-0.5 flex gap-3 text-gray-500 tabular-nums">
+                  <span
+                    v-tooltip.overflow="record.status === 401 ? '' : record.account"
+                    class="truncate"
+                    >{{ record.status === 401 ? '—' : record.account || '—' }}</span
+                  >
+                  <span class="ml-auto shrink-0">{{ compact(record.total_tokens) }}</span>
+                </div>
+              </div>
+              <div class="h-9 shrink-0 leading-3 whitespace-nowrap tabular-nums">
+                <div class="text-gray-200">
+                  {{ t('usage.duration') }} {{ duration(record.duration_ms) }}
+                </div>
+                <div class="text-gray-500">
+                  {{ t('logs.firstToken') }} {{ duration(record.first_event_ms) }}
+                </div>
+                <div class="text-gray-500">
+                  {{ outputSpeed(record.average_tokens_per_second) }} tk/s
+                </div>
+              </div>
             </div>
           </button>
         </li>

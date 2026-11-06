@@ -19,8 +19,9 @@
 /web/vite.local.config.ts
 /docs/windows-development.local.md
 /cookie.json
-# SpiderMonkey 静态库
+# SpiderMonkey 与 libwebp 静态库
 /spidermonkey/
+/libwebp/
 
 # 前端产物
 /web/node_modules/

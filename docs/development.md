@@ -9,7 +9,7 @@ AIStudio2API 使用 Go 调用 Google AI Studio 的 MakerSuite 私有协议，由
 | 场景 | 必需组件 | 说明 |
 | --- | --- | --- |
 | Release 运行 | `aistudio2api` | 默认 SpiderMonkey 生成链路不准备浏览器；浏览器登录、浏览器 Cookie 验证或选择 Camoufox 后端时才按需准备，无需安装编译器、Node.js 或 Playwright |
-| 源码运行 | Go 1.27+、CGO、C/C++ 编译器与 SpiderMonkey 静态库；推荐 Node.js 24.15/npm 11（也支持 22.18+、24.11+ 或 26+） | SQLite 与 WAA 都依赖原生编译，不支持 `CGO_ENABLED=0`；Node.js 用 Vite+ 构建前端 |
+| 源码运行 | Go 1.27+、CGO、C/C++ 编译器与 SpiderMonkey、libwebp 静态库；推荐 Node.js 24.15/npm 11（也支持 22.18+、24.11+ 或 26+） | SQLite、WAA 与 WebP 都依赖原生编译，不支持 `CGO_ENABLED=0`；Node.js 用 Vite+ 构建前端 |
 | Windows Chrome 导入 | Windows amd64、稳定版 Chrome | Go 程序直接读取本机 Profile 的 OAuth/DBSC 材料 |
 
 Windows 用户解压发布包后双击 `aistudio2api.exe`。程序启动后自动打开管理页面，生成服务初始保持停止；账户登录、日志查看和生成服务启停均在该页面完成。
@@ -27,7 +27,7 @@ Windows 用户解压发布包后双击 `aistudio2api.exe`。程序启动后自�
 - Windows 桌面版以 `cmd /c start /wait aistudio2api.exe setup` 的形式运行命令时在该控制台中输入输出，命令行等程序结束后返回
 - Windows 在替换运行中的输出文件时可能留下 `aistudio2api.exe~`，它是旧进程占用目标文件期间产生的构建副本
 
-源码首次启动前，先按 README 配置当前平台的原生编译环境，包括 `CGO_ENABLED=1`、`CC`、`CXX`、`CGO_CXXFLAGS` 与 `CGO_LDFLAGS`，再在同一终端执行：
+源码首次启动前，先按 README 配置当前平台的原生编译环境，包括 `CGO_ENABLED=1`、`CC`、`CXX`、`CGO_CPPFLAGS` 与 `CGO_LDFLAGS`，两套静态库的头文件与库路径都需配置，再在同一终端执行：
 
 ```powershell
 cd web
@@ -39,7 +39,7 @@ go run ./cmd/aistudio2api
 
 ### Windows 开发服务器
 
-以下命令在项目根目录执行，使用 Windows PowerShell 5.1+、Go 1.27+ 和 README 所述的 llvm-mingw / SpiderMonkey 原生环境，推荐 Node.js 24.15 与 npm 11。命令行开发版不需要管理员权限、Wails CLI 或 WebView2。使用 `npm.cmd` 避免 `npm.ps1` 的执行策略限制，不修改系统执行策略。
+以下命令在项目根目录执行，使用 Windows PowerShell 5.1+、Go 1.27+ 和 README 所述的 llvm-mingw / SpiderMonkey / libwebp 原生环境，推荐 Node.js 24.15 与 npm 11。命令行开发版不需要管理员权限、Wails CLI 或 WebView2。使用 `npm.cmd` 避免 `npm.ps1` 的执行策略限制，不修改系统执行策略。
 
 本节不依赖私人的 `dev.bat`、`dev.ps1` 或 `vite.local.config.ts`，这些文件不属于发行包。保留这些脚本的本地环境也必须配置 CGO 与原生库；旧脚本若强制 `CGO_ENABLED=0`，不能用于当前源码。
 
@@ -143,7 +143,7 @@ npm.cmd --prefix web run build
 | 问题 | 排查方式 |
 | --- | --- |
 | 找不到 Go、Node 或 npm | 安装上表要求的版本并重新打开终端，用 `go version`、`node --version`、`npm.cmd --version` 确认 PATH |
-| 安装或构建失败 | 先处理首个错误；确认 `CGO_ENABLED=1`、C/C++ 编译器和 SpiderMonkey 头文件/库路径，再检查依赖缓存。需要安装依赖时使用 `npm ci`，不修改锁文件 |
+| 安装或构建失败 | 先处理首个错误；确认 `CGO_ENABLED=1`、C/C++ 编译器以及 SpiderMonkey、libwebp 头文件/库路径，再检查依赖缓存。需要安装依赖时使用 `npm ci`，不修改锁文件 |
 | 端口不可用 | 停止已有开发实例或调整端口；用 `netsh interface ipv4 show excludedportrange protocol=tcp` 检查 Windows 保留端口，不必修改系统网络服务 |
 | 前端请求 502 / `ECONNREFUSED` | 后端未就绪或 `AISTUDIO_DEV_API_TARGET` 与后端实际地址不一致 |
 | 管理请求 401 / 403 | 检查开发配置的管理登录状态；通过同一个 `127.0.0.1` 页面登录，不要把请求改成跨域或启用 `changeOrigin: true` |
@@ -242,9 +242,13 @@ internal/aistudio/       账户、MakerSuite、WAA、模型、工具、上传、
 internal/api/            OpenAI、Responses、Anthropic、Gemini 与管理端 HTTP 路由
 internal/camoufoxnative/ 原生 WebDriver BiDi、WAA 页面与隔离登录
 internal/waa/            SpiderMonkey WAA：BotGuard VM、Firefox 形状宿主与 SpiderMonkey cgo 绑定
+internal/imagecodec/     生成图片的 JPEG 解码、CatmullRom 缩放、PNG 编码与经 cgo 链接 libwebp 的 WebP 编码
+internal/resample/       语音 PCM 的 Kaiser 窗 sinc 多相重采样
 internal/proxydial/      上游代理拨号与带认证代理的本机 SOCKS5 中转
 internal/requestdb/      请求用量账本与可选正文的 SQLite 存储
 internal/statedb/        Responses 与 Interactions 续接节点的 SQLite 存储
+internal/promptdb/       Playground 对话的 SQLite 存储
+internal/sqlitedb/       SQLite 打开、按建表语句同步表结构与空闲页回收
 internal/pricing/        用量估算费用使用的 Gemini API 单价表
 internal/chromeauth/     Windows Chrome OAuth/DBSC 发现、导入和续签
 internal/config/         全局配置的读取、校验和原子写回
@@ -257,7 +261,8 @@ auth/                    每账户配置、认证状态和可恢复运行状态
 runtime/camoufox/        Release 使用的 Camoufox 运行时
 runtime/requests.db      请求用量账本与可选正文
 runtime/states.db        Responses、Interactions 与 Chat 音频回复的续接节点
-runtime/media/           MEDIA_OUTPUT=url 时按内容命名保存的生成媒体
+runtime/prompts.db       Playground 对话
+runtime/media/           MEDIA_OUTPUT=url 时按内容命名保存的生成媒体，总量超过 1 GiB 时删除最久未使用的文件
 ```
 
 主依赖方向：
@@ -584,7 +589,7 @@ API 试用页位于 `web/src/playground/`，路由与官网相同（`/prompts/ne
 
 ## 6. 构建与贡献
 
-本地数据库使用经 cgo 编译的 SQLite，`internal/waa` 经 cgo 链接 SpiderMonkey 静态库，构建需要 C/C++ 编译器与当前平台的静态库：Windows 为 llvm-mingw 的 UCRT 版 clang，macOS 为 Xcode Command Line Tools，Linux 命令行版为 Zig、桌面版为 gcc；静态库来自 [Mag1cFall/firefox Releases](https://github.com/Mag1cFall/firefox/releases)，下载与 `CC`、`CXX`、`CGO_CXXFLAGS`、`CGO_LDFLAGS` 的设置见 README 的源码构建一节。发布二进制前先构建前端：
+本地数据库使用经 cgo 编译的 SQLite，`internal/waa` 经 cgo 链接 SpiderMonkey 静态库，`internal/imagecodec/libwebp` 经 cgo 链接 libwebp 静态库，构建需要 C/C++ 编译器与当前平台的静态库：Windows 为 llvm-mingw 的 UCRT 版 clang，macOS 为 Xcode Command Line Tools，Linux 命令行版为 Zig、桌面版为 gcc；静态库分别来自 [Mag1cFall/firefox](https://github.com/Mag1cFall/firefox/releases) 与 [Mag1cFall/libwebp](https://github.com/Mag1cFall/libwebp/releases) 的 Releases，下载与 `CC`、`CXX`、`CGO_CPPFLAGS`、`CGO_LDFLAGS` 的设置见 README 的源码构建一节。发布二进制前先构建前端：
 
 ```powershell
 cd web
@@ -632,10 +637,10 @@ wails3 generate syso -arch amd64 -icon build/windows/icon.ico -manifest build/wi
 
 默认 SpiderMonkey 运行不准备 Camoufox，浏览器登录、浏览器 Cookie 验证或选择 Camoufox 后端时才按需准备；HTTP Cookie 验证不启动浏览器。贡献内容聚焦单一功能或协议变更，并使用脱敏后的请求与响应样例。
 
-GitHub Actions 对 `main`、`v*` 标签和 Pull Request 执行前端 typecheck、test、lint、format:check、build，以及 Go 单元测试与 vet。前端使用 Node.js 24.15/npm 11，产物在各 Go 任务间共享；Linux、Windows 与 macOS 原生任务经 `.github/actions/spidermonkey` 下载对应目标静态库，并缓存 CGO 编译产物。发行包和镜像注入标签或提交版本，保留 fork 更新链路：
+GitHub Actions 的 `build.yml` 保留 `main`、`v*` 标签、Pull Request 与手动触发，统一调用仅有 `workflow_call` 入口的 `checks.yml`，不重复运行独立检查。检查执行前端 typecheck、test、lint、format:check、build，以及 `go.mod` 最低版本的 Go 单元测试与 vet；通过后再并行构建各平台发行包，Release 与 Docker 继续由这组检查门控。前端固定使用 Node.js 24.15.0/npm 11，产物在各 Go 任务间共享；Linux、Windows 与 macOS 原生任务经 `.github/actions/static-libraries` 下载对应目标的 SpiderMonkey 与 libwebp 静态库。Go 模块与编译缓存按任务、架构和工具链在 `main` 上保存，标签与 Pull Request 恢复缓存，SQLite、SpiderMonkey 与 libwebp 的 CGO 编译产物随 Go 编译缓存复用。发行包和镜像注入标签或提交版本，保留 fork 更新链路：
 
 - Windows amd64：桌面版 `aistudio2api-<版本>-windows-amd64.zip`，保留同名顶层目录，其中有 `aistudio2api.exe` 与 launcher `start.bat`；链接启用 `--gc-sections` / `--icf=safe`，7z 使用 ZIP Deflate 压缩
-- macOS：arm64 与 amd64 合并的桌面版，ad-hoc 签名的 `AIStudio2API.app` 打成 zip 与 LZMA 压缩的 dmg
+- macOS：最低 macOS 13.0，arm64 与 amd64 合并的桌面版，ad-hoc 签名的 `AIStudio2API.app` 打成 zip 与 LZMA 压缩的 dmg；两个架构分别设置 SpiderMonkey 与 libwebp 的头文件和链接路径
 - Linux amd64：Ubuntu 22.04 / GTK 3 / WebKit2GTK 4.1 构建的 `aistudio2api-<版本>-linux-amd64.AppImage` 与 `.deb`
 - Linux amd64/arm64 与 macOS amd64/arm64：`aistudio2api-<版本>-<系统>-<架构>.tar.gz`，tar 保留同名顶层目录，其中只有 `aistudio2api`；外层由 7z 生成 gzip，不是 7z 格式
 

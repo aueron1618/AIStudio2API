@@ -226,6 +226,26 @@ func TestContinuationControlsHaveIndependentRestartBoundaries(t *testing.T) {
 	}
 }
 
+func TestAccountTimezoneNormalization(t *testing.T) {
+	for _, test := range []struct {
+		input, want string
+		invalid     bool
+	}{
+		{"", "", false},
+		{" \ufeff\u200b ", "", false},
+		{" \ufeffAsia/\u200bShanghai\u2066 ", "Asia/Shanghai", false},
+		{"Etc/UTC", "Etc/UTC", false},
+		{"Mars/Olympus", "", true},
+	} {
+		t.Run(test.input, func(t *testing.T) {
+			got, err := accountTimezone(test.input)
+			if got != test.want || (err != nil) != test.invalid {
+				t.Fatalf("accountTimezone(%q) = %q, %v", test.input, got, err)
+			}
+		})
+	}
+}
+
 func TestStripThoughtSignaturesConfigAndRestartBoundary(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	cfg := config.Default()

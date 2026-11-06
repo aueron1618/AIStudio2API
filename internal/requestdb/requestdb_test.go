@@ -118,7 +118,7 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 				}
 			}
 			for _, table := range []string{"hours", "days"} {
-				oldColumns := strings.Replace(rollupColumns, ", cached_tokens INTEGER NOT NULL", "", 1)
+				oldColumns := strings.Replace(rollupColumns, ", cached_tokens INTEGER NOT NULL DEFAULT 0", "", 1)
 				if _, err := db.Exec(`CREATE TABLE ` + table + ` (` + oldColumns + `) WITHOUT ROWID`); err != nil {
 					t.Fatal(err)
 				}
@@ -127,7 +127,7 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 			if _, err := db.Exec(`INSERT INTO requests (
  id, time, protocol, path, model, account, channel, status, state,
  duration_ms, first_event_ms, queue_ms, input_tokens, reasoning_tokens, reply_tokens, total_tokens, tool_calls, error, attempts)
- VALUES ('old',?,'openai-chat','/v1/chat/completions','legacy-model','account','build',200,'completed',100,20,0,0,0,0,0,0,'','[]')`, now.UnixMilli()); err != nil {
+ VALUES ('old',?,'openai-chat','/v1/chat/completions','legacy-model','account','build',200,'completed',100,20,0,0,10,30,40,0,'','[]')`, now.UnixMilli()); err != nil {
 				t.Fatal(err)
 			}
 			if err := db.Close(); err != nil {
@@ -139,8 +139,11 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer store.Close()
+			latency := time.Second + 500*time.Microsecond
+			average := api.AverageTokensPerSecond(20, latency)
 			store.Record(Row{ID: "new", Time: now.Add(time.Millisecond), Model: "resolved-model",
-				RequestedModel: "requested-alias", ResponseModel: "response-json-model", CachedTokens: 3, State: "completed"})
+				RequestedModel: "requested-alias", ResponseModel: "response-json-model", CachedTokens: 3, State: "completed",
+				Duration: latency, ReplyTokens: 15, ReasoningTokens: 5, TotalTokens: 20, AverageTokensPerSecond: average})
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -156,8 +159,14 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 			if record := page.Items[0]; record.ID != "new" || record.Model != "resolved-model" || record.RequestedModel != "requested-alias" || record.ResponseModel != "response-json-model" || record.CachedTokens != 3 {
 				t.Fatalf("new record=%+v", record)
 			}
+			if record := page.Items[0]; record.AverageTokensPerSecond != average || record.DurationMS != 1000 {
+				t.Fatalf("existing average was recomputed from rounded duration: %+v", record)
+			}
 			if record := page.Items[1]; record.ID != "old" || record.Model != "legacy-model" || record.RequestedModel != "" || record.ResponseModel != "" || record.CachedTokens != 0 {
 				t.Fatalf("old record=%+v", record)
+			}
+			if record := page.Items[1]; record.AverageTokensPerSecond != 400 {
+				t.Fatalf("legacy average did not use the existing log calculation: %+v", record)
 			}
 		})
 	}
@@ -167,7 +176,7 @@ const legacyBodiesSchema = `CREATE TABLE bodies (
  id TEXT PRIMARY KEY, time INTEGER NOT NULL, request TEXT NOT NULL, request_size INTEGER NOT NULL,
  response TEXT NOT NULL, response_size INTEGER NOT NULL)`
 
-func TestLegacyBodiesMigrationPreservesData(t *testing.T) {
+func TestLedgerSchemaDropsLegacyBodies(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "requests.db")
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
@@ -203,17 +212,12 @@ func TestLegacyBodiesMigrationPreservesData(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer store.Close()
-		legacy, err := store.RequestBody(t.Context(), "legacy")
-		if err != nil || legacy.Request != "old request\n" || legacy.Response != "old response" || legacy.RequestSize != 100 || legacy.ResponseSize != 200 || !legacy.Time.Equal(now) {
-			t.Fatalf("legacy body changed: %+v, %v", legacy, err)
+		if _, err := store.RequestBody(t.Context(), "legacy"); !errors.Is(err, api.ErrRequestBodyNotFound) {
+			t.Fatalf("legacy body was unexpectedly migrated: %v", err)
 		}
 		existing, err := store.RequestBody(t.Context(), "existing")
 		if err != nil || existing.Request != "new request" || existing.Response != "new response" || existing.RequestSize != 300 || existing.ResponseSize != 400 {
 			t.Fatalf("newer body overwritten: %+v, %v", existing, err)
-		}
-		var legacyFirst bool
-		if err := store.db.QueryRow(`SELECT (SELECT seq FROM request_bodies WHERE id='legacy') < (SELECT seq FROM request_bodies WHERE id='existing')`).Scan(&legacyFirst); err != nil || !legacyFirst {
-			t.Fatalf("legacy body would evict newer native bodies: %v, %v", legacyFirst, err)
 		}
 		var legacyTables int
 		if err := store.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='bodies'`).Scan(&legacyTables); err != nil || legacyTables != 0 {
@@ -222,46 +226,6 @@ func TestLegacyBodiesMigrationPreservesData(t *testing.T) {
 		if err := store.Close(); err != nil {
 			t.Fatal(err)
 		}
-	}
-}
-
-func TestLegacyBodiesMigrationRollsBackOnFailure(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "requests.db")
-	db, err := sql.Open("sqlite3", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if _, err := db.Exec(schema + ";" + legacyBodiesSchema + `;
- INSERT INTO bodies VALUES ('first',1,'first request',13,'response',8),('bad',2,'second request',14,'response',8);
- CREATE TRIGGER reject_legacy BEFORE INSERT ON request_bodies WHEN NEW.id='bad'
- BEGIN SELECT RAISE(ABORT,'injected migration failure'); END;`); err != nil {
-		t.Fatal(err)
-	}
-	if store, err := Open(path, func(string, string) {}); err == nil {
-		store.Close()
-		t.Fatal("migration unexpectedly succeeded")
-	}
-	var legacy, migrated int
-	if err := db.QueryRow(`SELECT count(*) FROM bodies`).Scan(&legacy); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.QueryRow(`SELECT count(*) FROM request_bodies`).Scan(&migrated); err != nil || legacy != 2 || migrated != 0 {
-		t.Fatalf("migration was not atomic: legacy=%d migrated=%d error=%v", legacy, migrated, err)
-	}
-	if _, err := db.Exec(`DROP TRIGGER reject_legacy`); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store, err := Open(path, func(string, string) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if body, err := store.RequestBody(t.Context(), "bad"); err != nil || body.Request != "second request" {
-		t.Fatalf("retry lost the legacy body: %+v, %v", body, err)
 	}
 }
 
