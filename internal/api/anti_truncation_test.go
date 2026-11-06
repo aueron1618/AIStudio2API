@@ -278,7 +278,7 @@ func TestAntiTruncationProtocolOutput(t *testing.T) {
 					// Disabling while the request is in flight must not expose its transport tool.
 					duringRequest: func() { enabled.Store(false) },
 				}
-				client := aistudio.NewClient(aistudio.ClientOptions{Transport: transport, Protected: transport})
+				client := aistudio.NewClient(aistudio.ClientOptions{Transport: transport, Protected: transport, Pages: transport})
 				s := httptest.NewServer(NewHandler(generationTestService{generate: client.Generate}, Config{AntiTruncation: enabled.Load}))
 				s.Client().Timeout = 5 * time.Second
 				defer s.Close()

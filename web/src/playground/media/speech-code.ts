@@ -8,7 +8,12 @@ interface SpeechCodeInput {
   prompt: string
   temperature: number
   speakers: readonly { alias: string; voice: string }[]
-  openAI: { input: string; voice: string; instructions?: string | undefined }
+  openAI: {
+    input: string
+    voice: string
+    instructions?: string | undefined
+    response_format?: string | undefined
+  }
 }
 
 // pythonVoice 生成 Python 的预置音色设置
@@ -398,6 +403,9 @@ curl \\
 // speechOpenAIPython 生成 OpenAI Python SDK 语音示例，台词合为 input，风格为 instructions
 function speechOpenAIPython(input: SpeechCodeInput): string {
   const { openAI } = input
+  const format = openAI.response_format ?? 'mp3'
+  const responseFormat =
+    openAI.response_format === undefined ? '' : `\n    response_format="${format}",`
   const instructions = openAI.instructions
     ? `\n    instructions="""${pyTriple(openAI.instructions)}""",`
     : ''
@@ -413,17 +421,19 @@ client = OpenAI(
 with client.audio.speech.with_streaming_response.create(
     model="${input.model}",
     voice="${openAI.voice}",
-    input="""${pyTriple(openAI.input)}""",${instructions}
-    response_format="wav",
+    input="""${pyTriple(openAI.input)}""",${instructions}${responseFormat}
 ) as response:
-    response.stream_to_file("speech.wav")
-print("Audio has been saved to speech.wav.")
+    response.stream_to_file("speech.${format}")
+print("Audio has been saved to speech.${format}.")
 `
 }
 
 // speechOpenAITypescript 生成 OpenAI TypeScript SDK 语音示例，台词合为 input，风格为 instructions
 function speechOpenAITypescript(input: SpeechCodeInput): string {
   const { openAI } = input
+  const format = openAI.response_format ?? 'mp3'
+  const responseFormat =
+    openAI.response_format === undefined ? '' : `\n  response_format: '${format}',`
   const instructions = openAI.instructions
     ? `\n  instructions: \`${tsTemplate(openAI.instructions)}\`,`
     : ''
@@ -438,12 +448,11 @@ const client = new OpenAI({
 const response = await client.audio.speech.create({
   model: '${input.model}',
   voice: '${openAI.voice}',
-  input: \`${tsTemplate(openAI.input)}\`,${instructions}
-  response_format: 'wav',
+  input: \`${tsTemplate(openAI.input)}\`,${instructions}${responseFormat}
 });
 
-await writeFile('speech.wav', Buffer.from(await response.arrayBuffer()));
-console.log('Audio has been saved to speech.wav.');
+await writeFile('speech.${format}', Buffer.from(await response.arrayBuffer()));
+console.log('Audio has been saved to speech.${format}.');
 `
 }
 

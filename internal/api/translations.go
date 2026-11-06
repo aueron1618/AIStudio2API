@@ -95,12 +95,11 @@ func (s *server) handleOpenAITranslation(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	text := strings.Join(texts, " ")
-	if responseFormat != "verbose_json" {
-		writeTranscriptionResponse(w, responseFormat, "", aistudio.TranscriptionResult{Text: text, Segments: segments})
-		return
+	result := aistudio.TranscriptionResult{Text: text, Segments: segments}
+	if responseFormat == "verbose_json" {
+		result.Usage = transcript.Usage
 	}
-	items, _, duration := openAITranscriptionMetadata(segments)
-	writeJSON(w, http.StatusOK, openAITranscriptionResponse{Task: "translate", Language: "english", Duration: duration, Text: text, Segments: items})
+	writeTranscriptionResponse(w, responseFormat, "translate", "english", result, false, wavSeconds(file, header.Size))
 }
 
 // translationModels 返回转录模型与翻译文本模型：model 是转录模型或省略时使用默认文本模型翻译，是其他模型时由默认转录模型转录、该模型翻译
@@ -108,6 +107,10 @@ func (s *server) translationModels(ctx context.Context, model string) (string, s
 	model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
 	if model == "" {
 		return aistudio.DefaultTranscriptionModel, openAITranslationModel, nil
+	}
+	model, _, err := s.resolveAntiTruncationModel(model)
+	if err != nil {
+		return "", "", err
 	}
 	models, err := s.models(ctx)
 	if err != nil {

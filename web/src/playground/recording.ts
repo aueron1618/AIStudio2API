@@ -1,7 +1,7 @@
 import { onDeactivated, onUnmounted, ref } from 'vue'
 import { useConsole } from '@/console'
 import { useI18n } from '@/i18n'
-import { apiKey, failureText } from './request'
+import { apiKey, failureText, publicAPIBase } from './request'
 import { audioInput } from './shell/preferences'
 
 // useAudioRecording 管理麦克风录音与转写，录音结果交给组件处理
@@ -52,7 +52,7 @@ export function useAudioRecording(onAudio: (audio: Blob) => void | Promise<void>
       const headers = new Headers()
       const key = apiKey()
       if (key !== '') headers.set('Authorization', `Bearer ${key}`)
-      const response = await fetch('/v1/audio/transcriptions', {
+      const response = await fetch(`${publicAPIBase('')}/audio/transcriptions`, {
         method: 'POST',
         headers,
         body: form,

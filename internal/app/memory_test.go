@@ -13,7 +13,7 @@ func memoryTestManager(t *testing.T, warm, active int) *accountWorkerManager {
 	t.Helper()
 	account := &aistudio.Account{ID: "memory@example.test", Config: aistudio.DefaultAccountConfig("memory@example.test")}
 	pool := aistudio.NewAccountPool([]*aistudio.Account{account}, 1)
-	manager := newAccountWorkerManager(pool, []*aistudio.Account{account}, newRequestRegistry(t.Context()), "", "", time.Second, warm, active, 1, false)
+	manager := newAccountWorkerManager(pool, []*aistudio.Account{account}, newRequestRegistry(t.Context()), "", "", time.Second, warm, active, 1)
 	t.Cleanup(func() {
 		if err := manager.Close(); err != nil {
 			t.Error(err)

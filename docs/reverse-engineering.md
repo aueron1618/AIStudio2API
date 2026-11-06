@@ -170,7 +170,7 @@ Waa/Create
 
 interpreter 可以按 hash 缓存。program、message ID、实验状态和 snapshot 状态属于当前 challenge 生命周期。每次从 challenge 读取全局函数名称。官网 VM 生命周期参数为 43,200,000ms，检查间隔为 300,000ms。
 
-`Waa/Ping` wire 为 `[request_key,botguard_response]`，成功响应为 `[]`。以下输入都能得到成功空响应：正确 proof、损坏 proof、省略 proof、任意 request key、无账户 Cookie。Ping 只验证 WAA RPC consumer identity 与字段类型，业务 proof 资格使用实际 GenerateContent、GenerateVideo 或 Bidi 请求判定。
+`Waa/Ping` wire 为 `[request_key,botguard_response]`，成功响应为 `[]`。以下输入都能得到成功空响应：正确 proof、损坏 proof、省略 proof、任意 request key、无账户 Cookie。Ping 只验证 WAA RPC consumer identity 与字段类型，业务 proof 资格使用实际 GenerateContent 或 Bidi 请求判定。
 
 ### Host 与 Realm
 
@@ -231,7 +231,7 @@ type ProtectedRequest struct {
 }
 ```
 
-GenerateContent 与 CreateInteractionStream 的 proof field 为 5，Build 代理为 3，Veo GenerateVideo 为 8，Bidi setup 与实时输入为 6。请求编码器先形成无 proof 正文和 binding prompt，WAA Worker 串行调用 snapshot，再原位写入 proof。摘要是 binding prompt 的 SHA-256 小写十六进制。
+GenerateContent 与 CreateInteractionStream 的 proof field 为 5，Build 代理为 3，Bidi setup 与实时输入为 6。请求编码器先形成无 proof 正文和 binding prompt，WAA Worker 串行调用 snapshot，再原位写入 proof。摘要是 binding prompt 的 SHA-256 小写十六进制。
 
 官方 snapshot 的底层输入保持四个槽：
 
@@ -377,7 +377,6 @@ successful model/scope history
 | 普通生成 | `<modelID>` | 统一事件 `EventFinish` |
 | CountTokens | `count-tokens:<modelID>` | 不写 verified，只清该 scope 冷却 |
 | Transcribe | `<modelID>` | 非空 text 或 segments |
-| Veo GenerateVideo | `<modelID>` | operation 创建成功 |
 | Live 文本 | `<modelID>` | setup complete；每次 text 开始一次模型资格检查 |
 | Live 音频/图像 | `bidi-media:<modelID>` | media 开始媒体资格检查；Live text 使用普通模型 scope |
 | Robotics | `bidi-media:<modelID>` | text 开始模型资格检查 |
@@ -390,8 +389,8 @@ successful model/scope history
 
 1. 按方法、模型、capability、AccessModes 和 BenefitTier 形成候选集合
 2. 先尝试已有 Worker 且仍有请求槽位的账户，组内依次按 verified、同模型首事件样本、首事件 EWMA、空闲槽位和活动数排序
-3. 已有 Worker 无可用槽位时，按活动 Worker 上限从待机账户启动 Worker；容量已满时先启动目标 Worker，再替换最久未用的空闲 Worker
-4. 目标 Worker 启动失败或请求取消时保留原 Worker；旧实例关闭失败时保留旧实例并回收目标 Worker，两者回收均失败时同时计入容量；候选均忙时等待槽位
+3. 已有 Worker 无可用槽位时，先预留活动与启动预算，再从待机账户启动 Worker；容量已满时先关闭可回收的空闲旧 Worker，再启动目标 Worker
+4. 同账户重载需独占维护窗口，只有额外容量允许才保留新旧页重叠；失败或取消清理新资源，关闭失败的实体继续计入容量；候选均忙时等待槽位
 
 HTTP 403 且协议 Code 7 保留对应模型或 scope 的成功记录；未固定且首个上游语义事件尚未到达的请求，以及上游流中途中断的未固定非流式请求，继续尝试下一账户，固定请求、资源绑定请求和已开始的流返回上游错误。HTTP 404 且协议 Code 5 的消息包含 `Ambiguous request for service ''`、本地 Worker 失败或实例被替换时，运行时按 Worker generation 重建同一账户实例并重放一次。
 
@@ -401,9 +400,11 @@ Bidi setup 成功使用 lease（本次会话持有的账户租约）的 `checked
 
 `runtime-state.json` 保存 `benefit_tier`、`catalog_fingerprint`、`model_access:{state,checked_at,reason?}`、`cooldowns:{until,reason?}` 与 `resources:{kind?,name?,mime?,size?,purpose?,created_at,video?:{model,seconds,size}}`。`video-operation` 绑定把公开 video object 的 model、seconds、size、UTC 创建时间和创建账户一并持久化；重新建立账户池后，operation 轮询仍从该绑定恢复元数据。活动请求使用账户租约；读取最新磁盘状态、合并目标字段和原子写回使用独立短事务锁。该锁每 25ms 尝试一次并在 2 秒后超时；调用方 context（Go 取消上下文）可以更早取消等待。取得锁后必须重读磁盘值，写回后再更新内存与资源索引。跨进程读取资源未命中时刷新磁盘状态，防止旧内存覆盖另一个进程已经写入的绑定。
 
-本段中的 generation 表示一次 Stop/Start 创建的生成服务实例。模型目录驻留在当前 generation 的内存中，新 generation 载入账户目录中与运行状态指纹一致的 `catalog.json` 作为缓存。`Start` 先用当前 generation 的 `CachedModels` 生成公开目录。缓存非空时立即开始 Worker 预热，首个 Worker 有结果后为全部 `enabled` 且处于 `ready` 或 `busy` 的账户各启动一个后台 `ListModels` 任务；缓存为空时先启动这些任务，等待新 generation 的首个非空结果，再开始 Worker 预热。每个非空结果都会立即重新合并 `CachedModels`、发布账户与模型事件，并在生成服务已经运行时继续预热其他 Worker。全部账户同步结束时，认证集合变化会补发一次账户与模型快照；日志记录同步成功数、非空数、公共模型数、待重试账户数与耗时。
+本段中的 generation 表示一次 Stop/Start 创建的生成服务实例。启动从与运行状态指纹一致的 `catalog.json` 恢复缓存，通过 `CachedModels` 建立公开目录；没有缓存时等待首个非空真实目录，有缓存时按启动策略后台刷新。`PageCatalogProvider` 取得账户页面的 `GetLoggingContext`、`GetAiStudioBenefitTier` 与 `ListModels` 响应；复用 Worker、新建临时页和重载均受活动与启动预算约束，不能在 Worker 满载时另开预算外页面。缺目录账户可并发排队，已有目录的逐个读取。非空结果立即合并并发布账户与模型事件，正数热池继续预热；默认 `0/1/1/1` 跳过常驻预热。全部同步结束后按认证变化补发快照，并记录成功数、非空数、公共模型数、待重试数与耗时。HTTP Cookie 导入只提交验证后的认证，不走 PageCatalog 路径，目录由后续显式启动或刷新取得。
 
-目录错误或返回空目录的账户 ID 保留在 pending set（待重试账户集合），返回非空目录或删除账户时移除。初次 fan-out（并发向全部目标账户调用 `ListModels`）结束后，单个 30 秒 ticker（Go 定时器）对排序后的待重试账户列表再次执行 fan-out；每个非空结果立即同步公共目录、发布管理事件并继续预热其他 Worker，批末认证集合变化触发一次快照补发。同一循环的 10 分钟 ticker 对全部 `enabled` 且处于 `ready` 或 `busy` 的账户并发调用 `GetAiStudioBenefitTier`，每个账户占用一个普通并发槽位，槽位已满的账户跳过本轮；权益变化时沿用当前目录写回权益、递增 `modelAccessGeneration` 并发布管理事件。停止流程对目录任务最多等待 2 秒；管理调用对整次启动或停止切换最多等待 12 秒，超时后返回，后台清理继续并保留最终错误。
+目录错误或空目录的账户 ID 保留在 pending set，非空结果或删除账户时移除。启动期结束后以单个 30 秒 ticker 重试排序后的 pending 账户，非空结果立即发布目录与管理事件；同一循环每 24 小时逐个刷新 enabled ready/busy 账户，普通账户槽位或页面预算不足时等待或跳过。权益或目录变化递增 `modelAccessGeneration`。请求模型不在目录时，可等待正在刷新的首个账户；没有进行中的一轮且距上轮开始超过 10 分钟时触发一轮，等待首个账户结果后继续查找，其余账户后台刷新。停止取消全部目录任务，对目录退出最多等待 2 秒，对生命周期切换最多等待 12 秒；超时与清理错误保留，失败清理的实体不提前释放预算。
+
+终态 Responses / Interactions 的续接节点写入 `runtime/states.db`，这与账户 PageCatalog 缓存、资源绑定和任务生命周期分开。进行中的生成任务、账户导入任务与内存 Build 会话不因终态持久化而获得重启恢复能力；旧未完 Veo 任务也不能在移除专用实现后继续执行。
 
 ## 6. 上游变化与恢复
 

@@ -74,7 +74,7 @@ const config: ServiceConfig = {
   model_channels: '',
   api_key_accounts: 'first-key:account-a',
   waa_backend: 'spidermonkey',
-  temporary_chat: true,
+  strip_thought_signatures: false,
   media_output: 'inline',
   media_base_url: '',
   environment: [],
@@ -143,6 +143,23 @@ describe('merged settings controls', () => {
       error: '',
     })
     expect(html).toMatch(/id="setting-warm"[^>]*value="0"[^>]*min="0"/)
+  })
+
+  it('locks strip_thought_signatures and no longer offers a temporary-chat toggle', async () => {
+    route.section = 'upstream'
+    const html = await render(SettingsPanel, {
+      config: { ...config, environment: ['STRIP_THOUGHT_SIGNATURES'] },
+      accounts: [],
+      models: [],
+      loading: false,
+      error: '',
+    })
+    const locked = html.match(/<fieldset disabled[\s\S]*?<\/fieldset>/g) ?? []
+    expect(locked).toHaveLength(1)
+    expect(locked[0]).toContain('id="setting-strip-thought-signatures"')
+    expect(html).not.toContain('id="setting-temporary-chat"')
+    expect(html).toContain('id="setting-auto-continuation"')
+    expect(html).toContain('id="setting-continuation-rewrite"')
   })
 
   it('renders the new account binding selector without exposing full keys', async () => {
@@ -232,32 +249,43 @@ describe('merged settings controls', () => {
 })
 
 describe('Cookie import form', () => {
-  it('does not let blank region fields in closed details block submission', async () => {
-    vi.stubGlobal('navigator', { userAgent: 'offline-fixture' })
-    vi.stubGlobal('window', {
-      location: new URL('https://console.example.test'),
-      isSecureContext: true,
-    })
-    const app = createSSRApp(AccountsPanel, { accounts: [], loading: false, error: '' })
-    app.directive('tooltip', {})
-    app.mixin({
-      created() {
-        const { setupState } = this.$ as unknown as { setupState: Record<string, unknown> }
-        if (Object.hasOwn(setupState, 'showCookieImport')) setupState.showCookieImport = true
-      },
-    })
-    const context = { teleports: {} as Record<string, string> }
-    await renderToString(app, context)
-    const form = context.teleports.body!
-    expect(form).toMatch(/<details class=/)
-    const details = form.match(/<details[\s\S]*?<\/details>/)![0]
-    const fields = details.match(/<input[^>]*>/g) ?? []
-    expect(fields).toHaveLength(3)
-    expect(fields.every((field) => field.includes('value=""'))).toBe(true)
-    expect(details).not.toContain('required')
-    expect(form).toMatch(/<textarea[^>]*required/)
-    expect(form).not.toMatch(/<form[^>]*novalidate/)
-  })
+  it.each([false, true])(
+    'keeps optional blank Cookie region fields with expanded=%s',
+    async (expanded) => {
+      vi.stubGlobal('navigator', { userAgent: 'offline-fixture' })
+      vi.stubGlobal('window', {
+        location: new URL('https://console.example.test'),
+        isSecureContext: true,
+      })
+      const app = createSSRApp(AccountsPanel, {
+        accounts: [],
+        tasks: [],
+        chromeImport: false,
+        loading: false,
+        error: '',
+      })
+      app.directive('tooltip', {})
+      app.mixin({
+        created() {
+          const { setupState } = this.$ as unknown as { setupState: Record<string, unknown> }
+          if (Object.hasOwn(setupState, 'showCookieImport')) {
+            setupState.showCookieImport = true
+            setupState.moreSettingsOpen = expanded
+          }
+        },
+      })
+      const context = { teleports: {} as Record<string, string> }
+      await renderToString(app, context)
+      const form = context.teleports.body!
+      const fields = form.match(/<input(?![^>]*type="file")[^>]*>/g) ?? []
+      expect(fields).toHaveLength(expanded ? 3 : 0)
+      expect(fields.every((field) => field.includes('value=""'))).toBe(true)
+      expect(fields.every((field) => !field.includes('required'))).toBe(true)
+      expect(form).toContain(messages['accounts.cookieTaskHelp'])
+      expect(form).toMatch(/<textarea[^>]*required/)
+      expect(form).not.toMatch(/<form[^>]*novalidate/)
+    },
+  )
 
   it('keeps the required region fields for other account forms without prefilling them', async () => {
     const html = await render(AccountEnvironmentFields, {

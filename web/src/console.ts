@@ -3,6 +3,7 @@ import { api, openAdminEvents } from '@/api'
 import { useI18n } from '@/i18n'
 import type {
   Account,
+  AccountTask,
   AdminEvent,
   AdminLog,
   Cooldown,
@@ -19,6 +20,8 @@ const { t, errorText } = useI18n()
 const status = ref<ServiceStatus | null>(null)
 const logs = shallowRef<AdminLog[]>([])
 const accounts = ref<Account[]>([])
+// accountTasks 是服务端运行中与已结束、尚未关闭的添加或重新登录账户任务
+const accountTasks = ref<AccountTask[]>([])
 const models = ref<Model[]>([])
 const cooldowns = ref<Cooldown[]>([])
 const requests = ref<RequestSummary[]>([])
@@ -29,13 +32,21 @@ const stopPending = ref(false)
 const launchCancellationRequested = ref(false)
 const notice = reactive({ message: '', tone: 'success' as 'success' | 'error' })
 const loading = reactive({
+  status: true,
   accounts: true,
   models: true,
   requests: true,
   cooldowns: true,
   config: true,
 })
-const errors = reactive({ accounts: '', models: '', requests: '', cooldowns: '', config: '' })
+const errors = reactive({
+  accounts: '',
+  tasks: '',
+  models: '',
+  requests: '',
+  cooldowns: '',
+  config: '',
+})
 // pendingDelete 为撤销时限内尚未提交的账户删除
 const pendingDelete = shallowRef<{ account: Account; timer: number } | null>(null)
 const deletingAccounts = ref(new Set<string>())
@@ -61,15 +72,21 @@ let consoleGeneration = 0
 let noticeTimer: number | undefined
 let pendingLogs: AdminLog[] = []
 let logFlushTimer: number | undefined
+let taskRevision = 0
+let taskLoad = 0
 
-// showNotice 显示一次短暂操作结果
+// showNotice 显示一次操作结果，成功提示 3.2 秒后关闭，错误提示保留到手动关闭或下一条提示
 function showNotice(message: string, tone: 'success' | 'error'): void {
   notice.message = message
   notice.tone = tone
   window.clearTimeout(noticeTimer)
-  noticeTimer = window.setTimeout(() => {
-    notice.message = ''
-  }, 3200)
+  if (tone === 'success') noticeTimer = window.setTimeout(closeNotice, 3200)
+}
+
+// closeNotice 关闭当前提示
+function closeNotice(): void {
+  window.clearTimeout(noticeTimer)
+  notice.message = ''
 }
 
 async function loadStatus(): Promise<void> {
@@ -77,6 +94,8 @@ async function loadStatus(): Promise<void> {
     status.value = await api.status()
   } catch {
     status.value = null
+  } finally {
+    loading.status = false
   }
 }
 
@@ -143,6 +162,43 @@ async function loadConfig(): Promise<void> {
 // loadAccountData 刷新账户、模型目录与服务状态
 async function loadAccountData(): Promise<void> {
   await Promise.all([loadAccounts(), loadModels(), loadStatus()])
+}
+
+function receiveAccountTasks(tasks: AccountTask[]): void {
+  const previous = new Map(accountTasks.value.map((task) => [task.id, task]))
+  const completed = tasks.some(
+    (task) =>
+      (task.state !== 'running' && previous.get(task.id)?.state !== task.state) ||
+      task.items.some(
+        (item, index) =>
+          item.state === 'done' && previous.get(task.id)?.items[index]?.state !== 'done',
+      ),
+  )
+  taskRevision++
+  accountTasks.value = tasks
+  errors.tasks = ''
+  if (completed) void loadAccountData()
+}
+
+// A response can arrive after a newer SSE snapshot; never roll a known task back to its queued state.
+function rememberAccountTask(task: AccountTask): void {
+  if (!accountTasks.value.some((item) => item.id === task.id))
+    receiveAccountTasks([task, ...accountTasks.value])
+}
+
+async function loadAccountTasks(): Promise<void> {
+  const generation = consoleGeneration
+  const revision = taskRevision
+  const sequence = ++taskLoad
+  try {
+    const tasks = await api.accountTasks()
+    if (generation !== consoleGeneration || sequence !== taskLoad || revision !== taskRevision)
+      return
+    receiveAccountTasks(tasks)
+  } catch (error) {
+    if (generation === consoleGeneration && sequence === taskLoad && revision === taskRevision)
+      errors.tasks = errorText(error)
+  }
 }
 
 // loadRequestData 刷新请求列表与冷却
@@ -291,6 +347,10 @@ function handleAdminEvent(event: AdminEvent): void {
     cooldowns.value = event.data
     return
   }
+  if (event.type === 'account_tasks') {
+    receiveAccountTasks(event.data.tasks)
+    return
+  }
   replaceByID(requests.value, event.data)
 }
 
@@ -305,6 +365,7 @@ async function startConsole(): Promise<void> {
     loadCooldowns(),
     loadRequests(),
     loadConfig(),
+    loadAccountTasks(),
   ])
   if (generation !== consoleGeneration) return
   api.updateStatus().then(
@@ -314,6 +375,7 @@ async function startConsole(): Promise<void> {
   eventConnection = openAdminEvents(handleAdminEvent, () => {
     resetLogs()
     requests.value = []
+    void loadAccountTasks()
   })
 }
 
@@ -335,6 +397,7 @@ export function useConsole() {
     status,
     logs,
     accounts,
+    accountTasks,
     visibleAccounts,
     models,
     cooldowns,
@@ -349,7 +412,10 @@ export function useConsole() {
     startPending,
     stopPending,
     showNotice,
+    closeNotice,
     loadAccountData,
+    loadAccountTasks,
+    rememberAccountTask,
     loadRequestData,
     updateAccount,
     deleteAccount,

@@ -107,7 +107,7 @@ func (s *server) handleOpenAIEmbeddings(w http.ResponseWriter, r *http.Request) 
 		data = append(data, item)
 	}
 	writeJSON(w, http.StatusOK, officialOrder("openai", map[string]any{
-		"object": "list", "data": data, "model": strings.TrimPrefix(model, "models/"),
+		"object": "list", "data": data, "model": strings.TrimPrefix(baseResponseModel(model), "models/"),
 		"usage": map[string]int64{"prompt_tokens": result.TokenCount, "total_tokens": result.TokenCount},
 	}))
 }
@@ -138,13 +138,26 @@ func (s *server) handleGeminiEmbed(w http.ResponseWriter, r *http.Request, model
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
+	model, _, err = s.resolveAntiTruncationModel(model)
+	if err != nil {
+		writeGeminiRequestError(w, err)
+		return
+	}
 	if len(multiple.Requests) == 0 {
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "requests must not be empty")
 		return
 	}
 	requests := make([]aistudio.EmbedContentRequest, 0, len(multiple.Requests))
 	for index, item := range multiple.Requests {
-		if name := strings.TrimPrefix(strings.TrimSpace(item.Model), "models/"); name != "" && name != model {
+		name := strings.TrimPrefix(strings.TrimSpace(item.Model), "models/")
+		if name != "" {
+			name, _, err = s.resolveAntiTruncationModel(name)
+			if err != nil {
+				writeGeminiRequestError(w, err)
+				return
+			}
+		}
+		if name != "" && name != model {
 			writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", fmt.Sprintf("requests[%d].model %q does not match models/%s", index, item.Model, model))
 			return
 		}
@@ -173,15 +186,22 @@ func (s *server) handleGeminiEmbed(w http.ResponseWriter, r *http.Request, model
 	for _, values := range result.Embeddings {
 		embeddings = append(embeddings, map[string]any{"values": values})
 	}
+	response := map[string]any{"embeddings": embeddings}
 	if !batch {
-		writeJSON(w, http.StatusOK, officialOrder("gemini", map[string]any{"embedding": embeddings[0]}))
-		return
+		response = map[string]any{"embedding": embeddings[0]}
 	}
-	writeJSON(w, http.StatusOK, officialOrder("gemini", map[string]any{"embeddings": embeddings}))
+	if result.TokenCount > 0 {
+		response["usageMetadata"] = map[string]any{"promptTokenCount": result.TokenCount}
+	}
+	writeJSON(w, http.StatusOK, officialOrder("gemini", response))
 }
 
 // embed 调用支持 embedding 的服务
 func (s *server) embed(r *http.Request, model string, requests []aistudio.EmbedContentRequest) (aistudio.EmbeddingResult, error) {
+	model, _, err := s.resolveAntiTruncationModel(model)
+	if err != nil {
+		return aistudio.EmbeddingResult{}, err
+	}
 	service, ok := s.service.(aistudio.EmbeddingService)
 	if !ok {
 		return aistudio.EmbeddingResult{}, fmt.Errorf("%w: embedding service is unavailable", aistudio.ErrModelNotFound)

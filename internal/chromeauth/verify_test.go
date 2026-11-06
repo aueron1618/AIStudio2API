@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,51 +19,55 @@ func (transport verificationTransport) RoundTrip(request *http.Request) (*http.R
 }
 
 func TestVerifyHTTPIdentityAndRotatedCookies(t *testing.T) {
-	state, err := aistudio.ParseCookieImport("SAPISID=original-secret; __Secure-1PAPISID=one; __Secure-3PAPISID=three")
-	if err != nil {
-		t.Fatal(err)
-	}
-	calls := 0
-	client := &http.Client{Transport: verificationTransport(func(request *http.Request) (*http.Response, error) {
-		calls++
-		headers := make(http.Header)
-		var body string
-		switch request.URL.String() {
-		case aiStudioChatURL:
-			if request.Method != http.MethodGet || request.Header.Get("User-Agent") != "verification-test" || !strings.Contains(request.Header.Get("Cookie"), "SAPISID=original-secret") {
-				t.Fatal("page verification lost its request headers")
+	for _, authUser := range []int{0, 3} {
+		t.Run("auth_user="+strconv.Itoa(authUser), func(t *testing.T) {
+			state, err := aistudio.ParseCookieImport("SAPISID=original-secret; __Secure-1PAPISID=one; __Secure-3PAPISID=three")
+			if err != nil {
+				t.Fatal(err)
 			}
-			body = `<html>untrusted@example.com<script>window.WIZ_global_data={"oPEP7c":"Real\u0040Example.com"};</script></html>`
-			headers.Set("Set-Cookie", "SAPISID=rotated-secret; Domain=.google.com; Path=/; Secure")
-		case aistudio.MakerSuiteRPCBase + "ListModels":
-			if request.Method != http.MethodPost || !strings.Contains(request.Header.Get("Cookie"), "SAPISID=rotated-secret") {
-				t.Fatal("model verification did not use the page's rotated cookies")
+			calls := 0
+			client := &http.Client{Transport: verificationTransport(func(request *http.Request) (*http.Response, error) {
+				calls++
+				headers := make(http.Header)
+				var body string
+				switch request.URL.String() {
+				case chatURLForAuthUser(authUser):
+					if request.Method != http.MethodGet || request.Header.Get("User-Agent") != "verification-test" || !strings.Contains(request.Header.Get("Cookie"), "SAPISID=original-secret") {
+						t.Fatal("page verification lost its request headers")
+					}
+					body = `<html>untrusted@example.com<script>window.WIZ_global_data={"oPEP7c":"Real\u0040Example.com"};</script></html>`
+					headers.Set("Set-Cookie", "SAPISID=rotated-secret; Domain=.google.com; Path=/; Secure")
+				case aistudio.MakerSuiteRPCBase + "ListModels":
+					if request.Method != http.MethodPost || !strings.Contains(request.Header.Get("Cookie"), "SAPISID=rotated-secret") {
+						t.Fatal("model verification did not use the page's rotated cookies")
+					}
+					if !strings.HasPrefix(request.Header.Get("Authorization"), "SAPISIDHASH ") || request.Header.Get("X-Goog-Authuser") != strconv.Itoa(authUser) || request.Header.Get("Origin") != "https://aistudio.google.com" {
+						t.Fatal("model verification lost authentication headers")
+					}
+					input, err := io.ReadAll(request.Body)
+					if err != nil || string(input) != "[]" {
+						t.Fatal("unexpected model verification payload")
+					}
+					body = `[[["models/test",null,null,"Test model",null,1024,256,["generateContent"]]]]`
+					headers.Set("Content-Type", aistudio.JSONProtobufContentType)
+					headers.Set("Set-Cookie", "__Secure-1PAPISID=renewed-secret; Domain=.google.com; Path=/; Secure")
+				default:
+					t.Fatalf("unexpected verification URL: %s", request.URL)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: headers, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+			})}
+			email, err := verifyChatPage(t.Context(), client, &state, "verification-test", authUser)
+			if err != nil || email != "Real@Example.com" {
+				t.Fatalf("verified identity = %q, error = %v", email, err)
 			}
-			if !strings.HasPrefix(request.Header.Get("Authorization"), "SAPISIDHASH ") || request.Header.Get("X-Goog-Authuser") != "0" || request.Header.Get("Origin") != "https://aistudio.google.com" {
-				t.Fatal("model verification lost authentication headers")
+			models, err := verifyModels(t.Context(), client, &state, http.Header{"X-Goog-Authuser": {"0"}}, authUser)
+			if err != nil || models != 1 || calls != 2 {
+				t.Fatalf("verified models = %d, calls = %d, error = %v", models, calls, err)
 			}
-			input, err := io.ReadAll(request.Body)
-			if err != nil || string(input) != "[]" {
-				t.Fatal("unexpected model verification payload")
+			if value, _ := state.CookieValue("__Secure-1PAPISID", aiStudioChatURL, time.Now()); value != "renewed-secret" {
+				t.Fatal("model verification did not retain rotated cookies")
 			}
-			body = `[[["models/test",null,null,"Test model",null,1024,256,["generateContent"]]]]`
-			headers.Set("Content-Type", aistudio.JSONProtobufContentType)
-			headers.Set("Set-Cookie", "__Secure-1PAPISID=renewed-secret; Domain=.google.com; Path=/; Secure")
-		default:
-			t.Fatalf("unexpected verification URL: %s", request.URL)
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: headers, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
-	})}
-	email, err := verifyChatPage(t.Context(), client, &state, "verification-test", 0)
-	if err != nil || email != "Real@Example.com" {
-		t.Fatalf("verified identity = %q, error = %v", email, err)
-	}
-	models, err := verifyModels(t.Context(), client, &state, http.Header{"X-Goog-Authuser": {"0"}}, 0)
-	if err != nil || models != 1 || calls != 2 {
-		t.Fatalf("verified models = %d, calls = %d, error = %v", models, calls, err)
-	}
-	if value, _ := state.CookieValue("__Secure-1PAPISID", aiStudioChatURL, time.Now()); value != "renewed-secret" {
-		t.Fatal("model verification did not retain rotated cookies")
+		})
 	}
 }
 

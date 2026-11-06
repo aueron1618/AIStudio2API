@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
+	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 )
 
 type generationTestService struct {
@@ -39,6 +40,66 @@ func testEventStream(events ...aistudio.Event) <-chan aistudio.Event {
 	}
 	close(stream)
 	return stream
+}
+
+type responseStateCapture struct{ saved []SavedState }
+
+func (capture *responseStateCapture) Load() []SavedState {
+	return append([]SavedState(nil), capture.saved...)
+}
+
+func (capture *responseStateCapture) Save(saved []SavedState, _ []string) {
+	capture.saved = append(capture.saved, saved...)
+}
+
+func TestResponseStatePersistenceBoundaries(t *testing.T) {
+	for _, kind := range []string{"response", "interaction"} {
+		for _, status := range []string{"queued", "in_progress", "completed", "failed", "cancelled"} {
+			t.Run(kind+"/"+status, func(t *testing.T) {
+				capture := &responseStateCapture{}
+				store := newResponseStateStore(capture)
+				object := json.RawMessage(fmt.Sprintf(`{"id":"node","status":%q}`, status))
+				input := json.RawMessage(`{"type":"text","text":"question"}`)
+				state := responseState{Contents: []aistudio.Content{{Role: aistudio.RoleUser, Parts: []aistudio.Part{{Text: "question"}}}}}
+				if kind == "response" {
+					state.Record = &responseRecord{Model: "model", Shell: object, Background: true, Stream: &streamLog{}}
+				} else {
+					state.Interaction = &interactionRecord{object: object, input: []json.RawMessage{input}, upstream: "upstream-operation", account: "fixture-account", agent: "agent-model", stream: &streamLog{}}
+				}
+				store.Store("node", responseHistory{}, generationResult{}, state)
+				if status == "queued" || status == "in_progress" {
+					if len(capture.saved) != 0 {
+						t.Fatal("in-flight task was persisted as restartable")
+					}
+					return
+				}
+				if len(capture.saved) != 1 {
+					t.Fatal("terminal continuation node was not persisted")
+				}
+				restored := newResponseStateStore(capture)
+				history, ok := restored.Load("node")
+				if !ok || len(history.Contents) != 1 || history.Contents[0].Parts[0].Text != "question" {
+					t.Fatal("restart lost continuation contents")
+				}
+				if kind == "response" {
+					if history.Model != "model" {
+						t.Fatal("restart lost the response model")
+					}
+					if _, exists := restored.Stream("node"); exists {
+						t.Fatal("restart restored a live SSE stream")
+					}
+				} else {
+					if !history.Interaction || history.Upstream != "upstream-operation" || history.AccountID != "fixture-account" || history.Agent != "agent-model" {
+						t.Fatal("restart lost the agent continuation's account binding")
+					}
+					record, exists := restored.Interaction("node")
+					if !exists || record.stream != nil || len(record.input) != 1 || !bytes.Equal(record.input[0], input) || !bytes.Equal(record.object, object) {
+						t.Fatal("restart changed the interaction object or restored a live stream")
+					}
+				}
+			})
+		}
+	}
 }
 
 func newProtocolTestServer(t *testing.T, service aistudio.Service) *httptest.Server {
@@ -99,6 +160,10 @@ type protocolFixtureTransport struct {
 	requests        chan aistudio.GenerateRequest
 }
 
+func (transport *protocolFixtureTransport) PageCatalog(context.Context, string, bool) (camoufoxnative.PageCatalog, error) {
+	return camoufoxnative.PageCatalog{Logging: []byte(`[]`), Tier: []byte(`[]`), Models: transport.catalog}, nil
+}
+
 func (transport *protocolFixtureTransport) Do(_ context.Context, request aistudio.RPCRequest) (*aistudio.RPCResponse, error) {
 	if request.Method != "ListModels" {
 		return nil, fmt.Errorf("unexpected RPC %s", request.Method)
@@ -154,7 +219,7 @@ func TestExplicitThinkingOutput(t *testing.T) {
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/%s/stream=%t", tc.protocol, tc.name, stream), func(t *testing.T) {
 				transport := &protocolFixtureTransport{catalog: catalog, output: output, requests: make(chan aistudio.GenerateRequest, 1)}
-				client := aistudio.NewClient(aistudio.ClientOptions{Transport: transport, Protected: transport})
+				client := aistudio.NewClient(aistudio.ClientOptions{Transport: transport, Protected: transport, Pages: transport})
 				path, body, usage := "", "", ""
 				switch tc.protocol {
 				case "gemini":

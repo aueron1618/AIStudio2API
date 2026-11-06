@@ -9,9 +9,11 @@ WAA 为 AI Studio 的受保护请求提供 BotGuard proof。两种后端均执�
 | `spidermonkey`（默认） | 进程内 Firefox JavaScript 引擎，加项目提供的 DOM、事件和指纹宿主 | 账户固定出口的 Go HTTP，匹配 Firefox 网络形状 | WAA 阶段不需要 |
 | `camoufox` | 真实 Camoufox 页面 | 页面 `XMLHttpRequest` | 需要 |
 
-旧配置 `WAA_BACKEND=go` 在载入时规范化为 `spidermonkey`，不再保留 Goja 执行路径。浏览器登录和浏览器 Cookie 验证仍按需准备 Camoufox；`method=http` 的 Cookie 验证不执行 WAA，也不启动浏览器。
+旧配置 `WAA_BACKEND=go` 在载入时规范化为 `spidermonkey`，不再保留 Goja 执行路径。浏览器登录和浏览器 Cookie 验证仍按需准备 Camoufox；Cookie 批量导入的 `items[].method=http` 不执行 WAA，也不启动浏览器。该任务完成只代表认证已提交，新 PageCatalog 留待后续显式启动或刷新，不把认证验证视为生成就绪。
 
 两种后端读取同一账户的 Cookie、`auth_user`、指纹与代理设置。多 Google 会话使用官网 `/u/N/` 页面和 `X-Goog-AuthUser: N`；重新浏览器登录后重置为会话 0。
+
+页面固定使用 `temporary=true`，没有 `TEMPORARY_CHAT` 开关，也不发送额外 Hello 预热生成。页面目录通过 `PageCatalogProvider` 取得同一次载入的 `GetLoggingContext`、`GetAiStudioBenefitTier` 与 `ListModels` 响应，不能以无预算的临时页面绕过 Worker 上限。
 
 ## SpiderMonkey 链路
 
@@ -29,7 +31,7 @@ WAA 为 AI Studio 的受保护请求提供 BotGuard proof。两种后端均执�
 - JS 操作在持有固定 OS 线程的事件循环上运行；微任务在任务后处理，计时器和任务队列有独立的关闭状态。
 - 初始化取消和关闭会中断正在执行的原生脚本，等待事件循环退出后才返回，清除回调、句柄与原生上下文。
 - 请求、槽位与 Worker 的取消仍由现有 Go 生命周期控制；Camoufox 流式传输保留有界分块和背压。
-- 默认零热池、活动上限 1、冷启动并发 1；两种后端均遵守同一启动预算。空闲回收与分词器释放见 [运行时内存](memory.md)。
+- 默认零热池、活动上限 1、冷启动并发 1、单账户并发 1；临时目录页、重载与普通 Worker 遵守同一预算。重载时旧响应未释放的页面仍属于活动资源，关闭失败的资源不能从预算中提前移除。空闲回收与分词器释放见 [运行时内存](memory.md)。
 
 SpiderMonkey 使用原生内存，不能用 Go heap 或 `GOMEMLIMIT` 代替整个进程的内存指标。源码中的 JS 堆上限不是预分配量，也不是整个进程的内存上限。
 

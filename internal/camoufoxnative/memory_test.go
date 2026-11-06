@@ -19,6 +19,9 @@ func TestHeadlessMemoryPreferences(t *testing.T) {
 	if prefs["dom.ipc.processPrelaunch.enabled"] != false || prefs["browser.cache.memory.capacity"] != 16*1024 {
 		t.Fatal("headless workers need bounded idle resources")
 	}
+	if prefs["layout.frame_rate"] != interactiveFrameRate || prefs["gfx.display.frame-rate-divisor"] != idleFrameDivisor {
+		t.Fatal("headless workers lost idle division or interactive Run frame rate")
+	}
 	for key, value := range prefs {
 		if _, err := firefoxPrefLiteral(value); err != nil {
 			t.Fatalf("%s: %v", key, err)
@@ -35,6 +38,9 @@ func TestHeadlessMemoryPreferences(t *testing.T) {
 	}
 	if _, ok := base["browser.cache.memory.capacity"]; ok {
 		t.Fatal("headed login must keep its default cache preferences")
+	}
+	if _, ok := base["gfx.display.frame-rate-divisor"]; ok {
+		t.Fatal("headed login must not inherit the worker refresh divisor")
 	}
 }
 
@@ -120,6 +126,9 @@ func mockProtectedXHR(t *testing.T) *protectedTestVM {
 	cx.Release(btoa)
 	runProtectedJS(t, vm, `
 var page = {}, xhr, request, messages = [], sendError = false;
+var listeners = new Map();
+var addEventListener = (name, fn) => { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(fn); };
+var removeEventListener = (name, fn) => listeners.get(name)?.delete(fn);
 var TextEncoder = class {
   encodeInto(text, target) {
     let read = 0, written = 0;
@@ -138,7 +147,10 @@ var TextEncoder = class {
   }
 };
 var XMLHttpRequest = class {
-  constructor() { xhr = this; this.readyState = 0; this.responseText = ''; this.status = 200; this.headers = []; }
+  constructor() { xhr = this; this.readyState = 0; this.responseText = ''; this.status = 200; this.headers = []; this.listeners = new Map(); }
+  addEventListener(name, fn) { if (!this.listeners.has(name)) this.listeners.set(name, new Set()); this.listeners.get(name).add(fn); }
+  removeEventListener(name, fn) { this.listeners.get(name)?.delete(fn); }
+  fire(name) { this['on' + name]?.(); for (const fn of this.listeners.get(name) || []) fn(); }
   open(method, url) { this.method = method; this.url = url; this.readyState = 1; }
   setRequestHeader(name, value) { this.headers.push([name, value]); }
   getAllResponseHeaders() { return 'Content-Type: application/json+protobuf\r\nX-Test: yes\r\n'; }
@@ -149,7 +161,7 @@ var XMLHttpRequest = class {
   }
   abort() {
     this.aborted = true;
-    if (this.readyState > 0 && this.readyState < 4) this.onabort?.();
+    if (this.readyState > 0 && this.readyState < 4) this.fire('abort');
     this.readyState = 0;
     this.responseText = '';
   }
@@ -157,8 +169,8 @@ var XMLHttpRequest = class {
 var advance = (text, done) => {
   xhr.responseText += text;
   xhr.readyState = done ? 4 : 3;
-  xhr.onprogress?.();
-  if (done) xhr.onload?.();
+  xhr.fire('progress');
+  if (done) xhr.fire('load');
 };
 `)
 	runProtectedJS(t, vm, "("+protectedSend+")(page, 'test', 'https://example.test', '[[\"Content-Type\",\"application/json\"]]', 'body', '', value => messages.push(value))")
@@ -286,6 +298,94 @@ func TestProtectedXHRPreservesSplitSurrogate(t *testing.T) {
 	}
 	if string(output) != "a\U00020000b" {
 		t.Fatalf("split surrogate was corrupted: %q", output)
+	}
+}
+
+func armGeneratedTestXHR(t *testing.T, vm *protectedTestVM, pending bool) {
+	t.Helper()
+	runProtectedJS(t, vm, "("+protectedCancel+")(page, 'test')")
+	runProtectedJS(t, vm, `
+var window = globalThis, finishProof;
+var default_MakerSuite = {proof(service, digest) { page.digest = digest; return `+map[bool]string{true: `new Promise(resolve => finishProof = resolve)`, false: `Promise.resolve('!fresh')`}[pending]+`; }};
+page = {key: 'proof', original: default_MakerSuite.proof};
+messages = [];
+var originalOpen = XMLHttpRequest.prototype.open;
+`)
+	runProtectedJS(t, vm, "("+generateArmFunction+")(page, 'test', 'binding', '[', ']', value => messages.push(value))")
+	runProtectedJS(t, vm, `request = page.requests.get('test'); default_MakerSuite.proof({}, 'wrong').catch(() => {})`)
+}
+
+func TestGeneratePumpSharesByteBoundsAndReleasesCallbacks(t *testing.T) {
+	vm := mockProtectedXHR(t)
+	armGeneratedTestXHR(t, vm, false)
+	runProtectedJS(t, vm, `xhr = new XMLHttpRequest(); xhr.open('POST', '`+aiStudioOrigin+generateContentPath+`'); xhr.send('old-body')`)
+	if !runProtectedJS(t, vm, `xhr.body === '["!fresh"]' && page.digest === 'binding' && JSON.parse(messages[0]).sent`).Bool {
+		t.Fatal("Run did not use the page proof or replace the wire proof field")
+	}
+	input := strings.Repeat("a\u4e2d\U00020000", 10*protectedChunkBytes/8)
+	if err := vm.cx.Set(vm.global, "input", mozjs.String(input)); err != nil {
+		t.Fatal(err)
+	}
+	runProtectedJS(t, vm, `advance(input, true)`)
+	if n := runProtectedJS(t, vm, `messages.filter(value => !value.startsWith('{')).length`).Number; n != 8 {
+		t.Fatalf("Generate queued %g chunks before credit", n)
+	}
+	runProtectedJS(t, vm, "("+protectedGrant+")(page, 'test', '4')")
+	var messages []string
+	if err := json.Unmarshal([]byte(runProtectedJS(t, vm, `JSON.stringify(messages)`).String), &messages); err != nil {
+		t.Fatal(err)
+	}
+	var output []byte
+	done := false
+	for _, value := range messages {
+		if strings.HasPrefix(value, "{") {
+			var message protectedMessage
+			if err := json.Unmarshal([]byte(value), &message); err != nil || message.Error != "" {
+				t.Fatalf("Generate control %s: %v", value, err)
+			}
+			done = done || message.Done
+			continue
+		}
+		data, err := decodeProtectedData(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output = append(output, data...)
+	}
+	if !done || string(output) != input {
+		t.Fatal("Generate stream was truncated or crossed UTF-8 byte boundaries")
+	}
+	if !runProtectedJS(t, vm, `request.xhr === null && request.cancel === null && page.requests.size === 0 && xhr.responseText === '' && [...xhr.listeners.values()].every(value => value.size === 0) && XMLHttpRequest.prototype.open === originalOpen`).Bool {
+		t.Fatal("Generate completion retained callbacks, request roots, or hooks")
+	}
+}
+
+func TestGenerateCancelDoesNotRearmLateProof(t *testing.T) {
+	vm := mockProtectedXHR(t)
+	armGeneratedTestXHR(t, vm, true)
+	runProtectedJS(t, vm, "("+protectedCancel+")(page, 'test')")
+	runProtectedJS(t, vm, `finishProof('!late')`)
+	if !runProtectedJS(t, vm, `default_MakerSuite.proof === page.original && XMLHttpRequest.prototype.open === originalOpen && request.xhr === null && page.requests.size === 0 && messages.length === 1 && JSON.parse(messages[0]).error.includes('AbortError')`).Bool {
+		t.Fatal("late proof reinstalled a canceled Run hook")
+	}
+}
+
+func TestGenerateFailureWakesBackpressureAndDetachesListeners(t *testing.T) {
+	for _, failure := range []string{"error", "abort", "send"} {
+		t.Run(failure, func(t *testing.T) {
+			vm := mockProtectedXHR(t)
+			armGeneratedTestXHR(t, vm, false)
+			if failure == "send" {
+				runProtectedJS(t, vm, `sendError = true`)
+			}
+			runProtectedJS(t, vm, `xhr = new XMLHttpRequest(); xhr.open('POST', '`+aiStudioOrigin+generateContentPath+`'); try { xhr.send('body') } catch (_) {}`)
+			if failure != "send" {
+				runProtectedJS(t, vm, `advance('x'.repeat(9 * 65536), false); messages = []; xhr.fire('`+failure+`')`)
+			}
+			if !runProtectedJS(t, vm, `request.xhr === null && request.resume === null && page.requests.size === 0 && xhr.responseText === '' && [...xhr.listeners.values()].every(value => value.size === 0) && messages.some(value => value.startsWith('{') && JSON.parse(value).error)`).Bool {
+				t.Fatal("failed Generate retained an XHR or its callback closures")
+			}
+		})
 	}
 }
 

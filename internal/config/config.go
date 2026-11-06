@@ -43,7 +43,6 @@ var configKeys = [...]string{
 	"UPSTREAM_CHANNELS",
 	"MODEL_MAPPING",
 	"MODEL_CHANNELS",
-	"TEMPORARY_CHAT",
 	"WAA_BACKEND",
 	"MEDIA_OUTPUT",
 	"MEDIA_BASE_URL",
@@ -58,6 +57,7 @@ var configKeys = [...]string{
 	"NONSTREAM_KEEPALIVE",
 	"FAKE_STREAM",
 	"YOUTUBE_LINKS",
+	"STRIP_THOUGHT_SIGNATURES",
 	"SEARCH_MODEL_ALIASES",
 	"GOOGLE_SEARCH",
 	"ANTI_TRUNCATION",
@@ -111,6 +111,7 @@ type Config struct {
 	NonstreamKeepalive     bool
 	FakeStream             bool
 	YouTubeLinks           bool
+	StripThoughtSignatures bool
 	SearchModelAliases     bool
 	GoogleSearch           bool
 	AntiTruncation         bool
@@ -135,7 +136,6 @@ type Config struct {
 	UpstreamChannels       []string
 	ModelMapping           string
 	ModelChannels          string
-	TemporaryChat          bool
 	WAABackend             string
 	MediaOutput            string
 	MediaBaseURL           string
@@ -207,8 +207,8 @@ var configSetters = map[string]func(*Config, string) error{
 	"ANTI_TRUNCATION":          boolSetter("ANTI_TRUNCATION", func(c *Config) *bool { return &c.AntiTruncation }),
 	"AUTO_CONTINUATION":        boolSetter("AUTO_CONTINUATION", func(c *Config) *bool { return &c.AutoContinuation }),
 	"YOUTUBE_LINKS":            boolSetter("YOUTUBE_LINKS", func(c *Config) *bool { return &c.YouTubeLinks }),
+	"STRIP_THOUGHT_SIGNATURES": boolSetter("STRIP_THOUGHT_SIGNATURES", func(c *Config) *bool { return &c.StripThoughtSignatures }),
 	"CONTINUATION_REWRITE":     boolSetter("CONTINUATION_REWRITE", func(c *Config) *bool { return &c.ContinuationRewrite }),
-	"TEMPORARY_CHAT":           boolSetter("TEMPORARY_CHAT", func(c *Config) *bool { return &c.TemporaryChat }),
 	"LOG_MAX_TOTAL_MB":         intSetter("LOG_MAX_TOTAL_MB", func(c *Config) *int { return &c.LogMaxTotalMB }),
 	"MAX_ACTIVE_WORKERS":       intSetter("MAX_ACTIVE_WORKERS", func(c *Config) *int { return &c.MaxActiveWorkers }),
 	"WARM_STARTUP_CONCURRENCY": intSetter("WARM_STARTUP_CONCURRENCY", func(c *Config) *int { return &c.WarmStartupConcurrency }),
@@ -470,7 +470,7 @@ func Load(path string) (Config, error) {
 // legacyEnvKeys 是 v0.2.18 及之前的版本保存设置时总会写出的键
 var legacyEnvKeys = []string{
 	"AISTUDIO_AUTH_STATES", "LISTEN_ADDR", "PROXY_API_KEY", "PROXY", "INIT_TIMEOUT", "REQUEST_TIMEOUT", "WARM_WORKER_LIMIT",
-	"MAX_ACTIVE_WORKERS", "WARM_STARTUP_CONCURRENCY", "PER_ACCOUNT_CONCURRENCY", "ROUTING_STRATEGY", "UPSTREAM_CHANNELS", "TEMPORARY_CHAT", "WAA_BACKEND",
+	"MAX_ACTIVE_WORKERS", "WARM_STARTUP_CONCURRENCY", "PER_ACCOUNT_CONCURRENCY", "ROUTING_STRATEGY", "UPSTREAM_CHANNELS", "WAA_BACKEND",
 }
 
 // upgradeEnv 精简旧版本写出的无注释全量 .env，保留显式通道和所有不同于当前默认值的设置。
@@ -525,6 +525,7 @@ func (c Config) envValues() map[string]string {
 		"NONSTREAM_KEEPALIVE":      strconv.FormatBool(c.NonstreamKeepalive),
 		"FAKE_STREAM":              strconv.FormatBool(c.FakeStream),
 		"YOUTUBE_LINKS":            strconv.FormatBool(c.YouTubeLinks),
+		"STRIP_THOUGHT_SIGNATURES": strconv.FormatBool(c.StripThoughtSignatures),
 		"SEARCH_MODEL_ALIASES":     strconv.FormatBool(c.SearchModelAliases),
 		"GOOGLE_SEARCH":            strconv.FormatBool(c.GoogleSearch),
 		"ANTI_TRUNCATION":          strconv.FormatBool(c.AntiTruncation),
@@ -549,14 +550,13 @@ func (c Config) envValues() map[string]string {
 		"MODEL_MAPPING":            c.ModelMapping,
 		"MODEL_CHANNELS":           c.ModelChannels,
 		"API_KEY_ACCOUNTS":         c.APIKeyAccounts,
-		"TEMPORARY_CHAT":           strconv.FormatBool(c.TemporaryChat),
 		"WAA_BACKEND":              c.WAABackend,
 		"MEDIA_OUTPUT":             c.MediaOutput,
 		"MEDIA_BASE_URL":           c.MediaBaseURL,
 	}
 }
 
-// Save 将与默认值不同的配置原子写入指定 env 文件，进程环境变量决定的项保留文件中原有的值
+// Save 将与默认值不同的配置原子写入指定 env 文件，进程环境变量决定的项保留文件中原有的值。
 func (c Config) Save(path string) error {
 	if err := c.Validate(); err != nil {
 		return err
@@ -568,11 +568,13 @@ func (c Config) Save(path string) error {
 	values, defaults := c.envValues(), Default().envValues()
 	file := make(map[string]string)
 	for _, key := range configKeys {
-		if slices.Contains(c.Environment, key) {
-			if value, ok := saved[key]; ok {
-				file[key] = value
+		_, inFile := saved[key]
+		switch {
+		case slices.Contains(c.Environment, key):
+			if inFile {
+				file[key] = saved[key]
 			}
-		} else if values[key] != defaults[key] {
+		case values[key] != defaults[key]:
 			file[key] = values[key]
 		}
 	}
@@ -849,9 +851,6 @@ func parseEnvValue(value string) (string, error) {
 }
 
 func formatEnvValue(value string) string {
-	if value == "" {
-		return ""
-	}
 	if strings.ContainsAny(value, " \t\r\n#\"'") {
 		return strconv.Quote(value)
 	}

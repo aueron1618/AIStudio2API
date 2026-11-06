@@ -81,7 +81,7 @@ func TestEnvironmentKeepsSavedFile(t *testing.T) {
 	}
 	update := Default()
 	update.RoutingStrategy = "fill-first"
-	update.TemporaryChat = true
+	update.RequestBodyLog = true
 	update = update.KeepEnvironment(saved)
 	if update.RoutingStrategy != "round-robin" {
 		t.Fatalf("update = %+v", update)
@@ -89,7 +89,7 @@ func TestEnvironmentKeepsSavedFile(t *testing.T) {
 	if err := update.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	if got := readTestEnv(t, path); got != "ROUTING_STRATEGY=fill-first\nTEMPORARY_CHAT=true\n" {
+	if got := readTestEnv(t, path); got != "ROUTING_STRATEGY=fill-first\nREQUEST_BODY_LOG=true\n" {
 		t.Fatalf(".env = %q", got)
 	}
 }
@@ -255,12 +255,14 @@ func TestUpgradeEnvPreservesCustomCapacityAndCommentedFiles(t *testing.T) {
 
 func TestLocalAndNewKeysKeepEnvironmentAndSavedValues(t *testing.T) {
 	file := map[string]string{
+		"STRIP_THOUGHT_SIGNATURES": "true",
 		"ANTI_TRUNCATION": "true", "AUTO_CONTINUATION": "false", "CONTINUATION_REWRITE": "true",
 		"WARM_WORKER_LIMIT": "2", "MAX_ACTIVE_WORKERS": "4", "WARM_STARTUP_CONCURRENCY": "3", "PER_ACCOUNT_CONCURRENCY": "2",
 		"UPSTREAM_CHANNELS": "build", "WAA_BACKEND": WAABackendCamoufox, "FIRST_EVENT_HEDGE": FirstEventHedgeOff,
 		"FIRST_EVENT_HEDGE_MODELS": "file-model", "PROXY_API_KEY": "file-key", "API_KEY_ACCOUNTS": "file-key:a@example.com",
 	}
 	environment := map[string]string{
+		"STRIP_THOUGHT_SIGNATURES": "false",
 		"ANTI_TRUNCATION": "false", "AUTO_CONTINUATION": "true", "CONTINUATION_REWRITE": "false",
 		"WARM_WORKER_LIMIT": "0", "MAX_ACTIVE_WORKERS": "1", "WARM_STARTUP_CONCURRENCY": "1", "PER_ACCOUNT_CONCURRENCY": "1",
 		"UPSTREAM_CHANNELS": "playground,build", "WAA_BACKEND": "go", "FIRST_EVENT_HEDGE": FirstEventHedgeAuto,

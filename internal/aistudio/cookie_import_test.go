@@ -158,22 +158,26 @@ func TestCookieTextMissingLoginSentinel(t *testing.T) {
 }
 
 func TestDecodeCookieLoginResultPreservesCleanupWarning(t *testing.T) {
-	state, err := ParseCookieImport(importTestHeader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := decodeNativeLoginResult(camoufoxnative.LoginResult{
-		StorageStateJSON: raw, Email: "real@example.com", CloseError: "cleanup warning", VerifiedAt: time.Now(),
-	}, "cookie")
-	if err != nil || result.CloseError != "cleanup warning" || result.Email != "real@example.com" {
-		t.Fatalf("successful cookie export was discarded: %+v, %v", result, err)
-	}
-	extension, exists, err := result.StorageState.AuthExtension()
-	if err != nil || !exists || extension.Source.Browser != "cookie" || extension.Source.Email != result.Email || extension.OAuth != nil {
-		t.Fatal("decoded Cookie result has the wrong identity or OAuth material")
+	for _, source := range []string{"cookie", "camoufox"} {
+		t.Run(source, func(t *testing.T) {
+			state, err := ParseCookieImport(importTestHeader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := decodeNativeLoginResult(camoufoxnative.LoginResult{
+				StorageStateJSON: raw, Email: "real@example.com", CloseError: "cleanup warning", VerifiedAt: time.Now(),
+			}, source)
+			if err != nil || result.CloseError != "cleanup warning" || result.Email != "real@example.com" {
+				t.Fatalf("successful cookie export was discarded: %+v, %v", result, err)
+			}
+			extension, exists, err := result.StorageState.AuthExtension()
+			if err != nil || !exists || extension.Source.Browser != source || extension.Source.Email != result.Email || extension.OAuth != nil {
+				t.Fatal("decoded Cookie result has the wrong identity or OAuth material")
+			}
+		})
 	}
 }

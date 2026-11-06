@@ -100,7 +100,7 @@ func (transport imageProbeTransport) RoundTrip(request *http.Request) (*http.Res
 
 func TestGoRuntimeImageProbeDiscardsStreamingBody(t *testing.T) {
 	body := &imageProbeBody{remaining: 8 << 20}
-	runtime := &goWAARuntime{client: &http.Client{Transport: imageProbeTransport{body: body}}}
+	runtime, _ := newTestGoPageRuntime(t, imageProbeTransport{body: body})
 	if !runtime.loadImage("https://aistudio.google.com/image.png") {
 		t.Fatal("nonempty image was rejected")
 	}

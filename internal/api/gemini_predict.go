@@ -36,6 +36,11 @@ func (s *server) handleGeminiPredict(w http.ResponseWriter, r *http.Request, mod
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "instances is required")
 		return
 	}
+	model, _, err := s.resolveAntiTruncationModel(model)
+	if err != nil {
+		writeGeminiRequestError(w, err)
+		return
+	}
 	var stopKeepalive func()
 	w, stopKeepalive = s.nonstreamKeepalive(w, r)
 	defer stopKeepalive()

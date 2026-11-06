@@ -109,6 +109,14 @@ func (s *server) serveBidi(w http.ResponseWriter, r *http.Request, mode aistudio
 		_ = connection.Close()
 		return
 	}
+	setAccessLogRequestedModel(r.Context(), setup.Model)
+	setup.Model, _, err = s.resolveAntiTruncationModel(setup.Model)
+	if err != nil {
+		SetAccessLogError(r.Context(), err)
+		_ = writeBidiJSON(connection, bidiErrorMessage(err))
+		_ = connection.Close()
+		return
+	}
 	request, inputModalities, err := bidiRequestFromSetup(mode, setup)
 	if err != nil {
 		SetAccessLogError(r.Context(), err)

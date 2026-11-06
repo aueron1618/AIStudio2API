@@ -16,6 +16,12 @@ import (
 
 const antiTruncationTestName = "agw_emit_0123456789abcdef01234567"
 
+type ProtectedTransportFunc func(context.Context, GenerateRequest, RPCRequest) (*RPCResponse, error)
+
+func (transport ProtectedTransportFunc) DoProtected(ctx context.Context, request GenerateRequest, rpc RPCRequest) (*RPCResponse, error) {
+	return transport(ctx, request, rpc)
+}
+
 func antiTruncationTestCall(name, text string) Event {
 	arguments, _ := json.Marshal(map[string]string{"content": text})
 	return Event{Kind: EventToolCall, Part: Part{FunctionCall: &FunctionCall{

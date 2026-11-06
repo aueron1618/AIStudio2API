@@ -26,7 +26,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     CC="/opt/zig/zig cc -target $target-linux-musl" CXX="/opt/zig/zig c++ -target $target-linux-musl" \
     CGO_CXXFLAGS=-I/opt/spidermonkey/include CGO_LDFLAGS=-L/opt/spidermonkey/lib \
     go build -mod=readonly -trimpath -tags netgo,osusergo \
-    -ldflags="-s -w -X $(go list -m)/internal/app.version=${VERSION} -linkmode external -extldflags '-static -Wl,--strip-all'" -o /out/aistudio2api ./cmd/aistudio2api
+    -ldflags="-s -w -X $(go list -m)/internal/app.version=${VERSION} -linkmode external -extldflags '-static -Wl,--strip-all -Wl,--gc-sections'" -o /out/aistudio2api ./cmd/aistudio2api
 
 # Shared runtime settings, certificates and timezone data for both variants.
 FROM debian:bookworm-slim AS runtime-base

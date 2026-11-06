@@ -2,12 +2,20 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 )
+
+type accountLoginFunc func(context.Context, aistudio.IsolatedLoginRequest) (aistudio.IsolatedLoginResult, error)
+
+func (login accountLoginFunc) Login(ctx context.Context, request aistudio.IsolatedLoginRequest) (aistudio.IsolatedLoginResult, error) {
+	return login(ctx, request)
+}
 
 // TestAuthRefreshWithoutExtension 验证缺少续签扩展的账户从当前 Chrome 导入同一邮箱并写回扩展，重新登录保留扩展
 func TestAuthRefreshWithoutExtension(t *testing.T) {
@@ -46,8 +54,7 @@ func TestAuthRefreshWithoutExtension(t *testing.T) {
 			})
 			return updated, nil
 		},
-		reset:          func(string) error { return nil },
-		prepareHeaders: func(string) (func(bool), error) { return func(bool) {}, nil },
+		reset: func(string) error { return nil },
 	}
 	ctx := aistudio.ContextWithAccountLease(t.Context(), lease)
 	if !refresher.Available(ctx) {
@@ -115,6 +122,122 @@ func TestKeepAuthExtensionWithNativeSource(t *testing.T) {
 			if next.Cookies[0].Value != "new-fixture" {
 				t.Fatal("preserving renewal material replaced fresh cookies")
 			}
+		})
+	}
+}
+
+func TestLoginAccountPreservesNativeRenewalMaterial(t *testing.T) {
+	for _, test := range []struct {
+		name, email, oldEmail string
+		freshOAuth, canceled  bool
+		failConfig            bool
+		wantOld, wantError    bool
+	}{
+		{name: "native relogin", wantOld: true},
+		{name: "case insensitive", email: "USER@example.test", wantOld: true},
+		{name: "fresh OAuth", freshOAuth: true},
+		{name: "different known old email", oldEmail: "other@example.test"},
+		{name: "wrong login identity", email: "other@example.test", wantError: true},
+		{name: "canceled login", canceled: true, wantError: true},
+		{name: "config write failure", failConfig: true, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			admin := newAccountTestAdmin(t)
+			state, err := aistudio.ParseCookieImport("SAPISID=old-fixture; __Secure-1PAPISID=one; __Secure-3PAPISID=three")
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldEmail := test.oldEmail
+			if oldEmail == "" {
+				oldEmail = "user@example.test"
+			}
+			old := aistudio.AuthExtension{
+				Source: aistudio.AuthSource{Browser: "chrome", Root: "fixture-root", Profile: "Default", Email: oldEmail},
+				OAuth:  &aistudio.ChromeOAuthMaterial{GaiaID: "old-gaia", RefreshToken: "old-fixture"},
+			}
+			initial := old
+			initial.Source.Email = "user@example.test"
+			state.SetAuthExtension(initial)
+			cfg := aistudio.DefaultAccountConfig("user@example.test")
+			cfg.AuthUser = 2
+			created, err := admin.addAccount(t.Context(), cfg, state, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.oldEmail != "" {
+				lease, err := admin.pool.AcquireAccount(t.Context(), created.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				state.SetAuthExtension(old)
+				err = errors.Join(lease.SaveStorageState(state), lease.Release())
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			storedAccount, err := admin.pool.Account(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configPath := storedAccount.ConfigPath
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			email := test.email
+			if email == "" {
+				email = created.ID
+			}
+			fresh := aistudio.AuthExtension{Source: aistudio.AuthSource{Browser: "camoufox", Email: email}}
+			if test.freshOAuth {
+				fresh.OAuth = &aistudio.ChromeOAuthMaterial{GaiaID: "fresh-gaia", RefreshToken: "fresh-fixture"}
+			}
+			calls := 0
+			admin.login = accountLoginFunc(func(_ context.Context, request aistudio.IsolatedLoginRequest) (aistudio.IsolatedLoginResult, error) {
+				calls++
+				if request.AuthUser != 0 {
+					t.Fatal("isolated native relogin did not use its new single-account session")
+				}
+				if test.canceled {
+					cancel()
+				}
+				if test.failConfig {
+					storedAccount.ConfigPath = storedAccount.Directory
+				}
+				next, err := aistudio.ParseCookieImport("SAPISID=new-fixture; __Secure-1PAPISID=new-one; __Secure-3PAPISID=new-three")
+				if err != nil {
+					t.Fatal(err)
+				}
+				next.SetAuthExtension(fresh)
+				return aistudio.IsolatedLoginResult{Email: email, StorageState: next}, nil
+			})
+			_, err = admin.LoginAccount(ctx, created.ID, nil)
+			storedAccount.ConfigPath = configPath
+			if (err != nil) != test.wantError || calls != 1 || test.canceled && !errors.Is(err, context.Canceled) {
+				t.Fatalf("relogin calls=%d error=%v", calls, err)
+			}
+			loaded, err := admin.store.Load()
+			if err != nil || len(loaded) != 1 {
+				t.Fatalf("reload = %v", err)
+			}
+			want := fresh
+			if test.wantOld || test.wantError {
+				want = old
+			}
+			kept, exists, err := loaded[0].StorageState.AuthExtension()
+			if err != nil || !exists || !reflect.DeepEqual(kept, want) {
+				t.Fatal("LoginAccount did not preserve the correct renewal source and OAuth")
+			}
+			wantCookie, wantAuthUser := "new-fixture", 0
+			if test.wantError {
+				wantCookie, wantAuthUser = "old-fixture", 2
+			}
+			if loaded[0].StorageState.Cookies[0].Value != wantCookie || loaded[0].Config.AuthUser != wantAuthUser {
+				t.Fatal("relogin saved partial cookies or an incorrect auth_user")
+			}
+			lease, err := admin.pool.AcquireAccount(t.Context(), created.ID)
+			if err != nil {
+				t.Fatalf("relogin did not release a usable account lease: %v", err)
+			}
+			_ = lease.Release()
 		})
 	}
 }

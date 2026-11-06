@@ -272,8 +272,9 @@ func TestGeminiCandidateEndHTTP(t *testing.T) {
 					t.Fatalf("final response=%+v", final)
 				}
 				usage := final["usageMetadata"].(map[string]any)
-				if usage["promptTokenCount"] != float64(20) || usage["thoughtsTokenCount"] != float64(6) || usage["totalTokenCount"] != float64(30) {
-					t.Errorf("candidate usage not summed: %+v", usage)
+				// Public candidate usage counts shared input once; the audit sums actual requests.
+				if usage["promptTokenCount"] != float64(10) || usage["thoughtsTokenCount"] != float64(6) || usage["totalTokenCount"] != float64(20) {
+					t.Errorf("candidate usage does not preserve shared input and summed output: %+v", usage)
 				}
 				for index, value := range candidates {
 					candidate := value.(map[string]any)
