@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -150,6 +151,12 @@ func newWorkerPageFixture(t *testing.T) *workerPageFixture {
 		// No process is started, and Close cannot signal the synthetic PID.
 		process: &browserProcess{closed: true, command: &exec.Cmd{Process: &os.Process{Pid: -1}}},
 	}
+	worker.idle = time.AfterFunc(idleMinimizeDelay, worker.minimizeMemory)
+	t.Cleanup(func() {
+		if worker.idle != nil {
+			worker.idle.Stop()
+		}
+	})
 	return &workerPageFixture{worker: worker, peer: peer, commands: commands, live: map[string]bool{"main": true}, peak: 1, closeFailures: make(map[string]int)}
 }
 
@@ -242,6 +249,42 @@ func (fixture *workerPageFixture) drain(t *testing.T) {
 			return
 		}
 	}
+}
+
+func TestCloseDoesNotRearmIdleMemoryTimer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fixture := newWorkerPageFixture(t)
+		worker := fixture.worker
+		boosted := make(chan func(), 1)
+		go func() {
+			unboost, err := worker.boostFrames(t.Context())
+			if err != nil {
+				t.Error(err)
+			}
+			boosted <- unboost
+		}()
+		fixture.drain(t)
+		unboost := <-boosted
+		if unboost == nil {
+			t.Fatal("frame boost failed")
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- worker.Close() }()
+		end := requireBiDiTestCommand(t, fixture.commands)
+		if end.Method != "session.end" {
+			t.Fatalf("close command = %+v", end)
+		}
+		fixture.reply(t, end)
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		unboost()
+		unboost()
+		worker.minimizeMemory()
+		if worker.idle != nil || worker.frameBoosts != 0 {
+			t.Fatal("late frame cleanup rearmed a closed worker's memory timer")
+		}
+	})
 }
 
 func TestReloadWaitsForAsyncChatResetBeforeBudgetReuse(t *testing.T) {

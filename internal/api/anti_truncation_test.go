@@ -234,6 +234,102 @@ func TestAntiTruncationTokenCountEndpoints(t *testing.T) {
 	}
 }
 
+type antiTruncationVideoTestService struct {
+	aistudio.Service
+	aistudio.FileService
+	listError, frameError error
+	listCalls             int
+	frameRequests         []aistudio.VideoFramesRequest
+}
+
+func (service *antiTruncationVideoTestService) ListFiles(context.Context) ([]aistudio.FileMetadata, error) {
+	service.listCalls++
+	return []aistudio.FileMetadata{{ID: "drive-video", Alias: "video"}}, service.listError
+}
+
+func (service *antiTruncationVideoTestService) VideoFrameTokens(_ context.Context, request aistudio.VideoFramesRequest) (int64, error) {
+	service.frameRequests = append(service.frameRequests, request)
+	return 37, service.frameError
+}
+
+func TestAntiTruncationVideoTokens(t *testing.T) {
+	service := &antiTruncationVideoTestService{}
+	var enabled atomic.Bool
+	s := &server{service: service, config: Config{AntiTruncation: enabled.Load}}
+	fps := 0.5
+	for phase, on := range []bool{false, true, false} {
+		enabled.Store(on)
+		for _, test := range []struct{ model, want string }{
+			{"test", "test"},
+			{"models/test", "models/test"},
+			{antiTruncationModelPrefix + "test", "test"},
+			{"models/" + antiTruncationModelPrefix + "test", "test"},
+		} {
+			for _, file := range []string{"files/video", geminiFilesURIPrefix + "video"} {
+				t.Run(fmt.Sprintf("phase=%d/%s/%s", phase, test.model, file), func(t *testing.T) {
+					service.listCalls, service.frameRequests = 0, nil
+					body := fmt.Sprintf(`{"model":%q,"file":%q,"videoMetadata":{"startOffset":"2s","endOffset":"4.5s","fps":0.5}}`, test.model, file)
+					w := httptest.NewRecorder()
+					s.handleVideoTokens(w, httptest.NewRequest(http.MethodPost, "/api/video-tokens", strings.NewReader(body)))
+					var payload struct {
+						TotalTokens int64             `json:"totalTokens"`
+						Error       map[string]string `json:"error"`
+					}
+					if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+						t.Fatal(err)
+					}
+					if !on && test.model != test.want {
+						if w.Code != http.StatusNotFound || service.listCalls != 0 || len(service.frameRequests) != 0 ||
+							payload.Error["code"] != "upstream_error" || !strings.Contains(payload.Error["message"], "anti-truncation models are disabled") {
+							t.Fatalf("disabled model reached file or frame service: lists=%d requests=%+v status=%d body=%s", service.listCalls, service.frameRequests, w.Code, w.Body)
+						}
+						return
+					}
+					want := []aistudio.VideoFramesRequest{{Model: test.want, FileID: "drive-video", VideoMetadata: &aistudio.VideoMetadata{StartOffset: "2s", EndOffset: "4.5s", FPS: &fps}}}
+					if w.Code != http.StatusOK || payload.TotalTokens != 37 || payload.Error != nil || service.listCalls != 1 || !reflect.DeepEqual(service.frameRequests, want) {
+						t.Fatalf("video count changed: lists=%d requests=%+v status=%d body=%s", service.listCalls, service.frameRequests, w.Code, w.Body)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestAntiTruncationVideoTokensErrors(t *testing.T) {
+	for _, test := range []struct {
+		name, file, code      string
+		listError, frameError error
+		status, lists, frames int
+	}{
+		{name: "missing file", code: "invalid_argument", status: http.StatusBadRequest},
+		{name: "unknown file", file: "files/missing", code: "not_found", status: http.StatusNotFound, lists: 1},
+		{name: "list error", file: "files/video", code: "upstream_error", status: http.StatusServiceUnavailable, lists: 1,
+			listError: &aistudio.RPCError{StatusCode: http.StatusServiceUnavailable, Message: "files unavailable"}},
+		{name: "frame error", file: "files/video", code: "upstream_error", status: http.StatusTooManyRequests, lists: 1, frames: 1,
+			frameError: &aistudio.RPCError{StatusCode: http.StatusTooManyRequests, Message: "frame quota exceeded"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &antiTruncationVideoTestService{listError: test.listError, frameError: test.frameError}
+			s := &server{service: service, config: Config{AntiTruncation: func() bool { return true }}}
+			body := fmt.Sprintf(`{"model":%q,"file":%q}`, antiTruncationModelPrefix+"test", test.file)
+			w := httptest.NewRecorder()
+			s.handleVideoTokens(w, httptest.NewRequest(http.MethodPost, "/api/video-tokens", strings.NewReader(body)))
+			var payload struct {
+				Error map[string]string `json:"error"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != test.status || payload.Error["code"] != test.code || payload.Error["message"] == "" || service.listCalls != test.lists || len(service.frameRequests) != test.frames {
+				t.Fatalf("video error changed: lists=%d requests=%+v status=%d body=%s", service.listCalls, service.frameRequests, w.Code, w.Body)
+			}
+			if test.frames > 0 && !reflect.DeepEqual(service.frameRequests[0], aistudio.VideoFramesRequest{Model: "test", FileID: "drive-video"}) {
+				t.Fatalf("failed frame count changed the request: %+v", service.frameRequests[0])
+			}
+		})
+	}
+}
+
 type antiTruncationFixtureTransport struct {
 	protocolFixtureTransport
 	duringRequest func()

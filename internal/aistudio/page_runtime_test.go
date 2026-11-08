@@ -162,6 +162,49 @@ func TestGoPageColdStartCatalogAndReloadCache(t *testing.T) {
 	}
 }
 
+func TestGoPageStartupRPCsDoNotBlockReadinessAndStopOnClose(t *testing.T) {
+	started, stopped := make(chan struct{}), make(chan struct{})
+	fixture := pageFixtureRoundTrip(t, pageFixtureInterpreter, nil)
+	transport := &pageTestTransport{roundTrip: func(request *http.Request) (*http.Response, error) {
+		switch request.URL.String() {
+		case makerSuiteRPCURL + "GetUserPreferences":
+			close(started)
+			<-request.Context().Done()
+			close(stopped)
+			return nil, request.Context().Err()
+		case loggingContextURL:
+			select {
+			case <-started:
+			case <-request.Context().Done():
+				return nil, request.Context().Err()
+			}
+		}
+		return fixture(request)
+	}}
+	runtime, fingerprint := newTestGoPageRuntime(t, transport)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := runtime.open(ctx, fingerprint); err != nil {
+		t.Fatalf("nonessential startup RPC blocked readiness: %v", err)
+	}
+	select {
+	case <-stopped:
+		t.Fatal("ready page canceled its background startup RPC")
+	default:
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("Close returned before the startup RPC released its resources")
+	}
+	if len(runtime.requests) != 0 || len(runtime.timers) != 0 || transport.closed.Load() != 1 {
+		t.Fatal("closed page retained startup work")
+	}
+}
+
 func TestGoPageFailedInitializationCancelsAndJoinsBackgroundHTTP(t *testing.T) {
 	started, stopped := make(chan struct{}), make(chan struct{})
 	fixture := pageFixtureRoundTrip(t, pageFixtureInterpreter, nil)

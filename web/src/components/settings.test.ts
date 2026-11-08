@@ -13,7 +13,11 @@ import UiSelect from './UiSelect.vue'
 
 const route = vi.hoisted(() => ({ section: 'upstream' }))
 
-vi.mock('@/desktop', () => ({ keepPage: () => () => {} }))
+vi.mock('@/desktop', () => ({
+  keepPage: () => () => {},
+  desktopPlatform: '',
+  sendDesktop: vi.fn(),
+}))
 vi.mock('@/api', () => ({ api: {} }))
 vi.mock('@/url', () => ({ useQueryParam: () => ref(route.section) }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ beforeEach: () => () => {} }) }))
@@ -31,6 +35,7 @@ afterEach(() => vi.unstubAllGlobals())
 
 const config: ServiceConfig = {
   auto_start: false,
+  hide_dock_icon: false,
   request_body_log: false,
   log_file: false,
   log_max_total_mb: 100,
@@ -144,6 +149,30 @@ describe('merged settings controls', () => {
     })
     expect(html).toMatch(/id="setting-warm"[^>]*value="0"[^>]*min="0"/)
   })
+
+  it.each([false, true])(
+    'preserves Build-native nonstream=%s and its own environment lock',
+    async (enabled) => {
+      route.section = 'upstream'
+      const html = await render(SettingsPanel, {
+        config: {
+          ...config,
+          build_native_nonstream: enabled,
+          environment: ['BUILD_NATIVE_NONSTREAM'],
+        },
+        accounts: [],
+        models: [],
+        loading: false,
+        error: '',
+      })
+      const locked = html.match(/<fieldset disabled[\s\S]*?<\/fieldset>/g) ?? []
+      expect(locked).toHaveLength(1)
+      expect(locked[0]).toMatch(
+        new RegExp(`id="setting-build-native"[^>]*aria-checked="${enabled}"`),
+      )
+      expect(html).toContain(messages['settings.buildNativeHelp'])
+    },
+  )
 
   it('locks strip_thought_signatures and no longer offers a temporary-chat toggle', async () => {
     route.section = 'upstream'

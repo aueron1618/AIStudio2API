@@ -93,6 +93,10 @@ func launchBrowser(ctx context.Context, options Options, config map[string]any) 
 		}
 		// gfx.webrender.enable-subpixel-aa 为 false 时 WebRender 把字形光栅化到单通道图集，不分配 RGBA 字形图集
 		prefs["gfx.webrender.enable-subpixel-aa"] = false
+		if runtime.GOOS == "windows" {
+			// timer.maximum_firing_delay_tolerance_ms 为 0 时 Windows 定时器线程在最早的定时器到期时唤醒，界面操作中的短定时器按期触发
+			prefs["timer.maximum_firing_delay_tolerance_ms"] = "0"
+		}
 	}
 	if options.CacheDirectory != "" {
 		for key, value := range cachePreferences(options.CacheDirectory) {
@@ -396,7 +400,7 @@ func normalizeBiDiEndpoint(endpoint string) string {
 func headlessPreferences() map[string]any {
 	return map[string]any{
 		"layout.frame_rate":                        interactiveFrameRate,
-		"gfx.display.frame-rate-divisor":           idleFrameDivisor,
+		"gfx.display.frame-rate-divisor":           1,
 		"dom.ipc.processPrelaunch.enabled":         false,
 		"browser.cache.memory.capacity":            16 * 1024,
 		"browser.sessionhistory.max_total_viewers": 0,
