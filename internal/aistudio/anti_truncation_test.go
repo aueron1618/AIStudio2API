@@ -511,6 +511,96 @@ func TestAntiTruncationClientIncompleteAndUnsupportedRoutes(t *testing.T) {
 	}
 }
 
+func TestAntiTruncationAssistantRequiresCompletedFallback(t *testing.T) {
+	stream := func(status int) []byte {
+		step := make([]any, 13)
+		step[0] = []any{[]any{[]any{[]any{nil, "ordinary answer"}}, "model"}}
+		step[11], step[12] = 1, status
+		body, err := json.Marshal([]any{[]any{[]any{nil, nil, []any{step}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	for _, enabled := range []bool{false, true} {
+		for _, status := range []int{1, 2} {
+			name := map[bool]string{false: "ordinary", true: "anti-truncation"}[enabled] + "/" + map[int]string{1: "completed", 2: "unfinished"}[status]
+			t.Run(name, func(t *testing.T) {
+				reopened := 0
+				decoder := &AssistantStreamDecoder{requireComplete: enabled, Reopen: func() (io.ReadCloser, error) {
+					reopened++
+					return io.NopCloser(bytes.NewReader(stream(status))), nil
+				}}
+				var got []Event
+				emit := func(event Event) error { got = append(got, event); return nil }
+				transport := &antiTruncationTransport{name: antiTruncationTestName}
+				if enabled {
+					emit = transport.emitter(emit)
+				}
+				err := DecodeAssistantStream(bytes.NewReader(stream(2)), decoder, emit)
+				if enabled {
+					err = transport.complete(err)
+				}
+				if reopened != 1 {
+					t.Fatalf("unfinished task reopened %d times", reopened)
+				}
+				if enabled && status == 2 {
+					var protocol *ProtocolEvidenceError
+					if !errors.As(err, &protocol) || len(got) != 0 {
+						t.Fatalf("unfinished task leaked fallback or success: events=%+v err=%v", got, err)
+					}
+				} else if err != nil || len(got) != 2 || got[0].Text != "ordinary answer" || got[1].Kind != EventFinish {
+					t.Fatalf("ordinary or completed task changed: events=%+v err=%v", got, err)
+				}
+			})
+		}
+	}
+}
+
+func TestContentPolicyFinishPreservesUsageAndAntiTruncationCounts(t *testing.T) {
+	for code, reason := range map[int]string{3: "safety", 4: "recitation", 7: "blocklist", 8: "prohibited_content", 9: "spii", 11: "image_safety", 14: "image_prohibited_content", 17: "image_recitation"} {
+		for _, wrapped := range []bool{false, true} {
+			t.Run(reason+"/"+map[bool]string{false: "ordinary", true: "anti-truncation"}[wrapped], func(t *testing.T) {
+				client := NewClient(ClientOptions{Protected: ProtectedTransportFunc(func(_ context.Context, request GenerateRequest, _ RPCRequest) (*RPCResponse, error) {
+					part := Part{Text: "partial answer"}
+					if wrapped {
+						part = antiTruncationTestCall(request.Tools.Functions[0].Name, "partial answer").Part
+					}
+					return antiTruncationTestResponse(t, []Part{part}, code), nil
+				})})
+				client.setModelCatalog("", modelCatalog{entries: map[string]modelEntry{"model": {model: Model{ID: "model"}, defaults: GenerationDefaults{MaxOutputTokens: 1024}}}})
+				events, err := client.Generate(t.Context(), GenerateRequest{Model: "model", AntiTruncation: wrapped, Contents: []Content{{Role: RoleUser, Parts: []Part{{Text: "question"}}}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				failures, usages := 0, 0
+				for event := range events {
+					switch event.Kind {
+					case EventUsage:
+						usages++
+						// The wrapped control instruction introduces an excluded system-role token.
+						inputTokens := map[bool]int64{false: 10, true: 9}[wrapped]
+						if event.Usage == nil || event.Usage.InputTokens != inputTokens || event.Usage.OutputTokens != 4 || event.Usage.TotalTokens != inputTokens+4 {
+							t.Fatalf("policy failure lost usage: %+v", event.Usage)
+						}
+					case EventError:
+						failures++
+						var policy *ContentPolicyError
+						if !errors.As(event.Err, &policy) || policy.Reason != reason || event.AntiTruncationToolCalls != map[bool]int{false: 0, true: 1}[wrapped] {
+							t.Fatalf("policy error or tool count changed: %+v", event)
+						}
+					case EventFinish, EventToolCall:
+						t.Fatalf("policy failure emitted success or an internal call: %+v", event)
+					}
+				}
+				if failures != 1 || usages != 1 {
+					t.Fatalf("errors=%d usage=%d", failures, usages)
+				}
+			})
+		}
+	}
+}
+
 func TestAntiTruncationPooledAssistantTailAndDisabledRequests(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		model := Model{ID: "model", Methods: []string{"generateContent"}, Capabilities: map[string]bool{"function_declarations": true}}

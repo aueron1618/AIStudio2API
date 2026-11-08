@@ -462,7 +462,7 @@ onUnmounted(() => {
       <figure class="min-w-0 rounded-lg border border-line bg-panel p-4 @min-[56rem]:col-span-2">
         <div class="mb-2 flex flex-wrap items-center gap-2">
           <figcaption class="mr-auto">
-            <span class="text-sm font-medium text-gray-200">{{ t('usage.chartTraffic') }}</span>
+            <span class="text-sm font-semibold text-gray-200">{{ t('usage.chartTraffic') }}</span>
             <span class="ml-2 text-xs text-gray-500">{{ t('usage.chartTrafficHelp') }}</span>
           </figcaption>
           <UiSelect
@@ -506,7 +506,7 @@ onUnmounted(() => {
           <VChart v-if="shown.traffic" ref="traffic" :option="shown.traffic" autoresize />
         </div>
         <div class="mt-4 border-t border-line/60 pt-3">
-          <h4 class="mb-2 text-xs font-medium text-gray-400">
+          <h4 class="mb-2 text-xs font-semibold text-gray-400">
             {{ t('usage.chartOutcomes') }}
           </h4>
           <ChartLegend
@@ -521,7 +521,7 @@ onUnmounted(() => {
         </div>
       </figure>
       <figure class="flex min-w-0 flex-col rounded-lg border border-line bg-panel p-4">
-        <figcaption class="mb-2 text-sm font-medium text-gray-200">
+        <figcaption class="mb-2 text-sm font-semibold text-gray-200">
           {{ t('usage.chartLatency') }}
         </figcaption>
         <table class="mb-3 w-full text-xs tabular-nums">
@@ -570,7 +570,7 @@ onUnmounted(() => {
         </div>
       </figure>
       <figure class="flex min-w-0 flex-col rounded-lg border border-line bg-panel p-4">
-        <figcaption class="mb-2 text-sm font-medium text-gray-200">
+        <figcaption class="mb-2 text-sm font-semibold text-gray-200">
           {{ t('usage.chartTokens') }}
         </figcaption>
         <ChartLegend

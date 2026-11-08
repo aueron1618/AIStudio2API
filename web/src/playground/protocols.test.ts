@@ -7,9 +7,10 @@ import { liveCode } from './media/live-code'
 import { openLiveSocket } from './media/live-socket'
 import { realtimeMusicCode } from './media/music-code'
 import { speechCode } from './media/speech-code'
-import { protocolCall, protocolsFor } from './protocols'
-import { agentConfig, apiKey, buildRequest, publicAPIBase } from './request'
+import { protocolCall, protocolsFor, protocolSupports } from './protocols'
+import { agentFields, apiKey, apiPart, buildRequest, publicAPIBase } from './request'
 import { defaultSettings } from './session'
+import type { Part, Turn } from './types'
 
 vi.mock('@/desktop', () => ({ keepPage: () => {} }))
 vi.mock('@/i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
@@ -297,17 +298,19 @@ describe('Interactions and current media capabilities', () => {
 
   it('keeps Antigravity model/token configuration separate from Build assistant routing', () => {
     const settings = defaultSettings(agent)
-    expect(agentConfig(settings, agent)).toBeUndefined()
+    expect(agentFields(settings, agent)).toBeUndefined()
     settings.agentModel = 'gemini-chosen'
     settings.maxTotalTokens = 4096
-    expect(agentConfig(settings, agent)).toEqual({
-      type: 'antigravity',
-      model: 'gemini-chosen',
-      max_total_tokens: '4096',
+    expect(agentFields(settings, agent)).toEqual({
+      agent_config: {
+        type: 'antigravity',
+        model: 'gemini-chosen',
+        max_total_tokens: '4096',
+      },
     })
     expect(protocolsFor(agent).map((item) => item.value)).toEqual(['interactions'])
     const assistant: Model = { ...model, channels: ['assistant'], agent_model: 'not-an-agent' }
-    expect(agentConfig(settings, assistant)).toBeUndefined()
+    expect(agentFields(settings, assistant)).toBeUndefined()
     expect(protocolsFor(assistant).some((item) => item.value === 'interactions')).toBe(false)
     expect(publicAPIBase(assistant.id, assistant)).toBe('/build/v1')
   })
@@ -326,12 +329,132 @@ describe('Interactions and current media capabilities', () => {
     settings.thinkingSummaries = true
     settings.visualization = false
     settings.collaborativePlanning = true
-    expect(agentConfig(settings, research)).toEqual({
-      type: 'deep-research',
-      thinking_summaries: 'auto',
-      visualization: 'off',
-      collaborative_planning: true,
+    expect(agentFields(settings, research)).toEqual({
+      agent_config: {
+        type: 'deep-research',
+        thinking_summaries: 'auto',
+        visualization: 'off',
+        collaborative_planning: true,
+      },
     })
+  })
+
+  it('sends environment beside agent_config without turning omitted tools into an empty list', () => {
+    const remote: Model = {
+      ...agent,
+      capabilities: { ...agent.capabilities, capability_code_65: true },
+    }
+    const settings = defaultSettings(remote)
+    expect(agentFields(settings, remote)).toBeUndefined()
+    settings.agentModel = 'gemini-chosen'
+    settings.environment.sources = [
+      { type: 'inline', source: '', target: '/input.txt', content: 'offline fixture' },
+      { type: 'repository', source: 'github://fixture/repo', target: '/repo', content: '' },
+    ]
+    settings.environment.rules = [
+      { domain: '  ', headers: [] },
+      {
+        domain: ' example.test ',
+        headers: [
+          { name: ' X-Fixture ', value: 'offline' },
+          { name: '', value: 'ignored' },
+        ],
+      },
+    ]
+    const fields = agentFields(settings, remote)
+    expect(fields).toEqual({
+      agent_config: { type: 'antigravity', model: 'gemini-chosen' },
+      environment: {
+        type: 'remote',
+        sources: [
+          { type: 'inline', target: '/input.txt', content: 'offline fixture' },
+          { type: 'repository', source: 'github://fixture/repo', target: '/repo' },
+        ],
+        network: { allowlist: [{ domain: 'example.test', transform: { 'X-Fixture': 'offline' } }] },
+      },
+    })
+    const call = protocolCall(
+      'interactions',
+      remote,
+      remote.id,
+      'key',
+      input.request,
+      false,
+      input.images,
+      fields,
+      'prior',
+    )
+    expect(call.path).toBe('/v1beta/interactions')
+    expect(call.body).toEqual({
+      agent: remote.id,
+      input: [{ type: 'user_input', content: [{ type: 'text', text: 'hello' }] }],
+      previous_interaction_id: 'prior',
+      ...fields,
+      stream: false,
+    })
+    expect(call.body).not.toHaveProperty('tools')
+    expect(
+      generateCode('rest', {
+        ...input,
+        model: remote,
+        modelID: remote.id,
+        protocol: 'interactions',
+        agent: fields,
+      }),
+    ).toContain('"environment"')
+    settings.environment.rules = []
+    expect(agentFields(settings, remote)?.environment).not.toHaveProperty('network')
+    settings.environment.type = 'existing'
+    settings.environment.id = ' environment-id '
+    expect(agentFields(settings, remote)?.environment).toBe('environment-id')
+    expect(agentFields(settings, agent)).not.toHaveProperty('environment')
+  })
+
+  it('keeps uploaded video references and Gemini metadata but excludes preview fields and Omni video settings', () => {
+    const part: Part = {
+      inlineData: { mimeType: 'video/mp4', data: 'b2ZmbGluZQ==' },
+      fileData: { mimeType: 'video/mp4', fileUri: 'https://example.test/v1beta/files/video' },
+      videoMetadata: { startOffset: '1s', endOffset: '3s', fps: 2 },
+      mediaProcessing: 'STATIC',
+      fileName: 'fixture.mp4',
+      fileExpires: 1234,
+      tokenCount: 42,
+    }
+    const expected = {
+      fileData: part.fileData,
+      videoMetadata: part.videoMetadata,
+      mediaProcessing: 'STATIC',
+    }
+    expect(apiPart(part)).toEqual(expected)
+    expect(part.inlineData?.data).toBe('b2ZmbGluZQ==')
+    const turns: Turn[] = [{ id: 'turn', role: 'user', parts: [part], created: 0 }]
+    expect(buildRequest(defaultSettings(model), model, turns).contents[0]?.parts).toEqual([
+      expected,
+    ])
+    const omni: Model = {
+      ...model,
+      capabilities: { secondary_capability_code_14: true, capability_code_1: true },
+    }
+    expect(buildRequest(defaultSettings(omni), omni, turns).contents[0]?.parts).toEqual([
+      { fileData: part.fileData },
+    ])
+    expect(
+      apiPart({
+        inlineData: { mimeType: 'text/plain', data: 'b2ZmbGluZQ==' },
+        fileName: 'note.txt',
+      }),
+    ).toEqual({
+      inlineData: { mimeType: 'text/plain', data: 'b2ZmbGluZQ==', displayName: 'note.txt' },
+    })
+    expect(protocolSupports('gemini', 'videoSettings')).toBe(true)
+    for (const protocol of [
+      'openai-chat',
+      'openai-responses',
+      'anthropic',
+      'openai-images',
+      'interactions',
+    ] as const)
+      expect(protocolSupports(protocol, 'videoSettings')).toBe(false)
   })
 
   it('decodes real server tool steps and terminal interaction usage', () => {

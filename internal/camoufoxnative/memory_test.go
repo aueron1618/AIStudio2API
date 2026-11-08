@@ -19,8 +19,11 @@ func TestHeadlessMemoryPreferences(t *testing.T) {
 	if prefs["dom.ipc.processPrelaunch.enabled"] != false || prefs["browser.cache.memory.capacity"] != 16*1024 {
 		t.Fatal("headless workers need bounded idle resources")
 	}
-	if prefs["layout.frame_rate"] != interactiveFrameRate || prefs["gfx.display.frame-rate-divisor"] != idleFrameDivisor {
-		t.Fatal("headless workers lost idle division or interactive Run frame rate")
+	if prefs["layout.frame_rate"] != interactiveFrameRate || prefs["gfx.display.frame-rate-divisor"] != 1 {
+		t.Fatal("headless workers must start at the interactive frame rate before becoming idle")
+	}
+	if !strings.Contains(idleRenderingExpression, "frame-rate-divisor', "+strconv.Itoa(idleFrameDivisor)) || !strings.Contains(idleRenderingExpression, "renderLayers = false") {
+		t.Fatal("ready headless workers must retain idle division and stop rendering")
 	}
 	for key, value := range prefs {
 		if _, err := firefoxPrefLiteral(value); err != nil {
@@ -315,11 +318,21 @@ var originalOpen = XMLHttpRequest.prototype.open;
 	runProtectedJS(t, vm, `request = page.requests.get('test'); default_MakerSuite.proof({}, 'wrong').catch(() => {})`)
 }
 
+func TestGeneratePromptHeadPreservesCharacterBoundaries(t *testing.T) {
+	for _, text := range []string{"", "short", strings.Repeat("a", promptFillLimit), strings.Repeat("\U00020000", promptFillLimit+1)} {
+		want := []rune(text)
+		want = want[:min(len(want), promptFillLimit)]
+		if got := promptHead(text); got != string(want) {
+			t.Fatalf("prompt head = %d bytes, want %d complete characters", len(got), len(want))
+		}
+	}
+}
+
 func TestGeneratePumpSharesByteBoundsAndReleasesCallbacks(t *testing.T) {
 	vm := mockProtectedXHR(t)
 	armGeneratedTestXHR(t, vm, false)
 	runProtectedJS(t, vm, `xhr = new XMLHttpRequest(); xhr.open('POST', '`+aiStudioOrigin+generateContentPath+`'); xhr.send('old-body')`)
-	if !runProtectedJS(t, vm, `xhr.body === '["!fresh"]' && page.digest === 'binding' && JSON.parse(messages[0]).sent`).Bool {
+	if !runProtectedJS(t, vm, `request.started && xhr.body === '["!fresh"]' && page.digest === 'binding' && JSON.parse(messages[0]).sent`).Bool {
 		t.Fatal("Run did not use the page proof or replace the wire proof field")
 	}
 	input := strings.Repeat("a\u4e2d\U00020000", 10*protectedChunkBytes/8)
@@ -363,6 +376,9 @@ func TestGeneratePumpSharesByteBoundsAndReleasesCallbacks(t *testing.T) {
 func TestGenerateCancelDoesNotRearmLateProof(t *testing.T) {
 	vm := mockProtectedXHR(t)
 	armGeneratedTestXHR(t, vm, true)
+	if !runProtectedJS(t, vm, `request.started === true && request.xhr === null`).Bool {
+		t.Fatal("Run must be marked as started while its page proof is still pending")
+	}
 	runProtectedJS(t, vm, "("+protectedCancel+")(page, 'test')")
 	runProtectedJS(t, vm, `finishProof('!late')`)
 	if !runProtectedJS(t, vm, `default_MakerSuite.proof === page.original && XMLHttpRequest.prototype.open === originalOpen && request.xhr === null && page.requests.size === 0 && messages.length === 1 && JSON.parse(messages[0]).error.includes('AbortError')`).Bool {

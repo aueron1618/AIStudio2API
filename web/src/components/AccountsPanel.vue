@@ -996,7 +996,7 @@ async function refreshAllAccounts(): Promise<void> {
     class="flex min-h-0 flex-1 flex-col overflow-auto max-md:[scrollbar-gutter:stable] md:overflow-hidden"
   >
     <header
-      class="flex flex-wrap items-center gap-3 border-b border-line px-4 py-4 md:px-[max(2rem,calc((100%_-_var(--container-6xl))/2_+_2rem))]"
+      class="page-x flex flex-wrap items-center gap-3 border-b border-line py-4 md:overflow-hidden md:[scrollbar-gutter:stable]"
     >
       <div class="min-w-0 flex-[1_1_16rem]">
         <h2 class="text-xl font-semibold text-white">{{ t('section.accounts.title') }}</h2>
@@ -1066,7 +1066,9 @@ async function refreshAllAccounts(): Promise<void> {
         </DropdownMenuRoot>
       </div>
     </header>
-    <div class="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col p-4 md:p-8">
+    <div
+      class="page-x flex min-h-0 flex-1 flex-col py-4 md:overflow-hidden md:py-8 md:[scrollbar-gutter:stable]"
+    >
       <div
         v-if="tasksError"
         role="alert"
@@ -1208,7 +1210,7 @@ async function refreshAllAccounts(): Promise<void> {
           type="search"
           :aria-label="t('accounts.search')"
           :placeholder="t('accounts.search')"
-          class="min-w-0 flex-[1_1_12rem] rounded-md border border-line bg-canvas px-3 py-1.5 text-sm text-white focus:border-blue-500 focus:outline-none"
+          class="min-w-0 flex-[1_1_12rem] rounded-md border border-line bg-canvas px-3 py-1 text-sm text-white focus:border-blue-500 focus:outline-none"
         />
         <UiSelect
           v-model="selectedState"

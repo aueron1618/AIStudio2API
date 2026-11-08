@@ -163,13 +163,14 @@ func newRuntime(ctx context.Context, options Options, prelude string) (*Runtime,
 			runtime.Close()
 			return nil, err
 		}
-		collected := make(chan struct{})
+		// Wait for initialization to leave the JS stack, not for the following GC.
+		initialized := make(chan struct{})
 		if loop.post(func() {
+			close(initialized)
 			runtime.agent.cx.GC()
-			close(collected)
 		}) {
 			select {
-			case <-collected:
+			case <-initialized:
 			case <-ctx.Done():
 				runtime.Close()
 				return nil, ctx.Err()

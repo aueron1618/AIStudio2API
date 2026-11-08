@@ -234,28 +234,40 @@ func TestCollectGenerateEventsCancellationDuringDrain(t *testing.T) {
 	}
 }
 
-func TestGenerateWithRetryPlanLimitFallbackOnce(t *testing.T) {
-	limit := &aistudio.RPCError{StatusCode: 429, Message: "You have reached your usage limit, resets in 1 hour"}
-	service := retryTestRuntime(t, func(context.Context, aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
-		return nil, limit
-	})
-	ctx, cancel := context.WithTimeout(aistudio.ContextWithChannel(t.Context(), aistudio.ChannelPlayground), 5*time.Second)
-	defer cancel()
-	request := aistudio.GenerateRequest{ID: "plan-limit-test", Model: "shared"}
-	service.requests.start(request, cancel)
-	var fallbacks []bool
-	acquire := func(ctx context.Context, selection aistudio.AccountSelection, planLimitFallback bool) (*aistudio.AccountLease, error) {
-		fallbacks = append(fallbacks, planLimitFallback)
-		return service.pool.AcquireFor(ctx, selection)
+func TestGenerateWithRetryQuotaFallbackOnce(t *testing.T) {
+	for _, channel := range []aistudio.Channel{aistudio.ChannelPlayground, aistudio.ChannelBuild} {
+		for name, message := range map[string]string{
+			"plan":  "You have reached your usage limit, resets in 1 hour",
+			"daily": "You have reached your usage limit; try again tomorrow",
+		} {
+			t.Run(string(channel)+"/"+name, func(t *testing.T) {
+				limit := &aistudio.RPCError{StatusCode: 429, Message: message}
+				service := retryTestRuntime(t, func(context.Context, aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
+					return nil, limit
+				})
+				ctx, cancel := context.WithTimeout(aistudio.ContextWithChannel(t.Context(), channel), 5*time.Second)
+				defer cancel()
+				request := aistudio.GenerateRequest{ID: "quota-limit-test", Model: "shared"}
+				service.requests.start(request, cancel)
+				var fallbacks []bool
+				acquire := func(ctx context.Context, selection aistudio.AccountSelection, quotaFallback bool) (*aistudio.AccountLease, error) {
+					fallbacks = append(fallbacks, quotaFallback)
+					if selection.Channel != channel {
+						return nil, errors.New("quota fallback lost the fixed URL channel")
+					}
+					return service.pool.AcquireFor(ctx, selection)
+				}
+				events := make(chan aistudio.Event)
+				go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
+				for range events {
+				}
+				if !slices.Equal(fallbacks, []bool{true, false}) {
+					t.Fatalf("quota failure enabled another fallback or changed channels: %v", fallbacks)
+				}
+				assertRetryLeasesReleased(t, service)
+			})
+		}
 	}
-	events := make(chan aistudio.Event)
-	go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
-	for range events {
-	}
-	if !slices.Equal(fallbacks, []bool{true, false}) {
-		t.Fatalf("plan-limit failure enabled another fallback: %v", fallbacks)
-	}
-	assertRetryLeasesReleased(t, service)
 }
 
 func TestForwardTerminalErrorFinishesRequestBeforeDrain(t *testing.T) {

@@ -351,14 +351,78 @@ func TestChatLegacyFunctions(t *testing.T) {
 	}
 }
 
+func TestContentPolicyErrorsHTTP(t *testing.T) {
+	row := make([]any, 8)
+	row[0], row[3], row[5], row[6], row[7] = "models/test", "Test", 32768, 4096, []string{"generateContent"}
+	catalog, err := json.Marshal([]any{[]any{row}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, protocol := range []string{"chat", "anthropic", "responses", "gemini"} {
+		for _, test := range []struct {
+			name            string
+			stream, partial bool
+		}{
+			{name: "unary"},
+			{name: "stream-before-output", stream: true},
+			{name: "stream-after-output", stream: true, partial: true},
+		} {
+			t.Run(protocol+"/"+test.name, func(t *testing.T) {
+				var frames []any
+				if test.partial {
+					content := []any{[]any{[]any{nil, "partial-answer"}}, "model"}
+					frames = append(frames, []any{[]any{[]any{content, nil}}})
+				}
+				var usage any
+				if !test.stream || test.partial {
+					usage = []any{10, 4, 14}
+				}
+				frames = append(frames, []any{[]any{[]any{[]any{[]any{}, "model"}, 3}}, nil, usage})
+				output, err := json.Marshal([]any{frames})
+				if err != nil {
+					t.Fatal(err)
+				}
+				transport := &protocolFixtureTransport{catalog: catalog, output: output, requests: make(chan aistudio.GenerateRequest, 1)}
+				client := aistudio.NewClient(aistudio.ClientOptions{Transport: transport, Protected: transport, Pages: transport})
+				var path, body string
+				switch protocol {
+				case "chat":
+					path, body = "/v1/chat/completions", fmt.Sprintf(`{"model":"test","messages":[{"role":"user","content":"hi"}],"stream":%t}`, test.stream)
+				case "anthropic":
+					path, body = "/v1/messages", fmt.Sprintf(`{"model":"test","max_tokens":1024,"messages":[{"role":"user","content":"hi"}],"stream":%t}`, test.stream)
+				case "responses":
+					path, body = "/v1/responses", fmt.Sprintf(`{"model":"test","input":"hi","stream":%t}`, test.stream)
+				case "gemini":
+					path, body = "/v1beta/models/test:generateContent", `{"contents":[{"parts":[{"text":"hi"}]}]}`
+					if test.stream {
+						path = "/v1beta/models/test:streamGenerateContent?alt=sse"
+					}
+				}
+				response, raw := protocolTestRequest(t, newProtocolTestServer(t, generationTestService{generate: client.Generate}), http.MethodPost, path, body, nil)
+				wantStatus := http.StatusBadGateway
+				if test.partial {
+					wantStatus = http.StatusOK
+					if !bytes.Contains(raw, []byte("partial-answer")) {
+						t.Fatalf("stream lost its earlier output: %s", raw)
+					}
+					_ = sseTestPayloads(t, raw)
+				}
+				if response.StatusCode != wantStatus || !bytes.Contains(raw, []byte(`"error"`)) || !bytes.Contains(raw, []byte("SAFETY")) {
+					t.Fatalf("policy failure status=%d want=%d: %s", response.StatusCode, wantStatus, raw)
+				}
+			})
+		}
+	}
+}
+
 func TestProtocolFinishReasons(t *testing.T) {
-	// The protocol layer receives the decoder's canonical lowercase reasons.
-	// Malformed responses are not safety refusals.
+	// Content-policy reasons arrive as errors, while provider-specific reasons
+	// retain their refusal mapping. Malformed responses are not safety refusals.
 	for _, tc := range []struct {
 		reasons, chat, anthropic, incomplete string
 	}{
 		{"stop,unspecified,other,language,malformed_function_call,unexpected_tool_call,too_many_tool_calls,image_other,no_image,missing_thought_signature,malformed_response,unrecognized_name,pause_turn", "stop", "end_turn", ""},
-		{"safety,recitation,blocklist,prohibited_content,spii,image_safety,image_prohibited_content,image_recitation,provider_42", "content_filter", "refusal", "content_filter"},
+		{"provider_42", "content_filter", "refusal", "content_filter"},
 		{"max_tokens,continuation", "length", "max_tokens", "max_output_tokens"},
 		{"stop_sequence", "stop", "stop_sequence", ""},
 	} {
