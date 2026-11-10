@@ -32,6 +32,15 @@ describe('merged translation catalogs', () => {
       'settings.antiTruncationHelp',
       'settings.autoContinuationHelp',
       'settings.apiKeyAccountsHelp',
+      'settings.accountOrderHelp',
+      'settings.pathPickerTitle',
+      'settings.workerCapacityHelp',
+      'models.accountsHelp',
+      'accounts.drainingRequests',
+      'accounts.syncing',
+      'access.client.geminiCli',
+      'access.client.hermes',
+      'access.client.magpie',
       'settings.firstEventHedgeModelsHelp',
       'settings.environmentLocked',
       'settings.stripThoughtSignaturesHelp',
@@ -45,6 +54,9 @@ describe('merged translation catalogs', () => {
     for (const path of ['/v1', '/build/v1', '/v1beta']) {
       expect(catalog.messages['settings.fixedChannelHelp']).toContain(path)
     }
+    expect(catalog.messages['settings.workerCapacityHelp']).toContain('0/1/1/1')
+    expect(catalog.messages['settings.warmWorkerLimitHelp']).toContain('30')
+    expect(catalog.messages['settings.buildLegacyNotice']).toContain('/build/v1')
   })
 
   it.each(Object.entries(server))(

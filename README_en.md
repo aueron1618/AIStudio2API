@@ -75,7 +75,7 @@ The three projects connect to AI Studio, the Gemini web app and Antigravity, and
 - **High-Concurrency Multi-Account**: Detects Free, Pro, Ultra, and Plus benefits and routes across accounts by the live model catalog with round-robin or fill-first
 - **Low-Memory WAA Backends**: In-process SpiderMonkey generates official proofs by default without a resident browser. Workers start on demand and close after 30 idle seconds with the default zero warm pool. Camoufox remains optional; existing `WAA_BACKEND=go` settings migrate to `spidermonkey`
 - **Four API Protocols**: OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Gemini GenerateContent; Responses supports context compaction through `/v1/responses/compact` and `compaction` and `compaction_trigger` input items, and Anthropic Messages supports `context_management` tool-result and thinking clearing and threshold compaction
-- **Client Access Page**: The Access page generates configuration and request examples by client, capability, and endpoint for Claude Code, Codex, OpenCode, pi, omp, dsh, OpenClaw, Hermes, and other clients. Client tools run on the client; search and media support depend on the selected model, protocol, and channel
+- **Client Access Page**: The Access page generates configuration and request examples by client, capability, and endpoint for Claude Code, Codex, OpenCode, pi, omp, dsh, OpenClaw, Hermes, Magpie, and other clients. Client tools run on the client; search and media support depend on the selected model, protocol, and channel
 
 ## Features
 
@@ -682,9 +682,11 @@ Process environment variables override the same keys in `.env`, and those settin
 | `WARM_STARTUP_CONCURRENCY` | `1` | Concurrent Worker cold starts, for both backends |
 | `PER_ACCOUNT_CONCURRENCY` | `1` | Concurrent requests allowed per account |
 | `ROUTING_STRATEGY` | `round-robin` | `round-robin` rotates accounts; `fill-first` reuses the first available account |
+| `ACCOUNT_ORDER` | empty | Accounts `fill-first` uses in order, comma-separated; unlisted accounts follow in ID order. Also adjustable on the Settings page, applied on save |
 | `UPSTREAM_CHANNELS` | `playground,build` | Retain fixed channel URLs; generation availability and errors of the legacy Build proxy are determined upstream |
 | `MODEL_MAPPING` | empty | Client model names mapped to catalog models, each item `alias:model ID`, comma separated |
 | `MODEL_CHANNELS` | empty | Limit a model to one channel, each item `model ID:playground` or `model ID:build`; also selectable in model details on the Model catalog page, applied on save |
+| `MODEL_ACCOUNTS` | empty | Accounts a model may use, each item `model ID:account\|account`; models not listed can use every account. Also selectable in model details on the Model catalog page, applied on save |
 | `BUILD_NATIVE_NONSTREAM` | `true` | Prefer native Build unary calls for automatically routed non-streaming requests; fixed URL routing takes priority |
 | `NONSTREAM_KEEPALIVE` | `true` | When a non-streaming request waits longer than 10 seconds, return 200 first and write a newline every 10 seconds until the JSON body, so reverse proxies such as Cloudflare keep the connection open; errors after that point come back as the protocol error body |
 | `FAKE_STREAM` | `false` | Streaming requests get the full result as a non-streaming generation, retry on another account if it fails midway, then stream it in the protocol format; heartbeats continue while waiting |

@@ -2,6 +2,7 @@ package camoufoxnative
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"testing"
@@ -10,6 +11,49 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func TestSetCookiesDeletesOnlyExpiredTargets(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client, peer, commands := newBiDiTestClient(t)
+		worker := &Worker{client: client}
+		cookies := []storageCookie{
+			{Name: "sid", Domain: ".google.com", Path: "/", Expires: 0},
+			{Name: "partitioned", Domain: ".google.com", Path: "/session", Expires: 1, PartitionKey: "https://aistudio.google.com"},
+			{Name: "fresh", Value: "fixture", Domain: ".google.com", Path: "/", Expires: -1, Secure: true},
+		}
+		encoded, err := json.Marshal(cookies)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- worker.SetCookies(t.Context(), encoded) }()
+		for index, cookie := range cookies {
+			command := requireBiDiTestCommand(t, commands)
+			if index < 2 {
+				filter, _ := command.Params["filter"].(map[string]any)
+				if command.Method != "storage.deleteCookies" || len(filter) != 3 ||
+					filter["name"] != cookie.Name || filter["domain"] != cookie.Domain || filter["path"] != cookie.Path {
+					t.Fatalf("expired cookie did not produce a targeted deletion: %+v", command)
+				}
+			} else {
+				value, _ := command.Params["cookie"].(map[string]any)
+				if command.Method != "storage.setCookie" || value["name"] != cookie.Name {
+					t.Fatalf("valid cookie was deleted: %+v", command)
+				}
+			}
+			partition, _ := command.Params["partition"].(map[string]any)
+			if cookie.PartitionKey != "" && (partition["type"] != "storageKey" || partition["sourceOrigin"] != cookie.PartitionKey) ||
+				cookie.PartitionKey == "" && partition != nil {
+				t.Fatal("cookie update lost its partition boundary")
+			}
+			writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": command.ID, "result": map[string]any{}})
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		requireNoBiDiTestCommand(t, commands)
+	})
+}
 
 func writeProtectedTestMessage(t *testing.T, peer *websocket.Conn, requestID, value string) {
 	t.Helper()

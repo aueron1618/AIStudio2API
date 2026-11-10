@@ -94,6 +94,47 @@ func TestEnvironmentKeepsSavedFile(t *testing.T) {
 	}
 }
 
+func TestWebAPIKeyOverridesEnvironment(t *testing.T) {
+	for _, test := range []struct {
+		name, key, afterRestart string
+	}{
+		{"unchanged", "env-key", "next-env-key"},
+		{"replace", "web-key,second-key", "web-key,second-key"},
+		{"clear", "", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeTestEnv(t, "PROXY_API_KEY=file-key\nROUTING_STRATEGY=fill-first\n")
+			t.Setenv("PROXY_API_KEY", "env-key")
+			t.Setenv("ROUTING_STRATEGY", "round-robin")
+			saved, err := Load(path)
+			if err != nil || saved.ProxyAPIKey != "env-key" || slices.Contains(saved.Environment, "PROXY_API_KEY") {
+				t.Fatal("environment key did not remain an editable bootstrap value", err)
+			}
+			updated := saved
+			updated.ProxyAPIKey, updated.RoutingStrategy = test.key, "fill-first"
+			updated = updated.KeepEnvironment(saved)
+			if updated.ProxyAPIKey != test.key || updated.RoutingStrategy != "round-robin" {
+				t.Fatal("key edit was rejected or unrelated environment lock was removed")
+			}
+			if err := updated.Save(path); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PROXY_API_KEY", "next-env-key")
+			loaded, err := Load(path)
+			if err != nil || loaded.ProxyAPIKey != test.afterRestart {
+				t.Fatal("saved web key was replaced by the process environment", err)
+			}
+			if err := loaded.Save(path); err != nil {
+				t.Fatal(err)
+			}
+			reloaded, err := Load(path)
+			if err != nil || reloaded.ProxyAPIKey != test.afterRestart {
+				t.Fatal("a later settings save lost the web key override", err)
+			}
+		})
+	}
+}
+
 // TestAPIKeyAccounts 核对绑定解析、已删除 key 的处理与无效绑定拒绝加载且错误不含 key。
 func TestAPIKeyAccounts(t *testing.T) {
 	accounts, err := ParseAPIKeyAccounts(" sk-a : a@example.com | b@example.com , sk:b:c@example.com", "sk-a, sk:b")
@@ -256,17 +297,17 @@ func TestUpgradeEnvPreservesCustomCapacityAndCommentedFiles(t *testing.T) {
 func TestLocalAndNewKeysKeepEnvironmentAndSavedValues(t *testing.T) {
 	file := map[string]string{
 		"STRIP_THOUGHT_SIGNATURES": "true",
-		"ANTI_TRUNCATION": "true", "AUTO_CONTINUATION": "false", "CONTINUATION_REWRITE": "true",
+		"ANTI_TRUNCATION":          "true", "AUTO_CONTINUATION": "false", "CONTINUATION_REWRITE": "true",
 		"WARM_WORKER_LIMIT": "2", "MAX_ACTIVE_WORKERS": "4", "WARM_STARTUP_CONCURRENCY": "3", "PER_ACCOUNT_CONCURRENCY": "2",
 		"UPSTREAM_CHANNELS": "build", "WAA_BACKEND": WAABackendCamoufox, "FIRST_EVENT_HEDGE": FirstEventHedgeOff,
-		"FIRST_EVENT_HEDGE_MODELS": "file-model", "PROXY_API_KEY": "file-key", "API_KEY_ACCOUNTS": "file-key:a@example.com",
+		"FIRST_EVENT_HEDGE_MODELS": "file-model", "API_KEY_ACCOUNTS": "file-key:a@example.com",
 	}
 	environment := map[string]string{
 		"STRIP_THOUGHT_SIGNATURES": "false",
-		"ANTI_TRUNCATION": "false", "AUTO_CONTINUATION": "true", "CONTINUATION_REWRITE": "false",
+		"ANTI_TRUNCATION":          "false", "AUTO_CONTINUATION": "true", "CONTINUATION_REWRITE": "false",
 		"WARM_WORKER_LIMIT": "0", "MAX_ACTIVE_WORKERS": "1", "WARM_STARTUP_CONCURRENCY": "1", "PER_ACCOUNT_CONCURRENCY": "1",
 		"UPSTREAM_CHANNELS": "playground,build", "WAA_BACKEND": "go", "FIRST_EVENT_HEDGE": FirstEventHedgeAuto,
-		"FIRST_EVENT_HEDGE_MODELS": "env-model", "PROXY_API_KEY": "env-key", "API_KEY_ACCOUNTS": "env-key:b@example.com",
+		"FIRST_EVENT_HEDGE_MODELS": "env-model", "API_KEY_ACCOUNTS": "env-key:b@example.com",
 	}
 	path := writeTestEnv(t, "")
 	if err := writeEnv(path, file); err != nil {

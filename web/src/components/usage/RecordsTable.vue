@@ -290,13 +290,17 @@ function stateClass(record: UsageRecord): string {
         <table class="w-full text-left text-xs" :aria-labelledby="`${id}-title`">
           <thead class="text-gray-500">
             <tr>
-              <th scope="col" class="px-4 py-2 font-normal">{{ t('usage.time') }}</th>
-              <th scope="col" class="px-4 py-2 font-normal">{{ t('usage.result') }}</th>
+              <th scope="col" class="px-4 py-2 font-normal whitespace-nowrap">
+                {{ t('usage.time') }}
+              </th>
+              <th scope="col" class="px-4 py-2 font-normal whitespace-nowrap">
+                {{ t('usage.result') }}
+              </th>
               <th
                 v-for="column in allColumns.filter((item) => visible.includes(item))"
                 :key="column"
                 scope="col"
-                class="px-4 py-2 font-normal"
+                class="px-4 py-2 font-normal whitespace-nowrap"
                 :class="[
                   ['tokens', 'queue', 'attempts'].includes(column) ? 'text-right' : '',
                   secondary.includes(column) ? secondaryClass : '',

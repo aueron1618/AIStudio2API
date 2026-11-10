@@ -43,6 +43,8 @@ type generationResult struct {
 	// interactionID 与 accountID 是 agent 后台任务的上游 interaction ID 与所属账户
 	interactionID string
 	accountID     string
+	// environmentID 是 agent 交互返回的远程环境 ID
+	environmentID string
 }
 
 func (result *generationResult) apply(event aistudio.Event) error {
@@ -103,6 +105,7 @@ func (result *generationResult) apply(event aistudio.Event) error {
 		}
 	case aistudio.EventFinish:
 		result.finishReason = event.FinishReason
+		result.environmentID = event.EnvironmentID
 		result.finishMessage = event.FinishMessage
 		result.stopSequence = event.StopSequence
 		result.safetyRatings = event.SafetyRatings

@@ -173,7 +173,7 @@ type remoteTarget struct {
 	renewals []remoteRenewal
 }
 
-// Save 上传认证状态与隔离登录指纹
+// Save 上传清洗后的 Cookie 与隔离登录指纹，OAuth 材料与 DBSC 会话登记只留在来源机器
 func (target *remoteTarget) Save(
 	ctx context.Context,
 	accountConfig aistudio.AccountConfig,

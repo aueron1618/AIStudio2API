@@ -45,7 +45,7 @@ type generationAdmin interface {
 	StopService(context.Context) (api.AdminStatus, error)
 	RuntimeConfig(context.Context) (api.RuntimeConfig, error)
 	UpdateRuntimeConfig(context.Context, api.RuntimeConfig) (api.RuntimeConfig, error)
-	applyRoutingConfig(strategy, channels string)
+	applyRoutingConfig(config.Config)
 	Cooldowns(context.Context) ([]api.AdminCooldown, error)
 	ClearCooldown(ctx context.Context, accountID string, scope string) error
 	Requests(context.Context) ([]api.AdminRequest, error)
@@ -613,6 +613,7 @@ func (generation *runtimeGeneration) applyLiveConfig(value api.RuntimeConfig, ac
 	cfg := &generation.config
 	cfg.ProxyAPIKey, cfg.APIKeyAccounts = value.APIKey, value.APIKeyAccounts
 	cfg.RoutingStrategy, cfg.ModelChannels = value.RoutingStrategy, value.ModelChannels
+	cfg.AccountOrder, cfg.ModelAccounts = value.AccountOrder, value.ModelAccounts
 	cfg.WarmWorkerLimit, cfg.MaxActiveWorkers = value.WarmWorkerLimit, value.MaxActiveWorkers
 	cfg.WarmStartupConcurrency, cfg.PerAccountConcurrency = value.WarmStartupConcurrency, value.PerAccountConcurrency
 	cfg.AntiTruncation = value.AntiTruncation
@@ -620,7 +621,7 @@ func (generation *runtimeGeneration) applyLiveConfig(value api.RuntimeConfig, ac
 		cfg.AutoContinuation = *value.AutoContinuation
 	}
 	cfg.RequestBodyLog, cfg.LogFile, cfg.LogMaxTotalMB = value.RequestBodyLog, value.LogFile, value.LogMaxTotalMB
-	generation.admin.applyRoutingConfig(cfg.RoutingStrategy, cfg.ModelChannels)
+	generation.admin.applyRoutingConfig(*cfg)
 	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts, active))
 	generation.service.ApplyCapacity(cfg.WarmWorkerLimit, cfg.MaxActiveWorkers, cfg.WarmStartupConcurrency, cfg.PerAccountConcurrency)
 	generation.service.SetAutoContinuation(cfg.AutoContinuation)

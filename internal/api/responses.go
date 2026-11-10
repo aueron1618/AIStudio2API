@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
@@ -1702,7 +1703,7 @@ func (o *responsesOutput) annotate(message map[string]any, final bool) []any {
 // responsesStreamWriter 把规范事件写成 Responses 流；w 为空时只累积输出项，非流式响应由它生成与流式相同的 output
 type responsesStreamWriter struct {
 	w        http.ResponseWriter
-	sequence int
+	sequence atomic.Int64
 	id       string
 	created  int64
 	request  responsesRequest
@@ -1748,6 +1749,7 @@ func (s *server) streamResponses(w http.ResponseWriter, r *http.Request, request
 	if err := writer.emit("response.in_progress", map[string]any{"response": responseShell(id, created, "in_progress", request)}); err != nil {
 		return
 	}
+	stream.setFrame(writer.progressFrame)
 	_ = s.streamOutput(r.Context(), writer, prepared, events, compaction, func(err error) bool { return shouldWriteRequestError(r, err) })
 }
 
@@ -1791,6 +1793,13 @@ func (s *server) streamOutput(ctx context.Context, writer *responsesStreamWriter
 	return nil
 }
 
+// progressFrame 返回流静默时重发的 response.in_progress 帧，序号与其他事件连续递增，外壳不回显请求字段
+func (writer *responsesStreamWriter) progressFrame() string {
+	shell := responseShell(writer.id, writer.created, "in_progress", responsesRequest{Model: writer.request.Model})
+	data, _ := json.Marshal(officialOrder("responses", map[string]any{"type": "response.in_progress", "sequence_number": writer.sequence.Add(1) - 1, "response": shell}))
+	return "event: response.in_progress\ndata: " + string(data) + "\n\n"
+}
+
 func (writer *responsesStreamWriter) emit(eventType string, payload map[string]any) error {
 	if item, ok := payload["item"].(map[string]any); ok {
 		payload["item"] = responseIncludeView(item, writer.request.Include)
@@ -1799,12 +1808,17 @@ func (writer *responsesStreamWriter) emit(eventType string, payload map[string]a
 		payload["response"] = responseView(response, writer.request.Include)
 	}
 	payload["type"] = eventType
-	payload["sequence_number"] = writer.sequence
-	writer.sequence++
-	if writer.w == nil {
-		return nil
+	write := func(w http.ResponseWriter) error {
+		payload["sequence_number"] = writer.sequence.Add(1) - 1
+		if w == nil {
+			return nil
+		}
+		return writeSSE(w, eventType, officialOrder("responses", payload))
 	}
-	return writeSSE(writer.w, eventType, officialOrder("responses", payload))
+	if stream, ok := writer.w.(*streamKeepalive); ok {
+		return stream.writeFrame(write)
+	}
+	return write(writer.w)
 }
 
 // index 返回输出项在响应 output 中的位置

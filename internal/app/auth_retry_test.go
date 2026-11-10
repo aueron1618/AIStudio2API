@@ -7,14 +7,121 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
+	"github.com/Mag1cFall/AIStudio2API/internal/chromeauth"
 )
 
 type accountLoginFunc func(context.Context, aistudio.IsolatedLoginRequest) (aistudio.IsolatedLoginResult, error)
 
 func (login accountLoginFunc) Login(ctx context.Context, request aistudio.IsolatedLoginRequest) (aistudio.IsolatedLoginResult, error) {
 	return login(ctx, request)
+}
+
+func TestCookieAuthUserUpdatePreservesConcurrentEnabledChange(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "enable", true: "disable"}[enabled], func(t *testing.T) {
+			admin := newAccountTestAdmin(t)
+			state, err := aistudio.ParseCookieImport("SAPISID=fixture; __Secure-1PAPISID=one; __Secure-3PAPISID=three")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := aistudio.DefaultAccountConfig("user@example.test")
+			cfg.AuthUser, cfg.Enabled = 2, enabled
+			created, err := admin.addAccount(t.Context(), cfg, state, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease, err := admin.pool.AcquireAccount(t.Context(), created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Release()
+			err = setCookieAuthUser(lease, 0, func(account *aistudio.Account, pending aistudio.AccountConfig) (*accountWorkerUpdate, error) {
+				if _, err := admin.pool.SetEnabled(account.ID, !enabled); err != nil {
+					return nil, err
+				}
+				return admin.workers.prepareUpdate(account, pending)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			current := lease.Config()
+			loaded, err := admin.store.Load()
+			if err != nil || len(loaded) != 1 || current.AuthUser != 0 || current.Enabled == enabled || loaded[0].Config != current {
+				t.Fatalf("authentication update overwrote the concurrent enabled change: config=%+v error=%v", current, err)
+			}
+			if enabled && lease.Account().State != aistudio.AccountDisabled {
+				t.Fatal("disabled account became schedulable after authentication update")
+			}
+		})
+	}
+}
+
+func TestBoundCookieRefreshUpdatesStoredStateAndWorker(t *testing.T) {
+	admin := newAccountTestAdmin(t)
+	state, err := aistudio.ParseCookieImport("SAPISID=fixture; __Secure-1PAPISID=one; __Secure-3PAPISID=three; __Secure-1PSIDRTS=old-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Cookies[3].Expires = float64(time.Now().Add(30 * time.Second).Unix())
+	session := &aistudio.BoundSession{ID: "fixture-session", RefreshURL: "https://accounts.google.com/RotateBoundCookies", Credentials: []string{"__Secure-1PSIDRTS"}}
+	state.SetAuthExtension(aistudio.AuthExtension{
+		Source: aistudio.AuthSource{Browser: "chrome", Email: "user@example.test"},
+		OAuth:  &aistudio.ChromeOAuthMaterial{RefreshToken: "fixture-oauth"}, Bound: session,
+	})
+	created, err := admin.addAccount(t.Context(), aistudio.DefaultAccountConfig("user@example.test"), state, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := admin.pool.AcquireAccount(t.Context(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	ctx := aistudio.ContextWithAccountLease(t.Context(), lease)
+	headers := []string{"__Secure-1PSIDRTS=fresh-fixture; Domain=.google.com; Path=/; Secure; Max-Age=3600"}
+	rotations, merges := 0, 0
+	refresher := &authRuntimeRefresher{
+		pool: admin.pool,
+		rotate: func(_ context.Context, _ aistudio.StorageState, extension aistudio.AuthExtension, _ string) ([]string, error) {
+			rotations++
+			if extension.Bound == nil || extension.Bound.ID != session.ID || extension.OAuth == nil {
+				t.Fatal("DBSC refresh lost the source authentication material")
+			}
+			return headers, nil
+		},
+		mergeWorker: func(_ context.Context, id string, values []string, address string) error {
+			merges++
+			if id != created.ID || !reflect.DeepEqual(values, headers) || address != session.RefreshURL {
+				t.Fatal("DBSC refresh did not update the same account's Worker")
+			}
+			return nil
+		},
+	}
+	for range 2 {
+		if err := refresher.ensureBound(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored, err := aistudio.LoadStorageState(lease.Account().StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, _ := stored.CookieValue("__Secure-1PSIDRTS", session.RefreshURL, time.Now())
+	if value != "fresh-fixture" || rotations != 1 || merges != 1 {
+		t.Fatalf("DBSC refresh was lost or repeated: rotations=%d merges=%d", rotations, merges)
+	}
+	refresher.rotate = func(context.Context, aistudio.StorageState, aistudio.AuthExtension, string) ([]string, error) {
+		return nil, chromeauth.ErrBoundSessionRejected
+	}
+	if err := lease.SaveStorageState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := refresher.ensureBound(ctx); !aistudio.DefinitiveAuthenticationFailure(err) || merges != 1 {
+		t.Fatalf("rejected DBSC session was not classified as authentication failure: %v", err)
+	}
 }
 
 // TestAuthRefreshWithoutExtension 验证缺少续签扩展的账户从当前 Chrome 导入同一邮箱并写回扩展，重新登录保留扩展
@@ -99,12 +206,14 @@ func TestKeepAuthExtensionWithNativeSource(t *testing.T) {
 			previous := aistudio.AuthExtension{Source: aistudio.AuthSource{Browser: "chrome", Root: "fixture-root", Profile: "Default", Email: "user@example.test"}}
 			if test.oldOAuth {
 				previous.OAuth = &aistudio.ChromeOAuthMaterial{GaiaID: "fixture-gaia", RefreshToken: "old-fixture"}
+				previous.Bound = &aistudio.BoundSession{ID: "old-session"}
 			}
 			current := aistudio.StorageState{}
 			current.SetAuthExtension(previous)
 			fresh := aistudio.AuthExtension{Source: aistudio.AuthSource{Browser: "camoufox", Email: test.email}}
 			if test.freshOAuth {
 				fresh.OAuth = &aistudio.ChromeOAuthMaterial{GaiaID: "fixture-gaia", RefreshToken: "fresh-fixture"}
+				fresh.Bound = &aistudio.BoundSession{ID: "fresh-session"}
 			}
 			next := aistudio.StorageState{Cookies: []aistudio.StateCookie{{Name: "SAPISID", Value: "new-fixture", Domain: ".google.com"}}}
 			next.SetAuthExtension(fresh)
@@ -115,9 +224,13 @@ func TestKeepAuthExtensionWithNativeSource(t *testing.T) {
 			want := fresh
 			if test.wantOld {
 				want = previous
+				want.Bound = nil
 			}
 			if err != nil || !exists || kept.Source != want.Source || (kept.OAuth != nil) != (want.OAuth != nil) || kept.OAuth != nil && kept.OAuth.RefreshToken != want.OAuth.RefreshToken {
 				t.Fatal("relogin did not preserve the correct account's renewal source and material")
+			}
+			if !reflect.DeepEqual(kept.Bound, want.Bound) {
+				t.Fatal("relogin reused an old DBSC session or dropped a fresh session")
 			}
 			if next.Cookies[0].Value != "new-fixture" {
 				t.Fatal("preserving renewal material replaced fresh cookies")

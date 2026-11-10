@@ -36,7 +36,7 @@
 - **多账户高并发**: 识别 Free、Pro、Ultra 与 Plus 权益，按实时模型目录在账户间轮询或优先复用
 - **低内存与两种 WAA 后端**: 默认由进程内 SpiderMonkey 生成官方 proof，不常驻浏览器；零热池按需启动，空闲 30 秒后释放 Worker。仍可选择 Camoufox 后端，旧配置 `WAA_BACKEND=go` 自动迁移为 `spidermonkey`
 - **四套 API 协议**: OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 Gemini GenerateContent；Responses 支持 `/v1/responses/compact` 与 `compaction`、`compaction_trigger` 输入项的上下文压缩，Anthropic Messages 支持 `context_management` 的工具结果与思考清理和阈值压缩
-- **客户端接入页**: “接入”页按客户端、能力和端点生成配置与调用示例，支持 Claude Code、Codex、OpenCode、pi、omp、dsh、OpenClaw、Hermes 等客户端；工具调用由客户端执行，搜索与媒体支持取决于所选模型、协议和通道
+- **客户端接入页**: “接入”页按客户端、能力和端点生成配置与调用示例，支持 Claude Code、Codex、OpenCode、pi、omp、dsh、OpenClaw、Hermes、Magpie 等客户端；工具调用由客户端执行，搜索与媒体支持取决于所选模型、协议和通道
 
 ## 特性
 
@@ -643,9 +643,11 @@ cp .env.example .env
 | `WARM_STARTUP_CONCURRENCY` | `1` | 同时冷启动的 Worker 数，两种后端均适用 |
 | `PER_ACCOUNT_CONCURRENCY` | `1` | 单账号同时执行的请求数 |
 | `ROUTING_STRATEGY` | `round-robin` | `round-robin` 轮询；`fill-first` 账号粘性优先 |
+| `ACCOUNT_ORDER` | 空 | `fill-first` 依次使用的账户，逗号分隔，未列出的账户排在后面并按 ID 排序；也可在设置页调整，保存后立即生效 |
 | `UPSTREAM_CHANNELS` | `playground,build` | 保留固定通道入口；`build` 为旧代理通道，生成可用性与错误以上游为准 |
 | `MODEL_MAPPING` | 空 | 客户端模型名到目录模型的映射，每项写成 `别名:模型 ID`，逗号分隔多项 |
 | `MODEL_CHANNELS` | 空 | 限定模型只走一个通道，每项写成 `模型 ID:playground` 或 `模型 ID:build`；也可在“模型目录”的模型详情中选择，保存后立即生效 |
+| `MODEL_ACCOUNTS` | 空 | 模型可用的账户，每项写成 `模型 ID:账户\|账户`，未列出的模型可用全部账户；也可在“模型目录”的模型详情中勾选，保存后立即生效 |
 | `BUILD_NATIVE_NONSTREAM` | `true` | 自动路由的非流式请求优先使用 Build 原生调用；URL 固定通道优先 |
 | `NONSTREAM_KEEPALIVE` | `true` | 非流式请求等待结果超过 10 秒时先返回 200，之后每 10 秒写出一个换行直到写出 JSON 正文，经 Cloudflare 等反向代理时连接不会因长时间无数据断开；此后才出现的错误以协议错误正文返回 |
 | `FAKE_STREAM` | `false` | 流式请求先按非流式取得完整结果再按流式格式输出，中途失败时换号重发，等待期间照常发送心跳 |

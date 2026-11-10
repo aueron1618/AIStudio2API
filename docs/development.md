@@ -212,7 +212,7 @@ Camoufox 按以下顺序定位，只使用发行目录 `application.ini` 中 `Ve
 3. 可执行文件旁的同名目录
 4. Windows 本机 Camoufox 缓存
 
-版本不符的候选被跳过；都没有时自动下载当前平台的固定版本。下载失败时，错误给出发行包地址与 `runtime/camoufox/` 的绝对路径，手动下载解压到该目录后不再下载。Camoufox 在报告 WebDriver BiDi 端点前退出时，错误带上退出码与 Camoufox 最后 20 行输出；输出含 `cannot open shared object file` 时，错误只写明退出码与 `ldd` 查到的 Camoufox 及其依赖库缺少的全部系统库，Debian 系发行版另附安装这些库与 Xvfb 的 `apt-get satisfy` 命令。没有 `DISPLAY` 且找不到 Xvfb 时，错误同样附上该命令。
+版本不符的候选被跳过；都没有时自动下载当前平台的固定版本。下载失败时，错误给出发行包地址与 `runtime/camoufox/` 的绝对路径，手动下载解压到该目录后不再下载。`CAMOUFOX_PATH` 以外的 Camoufox 在 Windows 上使用前删除 `fonts` 目录中 Twemoji 以外的字体。Camoufox 在报告 WebDriver BiDi 端点前退出时，错误带上退出码与 Camoufox 最后 20 行输出；输出含 `cannot open shared object file` 时，错误只写明退出码与 `ldd` 查到的 Camoufox 及其依赖库缺少的全部系统库，Debian 系发行版另附安装这些库与 Xvfb 的 `apt-get satisfy` 命令。没有 `DISPLAY` 且找不到 Xvfb 时，错误同样附上该命令。
 
 日常启动只需运行二进制或 Go 入口，再从管理页面启动生成服务：
 
@@ -334,9 +334,11 @@ Camoufox 由 Go 通过 WebDriver BiDi 直接管理。启动数据面时，服务
 | `WARM_STARTUP_CONCURRENCY` | 同时冷启动的 Worker 数，两种后端均适用 | `1` |
 | `PER_ACCOUNT_CONCURRENCY` | 单账号同时执行的请求数 | `1` |
 | `ROUTING_STRATEGY` | 账户轮询 `round-robin` 或粘性优先 `fill-first` | `round-robin` |
+| `ACCOUNT_ORDER` | 逗号分隔的账户 ID，`fill-first` 依次使用并按此顺序预热，未列出的账户排在后面并按 ID 排序；保存后立即生效 | 空 |
 | `UPSTREAM_CHANNELS` | 保留 Playground 与 Build 固定入口，旧 Build 代理的可用性以上游为准 | `playground,build` |
 | `MODEL_MAPPING` | 逗号分隔，每项以最后一个 `:` 分成别名与模型 ID | 空 |
 | `MODEL_CHANNELS` | 逗号分隔，每项以最后一个 `:` 分成模型 ID 与通道 `playground` 或 `build`；保存后立即生效 | 空 |
+| `MODEL_ACCOUNTS` | 逗号分隔，每项以最后一个 `:` 分成模型 ID 与以 `\|` 分隔的账户 ID，该模型的自动选号只在这些账户中进行并与 `API_KEY_ACCOUNTS` 取交集，指定账户与绑定文件的请求不受限，未列出的模型可用全部账户；保存后立即生效 | 空 |
 | `BUILD_NATIVE_NONSTREAM` | 自动路由的非流式请求优先 Build 原生单次调用；固定 URL 优先 | `true` |
 | `NONSTREAM_KEEPALIVE` | 非流式请求等待结果期间每 10 秒写出一个换行 | `true` |
 | `FAKE_STREAM` | 流式请求按非流式取得完整结果后再以流式输出 | `false` |
@@ -433,7 +435,7 @@ POST /api/control/start
 | 文件 | 内容 | 生命周期 |
 | --- | --- | --- |
 | `account.json` | label、enabled、proxy、locale、timezone、auth_user | 创建或编辑账户时写入 |
-| `storage-state.json` | Cookie、localStorage 与可选 Chrome OAuth/DBSC 续签材料 | 合并 `Set-Cookie` 或认证续签后原子写回 |
+| `storage-state.json` | Cookie、localStorage 与可选 Chrome OAuth/DBSC 续签材料 | 合并 `Set-Cookie`、DBSC 刷新或认证续签后原子写回 |
 | `camoufox-fingerprint.json` | 账户固定的浏览器指纹、语言与时区 | 首次运行生成，空值、窗口几何、字体、语音、WebGL 与媒体设备按 Camoufox 官方启动器规则规范化；重新登录和 WAA runtime 继续复用 |
 | `runtime-state.json` | 权益等级、模型资格、冷却与资源账户绑定 | 权益同步、首次模型结果或资源变化后原子写回 |
 | `catalog.json` | 最近一次同步的 ListModels 响应与 Build 模型目录 | 目录刷新成功且内容变化后原子写回 |
@@ -445,7 +447,7 @@ POST /api/control/start
 
 账户更新以 `account.json` 原子写入为持久提交点。`internal/app` 先准备 `pending`（尚未提交）的固定出口，关闭旧 Worker并锁定该账户的 Worker 配置，再调用 `AccountLease.SaveConfig`；保存成功后依次提交 Worker 配置与固定出口。准备、关闭或保存失败时丢弃 pending 更新；保存后的租约释放错误原样返回，已发布配置继续生效。
 
-账户调度先按每个账户实时 `ListModels` 返回的模型和方法筛选，再选择已经就绪且有并发槽位的 Worker。`ROUTING_STRATEGY=round-robin` 在每个模型的候选账户间轮询，按上次选中的账户 ID 继续；`fill-first` 持续使用 ID 排序后的首个可用账户，并在并发槽位用满、冷却或不可用时切换。带内联附件的生成请求优先选择已上传其中最多附件的账户，该账户并发槽位用满、冷却或不可用时再按策略选择。生成请求的候选为账户与 `UPSTREAM_CHANNELS` 所启用通道的组合：Playground 按 `ListModels` 与权益判断，Build 按 Build 代理返回的 Gemini API 模型目录与相同权益判断；轮询与粘性在组合间按账户 ID 与通道顺序推进，冷却按通道记录（Build 为 `build:<模型>`），一个通道冷却后同一账户可由另一通道继续，全部启用通道都冷却时按下文的冷却规则排队或返回 429；`-build` 模型只使用 Build 写代码助手通道 `assistant`，冷却 scope 为 `-build` 模型 ID；通道规格见 [Build 通道](build.md)。并发槽位、Worker 与 WAA 按账户共享；计数、Live、转录与 Drive 文件引用使用 Playground RPC。每个账号最多同时租用 `PER_ACCOUNT_CONCURRENCY` 个请求槽位；首个请求获取跨进程文件锁，最后一个请求释放。WAA proof 由账号 worker 串行生成，`GenerateContent` 由同一 Camoufox 页面并发发送并流式读取（`WAA_BACKEND=spidermonkey` 时由账户 runtime 的 Go HTTP 发送）；请求前使用 Worker 当前 Cookie 生成 Authorization，响应头到达后把 Worker Cookie 原子同步到账户持久状态。其他 MakerSuite HTTP 响应的 Cookie 在响应头到达时与最新账户状态合并。未固定账户的请求遇到可重试的 401、403、404、429、5xx、收到响应前的连接断开或单账户初始化超时时，可以在首个上游语义事件前继续切换尚未尝试的同能力账户；Drive 引用随需要临时复制到生成账户，显式账户和视频任务保持账户绑定。Chrome 导入状态保留续签材料，HTTP `401` 时在同一固定出口续签一次、重建该账户 WAA runtime 并重放请求。
+账户调度先按每个账户实时 `ListModels` 返回的模型和方法筛选，再选择已经就绪且有并发槽位的 Worker。`ROUTING_STRATEGY=round-robin` 在每个模型的候选账户间轮询，按上次选中的账户 ID 继续；`fill-first` 持续使用 `ACCOUNT_ORDER` 顺序（未列出的账户在后并按 ID 排序）中的首个可用账户，并在并发槽位用满、冷却或不可用时切换。带内联附件的生成请求优先选择已上传其中最多附件的账户，该账户并发槽位用满、冷却或不可用时再按策略选择。生成请求的候选为账户与 `UPSTREAM_CHANNELS` 所启用通道的组合：Playground 按 `ListModels` 与权益判断，Build 按 Build 代理返回的 Gemini API 模型目录与相同权益判断；轮询与粘性在组合间按账户 ID 与通道顺序推进，冷却按通道记录（Build 为 `build:<模型>`），一个通道冷却后同一账户可由另一通道继续，全部启用通道都冷却时按下文的冷却规则排队或返回 429；`-build` 模型只使用 Build 写代码助手通道 `assistant`，冷却 scope 为 `-build` 模型 ID；通道规格见 [Build 通道](build.md)。并发槽位、Worker 与 WAA 按账户共享；计数、Live、转录与 Drive 文件引用使用 Playground RPC。每个账号最多同时租用 `PER_ACCOUNT_CONCURRENCY` 个请求槽位；首个请求获取跨进程文件锁，最后一个请求释放。WAA proof 由账号 worker 串行生成，`GenerateContent` 由同一 Camoufox 页面并发发送并流式读取（`WAA_BACKEND=spidermonkey` 时由账户 runtime 的 Go HTTP 发送）；请求前使用 Worker 当前 Cookie 生成 Authorization，响应头到达后把 Worker Cookie 原子同步到账户持久状态。其他 MakerSuite HTTP 响应的 Cookie 在响应头到达时与最新账户状态合并。未固定账户的请求遇到可重试的 401、403、404、429、5xx、收到响应前的连接断开或单账户初始化超时时，可以在首个上游语义事件前继续切换尚未尝试的同能力账户；Drive 引用随需要临时复制到生成账户，显式账户和视频任务保持账户绑定。Chrome 导入状态保留续签材料，HTTP `401` 时在同一固定出口续签一次、重建该账户 WAA runtime 并重放请求。
 
 Worker 容量由热池目标、活动上限和单账户并发共同约束。冷启动、临时目录页和页面重载都先预留活动与启动槽位；容量已满时，无论热池是否为零，都先关闭可回收的空闲旧 Worker 再启动替代者，不以 pending Worker 绕过峰值限制。旧实例优先选择对请求模型处于冷却的账户，再按最久未用排序。同账户重载需要独占维护窗口；只有预留了额外活动槽位才允许新旧页面短暂共存，否则先关闭旧页再重建，不侵入其他在途请求。失败、取消和关闭会释放新资源，关闭失败的实体继续占用预算并由后续 Stop 重试。
 
@@ -459,11 +461,11 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。冷�
 
 非流式请求在提交结果前收齐上游事件，首事件之后的传输中断也可丢弃部分结果并换号；普通协议或参数错误不因此重试，流式响应在首事件后不重放。清理中断流时仍监听请求取消，避免一直占用账户槽位。公开 `/v1` 固定 Playground，`/build/v1` 固定 Build；换号、额度冷却与非流式优先选项均不能越过 URL 指定的通道，未固定通道的内部调用和 `/v1beta` 才保留原组合调度。
 
-额度冷却按 `quota_unit`、`quota_limit`、`quota_metric`、错误文案依次判定周期。明确的每日限额在美国太平洋时间次日零点恢复；分钟限额按有效的 `window_start_time` 恢复；通用 429 冷却一分钟。没有明确恢复时间的 `reached your usage limit` 套餐限额在同一 scope 按 1、5、15、30、60 分钟递增；活跃冷却不因并发失败而延长，过期后再次失败才升档，成功清除后从 1 分钟重新开始。`RetryInfo` 与 `Retry-After` 提供的重试时间优先。所有额度项均为 `limit: 0` 时标为无配额，仍遵守明确的周期或重试时间。全局范围由额度元数据确认，其余错误只冷却失败模型或能力 scope；正文后的额度错误与 Live 会话错误使用同一规则。冷却日志只记录实际生效的期限，陈旧代际或检查时间不覆盖新状态。HTTP 错误响应按可重试时刻返回 `Retry-After`，Gemini 同时返回 `RetryInfo`。
+额度冷却按 `quota_unit`、`quota_limit`、`quota_metric`、错误文案依次判定周期。明确的每日限额在美国太平洋时间次日零点恢复；分钟限额按有效的 `window_start_time` 恢复；通用 429 冷却一分钟。没有明确恢复时间的 `reached your usage limit` 套餐限额或 Build 写代码助手步骤的每用户额度标记，在同一 scope 按 1、5、15、30、60 分钟递增；活跃冷却不因并发失败而延长，过期后再次失败才升档，成功清除后从 1 分钟重新开始。`RetryInfo` 与 `Retry-After` 提供的重试时间优先。所有额度项均为 `limit: 0` 时标为无配额，仍遵守明确的周期或重试时间。全局范围由额度元数据确认，其余错误只冷却失败模型或能力 scope；正文后的额度错误与 Live 会话错误使用同一规则。冷却日志只记录实际生效的期限，陈旧代际或检查时间不覆盖新状态。HTTP 错误响应按可重试时刻返回 `Retry-After`，Gemini 同时返回 `RetryInfo`。
 
 套餐错误若明确写出 `resets in 10 hours, 2 minutes`，按该恢复时刻冷却；订阅模型遇到额度错误时后台刷新权益与目录，同一账户每分钟最多一次。管理端可手动清除某一 scope 的冷却；每日恢复仍按美国太平洋时间计算。
 
-全部候选账户都在冷却且最早恢复晚于 1 分钟时，套餐限额与每日限额冷却中的账户仍接收请求：上游按每个请求判定是否放行，用尽后较短的请求仍可能完成；同一请求再收到这两种限额拒绝时按上游原因冷却并返回该 429，不再换账户。此回退仍受 URL 固定通道与 API key 账户绑定约束。
+全部候选账户都在冷却且最早恢复晚于 1 分钟时，套餐限额与每日限额冷却中的账户仍接收请求：上游按每个请求判定是否放行，用尽后较短的请求仍可能完成；同一请求再收到这两种限额拒绝时按上游原因冷却并返回该 429，不再换账户。此回退仍受 URL 固定通道、API key 与模型账户绑定约束。
 
 账户状态：
 
@@ -525,7 +527,7 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。冷�
 | 登录与刷新 | `POST /api/accounts/{id}/login`、`POST /api/accounts/{id}/refresh`、`GET /api/login-view/{view}`（WebSocket） |
 | 远程配对 | `GET /api/pairing`、`POST /api/pairing`、`POST /api/pairing/accounts`、`PUT /api/pairing/accounts/{account}/cookies` |
 | 生成服务 | `POST /api/control/start`、`POST /api/control/stop` |
-| 配置 | `GET /api/config`、`PUT /api/config` |
+| 配置 | `GET /api/config`、`PUT /api/config`、`GET /api/paths?path=`（列出服务所在机器的目录与账户状态文件 `storage-state.json`，`path=roots` 列出文件系统根） |
 | 冷却与请求 | `GET /api/cooldowns`、`GET /api/requests`、`POST /api/requests/{id}/cancel` |
 | 用量与正文 | `GET /api/usage`、`GET /api/usage/records`、`GET /api/usage/records.csv`、`GET /api/requests/{id}/body` |
 | 日志与事件 | `DELETE /api/logs`、`GET /api/events` |

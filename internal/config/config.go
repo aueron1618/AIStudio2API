@@ -15,6 +15,7 @@ import (
 )
 
 const (
+	webAPIKeyOverride         = "PROXY_API_KEY_WEB_OVERRIDE"
 	defaultAuthStates         = "auth"
 	defaultListenAddr         = "127.0.0.1:2048"
 	defaultPreviewListenAddr  = "127.0.0.1:2050"
@@ -40,9 +41,11 @@ var configKeys = [...]string{
 	"WARM_STARTUP_CONCURRENCY",
 	"PER_ACCOUNT_CONCURRENCY",
 	"ROUTING_STRATEGY",
+	"ACCOUNT_ORDER",
 	"UPSTREAM_CHANNELS",
 	"MODEL_MAPPING",
 	"MODEL_CHANNELS",
+	"MODEL_ACCOUNTS",
 	"WAA_BACKEND",
 	"MEDIA_OUTPUT",
 	"MEDIA_BASE_URL",
@@ -138,15 +141,17 @@ type Config struct {
 	WarmStartupConcurrency int
 	PerAccountConcurrency  int
 	RoutingStrategy        string
+	AccountOrder           string
 	UpstreamChannels       []string
 	ModelMapping           string
 	ModelChannels          string
+	ModelAccounts          string
 	WAABackend             string
 	MediaOutput            string
 	MediaBaseURL           string
 	// Invalid 是加载时取值无效、改用默认值的配置项
 	Invalid []InvalidValue
-	// Environment 是取自进程环境变量、覆盖 .env 的配置键
+	// Environment 是由进程环境变量锁定的配置键，API 密钥仍允许在 Web 中修改
 	Environment []string
 }
 
@@ -232,8 +237,10 @@ var configSetters = map[string]func(*Config, string) error{
 	"PROXY_API_KEY":            textSetter(func(c *Config) *string { return &c.ProxyAPIKey }, strings.TrimSpace),
 	"PROXY":                    textSetter(func(c *Config) *string { return &c.Proxy }, strings.TrimSpace),
 	"ROUTING_STRATEGY":         textSetter(func(c *Config) *string { return &c.RoutingStrategy }, strings.TrimSpace),
+	"ACCOUNT_ORDER":            textSetter(func(c *Config) *string { return &c.AccountOrder }, strings.TrimSpace),
 	"MODEL_MAPPING":            textSetter(func(c *Config) *string { return &c.ModelMapping }, strings.TrimSpace),
 	"MODEL_CHANNELS":           textSetter(func(c *Config) *string { return &c.ModelChannels }, strings.TrimSpace),
+	"MODEL_ACCOUNTS":           textSetter(func(c *Config) *string { return &c.ModelAccounts }, strings.TrimSpace),
 	"API_KEY_ACCOUNTS":         textSetter(func(c *Config) *string { return &c.APIKeyAccounts }, strings.TrimSpace),
 	"WARM_WORKER_LIMIT": func(c *Config, value string) error {
 		parsed, err := strconv.Atoi(strings.TrimSpace(value))
@@ -382,6 +389,10 @@ var configChecks = []configCheck{
 		_, err := ParseModelChannels(c.ModelChannels)
 		return err
 	}},
+	{[]string{"MODEL_ACCOUNTS"}, func(c Config) error {
+		_, err := ParseModelAccounts(c.ModelAccounts)
+		return err
+	}},
 	{[]string{"API_KEY_ACCOUNTS"}, func(c Config) error {
 		_, err := ParseAPIKeyAccounts(c.APIKeyAccounts, c.ProxyAPIKey)
 		return err
@@ -433,9 +444,14 @@ func Load(path string) (Config, error) {
 	}
 	cfg := Default()
 	for _, key := range configKeys {
+		if key == "PROXY_API_KEY" && values[webAPIKeyOverride] == "true" {
+			continue
+		}
 		if value, ok := os.LookupEnv(key); ok {
 			values[key] = value
-			cfg.Environment = append(cfg.Environment, key)
+			if key != "PROXY_API_KEY" {
+				cfg.Environment = append(cfg.Environment, key)
+			}
 		}
 	}
 	for _, key := range configKeys {
@@ -498,7 +514,7 @@ func upgradeEnv(values map[string]string) bool {
 		changed = true
 	}
 	for key, value := range values {
-		if key != "UPSTREAM_CHANNELS" && isDefault(key, value) {
+		if key != "UPSTREAM_CHANNELS" && key != webAPIKeyOverride && isDefault(key, value) {
 			delete(values, key)
 			changed = true
 		}
@@ -510,10 +526,12 @@ func upgradeEnv(values map[string]string) bool {
 func (c Config) KeepEnvironment(saved Config) Config {
 	values := saved.envValues()
 	for _, key := range saved.Environment {
-		configSetters[key](&c, values[key])
+		if key != "PROXY_API_KEY" {
+			configSetters[key](&c, values[key])
+		}
 	}
-	c.Environment = saved.Environment
-	c.Invalid = slices.DeleteFunc(slices.Clone(saved.Invalid), func(item InvalidValue) bool { return !slices.Contains(saved.Environment, item.Key) })
+	c.Environment = slices.DeleteFunc(slices.Clone(saved.Environment), func(key string) bool { return key == "PROXY_API_KEY" })
+	c.Invalid = slices.DeleteFunc(slices.Clone(saved.Invalid), func(item InvalidValue) bool { return !slices.Contains(c.Environment, item.Key) })
 	return c
 }
 
@@ -553,9 +571,11 @@ func (c Config) envValues() map[string]string {
 		"WARM_STARTUP_CONCURRENCY": strconv.Itoa(c.WarmStartupConcurrency),
 		"PER_ACCOUNT_CONCURRENCY":  strconv.Itoa(c.PerAccountConcurrency),
 		"ROUTING_STRATEGY":         c.RoutingStrategy,
+		"ACCOUNT_ORDER":            c.AccountOrder,
 		"UPSTREAM_CHANNELS":        strings.Join(c.UpstreamChannels, ","),
 		"MODEL_MAPPING":            c.ModelMapping,
 		"MODEL_CHANNELS":           c.ModelChannels,
+		"MODEL_ACCOUNTS":           c.ModelAccounts,
 		"API_KEY_ACCOUNTS":         c.APIKeyAccounts,
 		"WAA_BACKEND":              c.WAABackend,
 		"MEDIA_OUTPUT":             c.MediaOutput,
@@ -572,12 +592,22 @@ func (c Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
+	currentKey := saved["PROXY_API_KEY"]
+	if saved[webAPIKeyOverride] != "true" {
+		if value, ok := os.LookupEnv("PROXY_API_KEY"); ok {
+			currentKey = value
+		}
+	}
 	values, defaults := c.envValues(), Default().envValues()
 	file := make(map[string]string)
+	// Record an explicit key change atomically, including clearing the key.
+	if saved[webAPIKeyOverride] == "true" || c.ProxyAPIKey != strings.TrimSpace(currentKey) {
+		file[webAPIKeyOverride] = "true"
+	}
 	for _, key := range configKeys {
 		_, inFile := saved[key]
 		switch {
-		case slices.Contains(c.Environment, key):
+		case key != "PROXY_API_KEY" && slices.Contains(c.Environment, key):
 			if inFile {
 				file[key] = saved[key]
 			}
@@ -591,7 +621,7 @@ func (c Config) Save(path string) error {
 // writeEnv 按 configKeys 的顺序原子写入 values 中的键
 func writeEnv(path string, values map[string]string) error {
 	var output strings.Builder
-	for _, key := range configKeys {
+	for _, key := range append(slices.Clone(configKeys[:]), webAPIKeyOverride) {
 		if value, ok := values[key]; ok {
 			output.WriteString(key)
 			output.WriteByte('=')
@@ -658,12 +688,7 @@ func ParseAPIKeyAccounts(value string, apiKeys string) (map[string][]string, err
 		}
 		index := strings.LastIndexByte(item, ':')
 		key := strings.TrimSpace(item[:max(index, 0)])
-		var ids []string
-		for id := range strings.SplitSeq(item[index+1:], "|") {
-			if id = strings.TrimSpace(id); id != "" {
-				ids = append(ids, id)
-			}
-		}
+		ids := accountIDs(item[index+1:])
 		if index < 0 || key == "" || len(ids) == 0 {
 			return nil, fmt.Errorf("API_KEY_ACCOUNTS 的每一项写成 API key:账户|账户")
 		}
@@ -676,6 +701,39 @@ func ParseAPIKeyAccounts(value string, apiKeys string) (map[string][]string, err
 		accounts[key] = ids
 	}
 	return accounts, nil
+}
+
+// ParseModelAccounts 解析逗号分隔的 模型 ID:账户|账户，以最后一个冒号分隔，返回每个模型可用的账户 ID
+func ParseModelAccounts(value string) (map[string][]string, error) {
+	accounts := make(map[string][]string)
+	for item := range strings.SplitSeq(value, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		index := strings.LastIndexByte(item, ':')
+		model := strings.TrimPrefix(strings.TrimSpace(item[:max(index, 0)]), "models/")
+		ids := accountIDs(item[index+1:])
+		if index < 0 || model == "" || len(ids) == 0 {
+			return nil, fmt.Errorf("MODEL_ACCOUNTS 的每一项写成 模型 ID:账户|账户，%q 不符合", item)
+		}
+		if _, exists := accounts[model]; exists {
+			return nil, fmt.Errorf("MODEL_ACCOUNTS 中模型 %s 重复", model)
+		}
+		accounts[model] = ids
+	}
+	return accounts, nil
+}
+
+// accountIDs 返回以 | 分隔、去掉空白的各个账户 ID
+func accountIDs(value string) []string {
+	var ids []string
+	for id := range strings.SplitSeq(value, "|") {
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // APIKeys 返回 PROXY_API_KEY 中逗号分隔、去掉空白的各个 key
@@ -819,7 +877,7 @@ func readEnvFile(path string) (map[string]string, bool, error) {
 			return nil, false, fmt.Errorf("%s:%d 缺少等号", path, lineNumber)
 		}
 		key = strings.TrimSpace(key)
-		if !slices.Contains(configKeys[:], key) {
+		if key != webAPIKeyOverride && !slices.Contains(configKeys[:], key) {
 			continue
 		}
 		value, err := parseEnvValue(strings.TrimSpace(raw))

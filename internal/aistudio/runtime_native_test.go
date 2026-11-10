@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 )
@@ -56,6 +57,41 @@ func (runtime *nativeRuntimeFixture) SendProtected(context.Context, string, http
 
 func (*nativeRuntimeFixture) StorageCookies(context.Context) ([]byte, error) {
 	return []byte("[]"), nil
+}
+
+func (*nativeRuntimeFixture) MergeSetCookieHeaders(ctx context.Context, _ []string, _ string) error {
+	return ctx.Err()
+}
+
+func TestCamoufoxCookieUpdatesRetainDeletionCommands(t *testing.T) {
+	now := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
+	headers := []string{
+		"sid=; Domain=.google.com; Path=/; Max-Age=0",
+		"expired=; Domain=.google.com; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+		"session=fresh; Domain=.google.com; Path=/; Secure",
+		"persistent=fresh; Domain=.google.com; Path=/; Max-Age=3600; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+	}
+	const source = "https://accounts.google.com/RotateBoundCookies"
+	var updates StorageState
+	if err := updates.mergeSetCookieHeaders(headers, source, now, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(updates.Cookies) != 4 || updates.Cookies[0].Name != "sid" || updates.Cookies[0].Expires != 0 ||
+		updates.Cookies[1].Name != "expired" || updates.Cookies[1].Expires != 0 || updates.Cookies[2].Expires != -1 ||
+		updates.Cookies[3].Expires != float64(now.Add(time.Hour).Unix()) {
+		t.Fatalf("browser updates lost deletion or Max-Age precedence: %+v", updates.Cookies)
+	}
+	saved := StorageState{Cookies: []StateCookie{
+		{Name: "sid", Value: "old", Domain: ".google.com", Path: "/", Expires: -1},
+		{Name: "expired", Value: "old", Domain: ".google.com", Path: "/", Expires: -1},
+		{Name: "unrelated", Value: "keep", Domain: ".google.com", Path: "/", Expires: -1},
+	}}
+	if err := saved.MergeSetCookieHeaders(headers, source, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.Cookies) != 3 || saved.Cookies[0].Name != "unrelated" || saved.Cookies[0].Value != "keep" {
+		t.Fatal("persisted state retained deleted cookies or dropped unrelated cookies")
+	}
 }
 
 func (runtime *nativeRuntimeFixture) State() camoufoxnative.State {
