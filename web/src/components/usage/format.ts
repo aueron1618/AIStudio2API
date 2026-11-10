@@ -37,6 +37,7 @@ interface Formats {
   percent: Record<0 | 1, Intl.NumberFormat>
   millisecond: Intl.NumberFormat
   second: Intl.NumberFormat
+  preciseSecond: Intl.NumberFormat
   minutes: Intl.DateTimeFormat
   seconds: Intl.DateTimeFormat
   clock: Intl.DateTimeFormat
@@ -74,6 +75,11 @@ function formatsFor(locale: string): Formats {
       style: 'unit',
       unit: 'second',
       maximumFractionDigits: 1,
+    }),
+    preciseSecond: new Intl.NumberFormat(locale, {
+      style: 'unit',
+      unit: 'second',
+      maximumFractionDigits: 2,
     }),
     minutes: new Intl.DateTimeFormat(locale, dateTime),
     seconds: new Intl.DateTimeFormat(locale, { ...dateTime, second: '2-digit' }),
@@ -117,6 +123,11 @@ export function useUsageFormat() {
       milliseconds < 60_000 ? milliseconds / 1000 : Math.round(milliseconds / 1000),
     )
   }
+
+  const durationSeconds = (milliseconds: number): string =>
+    Number.isFinite(milliseconds) && milliseconds > 0
+      ? formats.value.preciseSecond.format(milliseconds / 1000)
+      : '—'
 
   // Format the stored log result without recomputing its output or timing basis.
   const outputSpeed = (value: number | null | undefined): string =>
@@ -168,6 +179,7 @@ export function useUsageFormat() {
     usd,
     percent,
     duration,
+    durationSeconds,
     outputSpeed,
     dateTime,
     clock,

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -69,6 +70,50 @@ func TestAuthMiddlewarePriorityAndMatching(t *testing.T) {
 				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
 			}
 		})
+	}
+}
+
+func TestDynamicAPIKeysPreserveAdmittedScope(t *testing.T) {
+	keys := "old-key"
+	scope := []string{"a"}
+	bindings := map[string][]string{keys: scope}
+	reads := 0
+	var admitted context.Context
+	handler := apiKeyMiddleware(Config{APIKeys: func() (string, map[string][]string) {
+		reads++
+		return keys, bindings
+	}}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		admitted = r.Context()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer old-key")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || reads != 1 || admitted == nil {
+		t.Fatal("request did not use one authentication snapshot")
+	}
+	keys, bindings = "new-key", map[string][]string{"new-key": {"b"}}
+	scope[0] = "b"
+	pool := aistudio.NewAccountPool([]*aistudio.Account{
+		{ID: "a", Config: aistudio.AccountConfig{Enabled: true}, State: aistudio.AccountReady},
+		{ID: "b", Config: aistudio.AccountConfig{Enabled: true}, State: aistudio.AccountReady},
+	}, 1)
+	pool.SetAPIKeyAccounts(bindings)
+	groups, err := pool.ClassifyCandidates(admitted, aistudio.AccountSelection{}, []string{"a", "b"})
+	if err != nil || !slices.Equal(groups.WarmReady, []string{"a"}) {
+		t.Fatalf("key rotation widened an admitted request's scope: %+v, %v", groups, err)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatal("removed key authenticated another request")
+	}
+	request.Header.Set("Authorization", "Bearer new-key")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatal("new key required recreating the handler")
 	}
 }
 

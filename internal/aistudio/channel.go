@@ -80,6 +80,13 @@ func ContextWithAPIKey(ctx context.Context, key string) context.Context {
 	return context.WithValue(ctx, apiKeyContextKey{}, key)
 }
 
+type accountScopeContextKey struct{}
+
+// ContextWithAccountScope retains the admitted request's maximum account scope across key rotation.
+func ContextWithAccountScope(ctx context.Context, accountIDs []string) context.Context {
+	return context.WithValue(ctx, accountScopeContextKey{}, append([]string{}, accountIDs...))
+}
+
 // SetAPIKeyAccounts 设置各 API key 可用的账户 ID，未列出的 key 可用全部账户
 func (p *AccountPool) SetAPIKeyAccounts(accounts map[string][]string) {
 	p.mu.Lock()
@@ -95,6 +102,9 @@ func (p *AccountPool) scopedSelection(ctx context.Context, selection AccountSele
 	keyScope, keyBound := p.apiKeyAccounts[key]
 	modelScope, modelBound := p.modelAccounts[strings.TrimPrefix(strings.TrimSpace(selection.ModelID), "models/")]
 	p.mu.Unlock()
+	if scope, bound := ctx.Value(accountScopeContextKey{}).([]string); bound {
+		selection.AllowedAccountIDs = narrowedAccounts(selection.AllowedAccountIDs, scope)
+	}
 	if keyBound {
 		selection.AllowedAccountIDs = narrowedAccounts(selection.AllowedAccountIDs, keyScope)
 	}

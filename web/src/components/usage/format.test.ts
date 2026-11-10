@@ -127,3 +127,18 @@ describe('usage output speed', () => {
     expect(useUsageFormat().outputSpeed(record.average_tokens_per_second)).toBe('—')
   })
 })
+
+describe('request duration in seconds', () => {
+  it.each([
+    [250, '0.25 sec'],
+    [1_234, '1.23 sec'],
+    [12_500, '12.5 sec'],
+    [125_250, '125.25 sec'],
+  ] as const)('always formats %s milliseconds in seconds', (value, expected) => {
+    expect(useUsageFormat().durationSeconds(value)).toBe(expected)
+  })
+
+  it.each([0, -1, NaN, Infinity, -Infinity])('keeps unavailable duration %s empty', (value) => {
+    expect(useUsageFormat().durationSeconds(value)).toBe('—')
+  })
+})
