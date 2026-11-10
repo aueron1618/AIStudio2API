@@ -134,7 +134,7 @@ func newRuntimeManager(
 	if err != nil {
 		return nil, err
 	}
-	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts, cfg))
+	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts))
 	manager.current = generation
 	return manager, nil
 }
@@ -221,9 +221,9 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 
 	current = manager.current
 	if manager.liveConfigRevision != liveConfigRevision {
-		next.applyLiveConfig(runtimeConfigDTO(current.config), manager.activeManagement)
+		next.applyLiveConfig(runtimeConfigDTO(current.config))
 	} else {
-		next.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts, manager.activeManagement))
+		next.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts))
 	}
 	manager.current = next
 	manager.mu.Unlock()
@@ -593,12 +593,20 @@ func (manager *runtimeManager) RuntimeConfig(ctx context.Context) (api.RuntimeCo
 	return value, err
 }
 
-// UpdateRuntimeConfig 保存生成服务配置，账户选择策略与容量设置立即作用于当前生成服务
+// apiKeys 在配置保存锁内读取同一版本的密钥和账户绑定
+func (manager *runtimeManager) apiKeys() (string, map[string][]string) {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	cfg := manager.current.config
+	return cfg.ProxyAPIKey, apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts)
+}
+
+// UpdateRuntimeConfig 保存生成服务配置，密钥、账户选择策略与容量设置立即生效
 func (manager *runtimeManager) UpdateRuntimeConfig(ctx context.Context, value api.RuntimeConfig) (api.RuntimeConfig, error) {
 	manager.mu.Lock()
 	updated, err := manager.current.admin.UpdateRuntimeConfig(ctx, value)
 	if err == nil {
-		manager.current.applyLiveConfig(updated, manager.activeManagement)
+		manager.current.applyLiveConfig(updated)
 		manager.liveConfigRevision++
 		updated = manager.decorateRuntimeConfig(updated, manager.current.config)
 		manager.ledger.SetBodyCapture(updated.RequestBodyLog)
@@ -609,7 +617,7 @@ func (manager *runtimeManager) UpdateRuntimeConfig(ctx context.Context, value ap
 }
 
 // applyLiveConfig updates only immediate settings, not the restart-bound snapshot.
-func (generation *runtimeGeneration) applyLiveConfig(value api.RuntimeConfig, active config.Config) {
+func (generation *runtimeGeneration) applyLiveConfig(value api.RuntimeConfig) {
 	cfg := &generation.config
 	cfg.ProxyAPIKey, cfg.APIKeyAccounts = value.APIKey, value.APIKeyAccounts
 	cfg.RoutingStrategy, cfg.ModelChannels = value.RoutingStrategy, value.ModelChannels
@@ -622,7 +630,7 @@ func (generation *runtimeGeneration) applyLiveConfig(value api.RuntimeConfig, ac
 	}
 	cfg.RequestBodyLog, cfg.LogFile, cfg.LogMaxTotalMB = value.RequestBodyLog, value.LogFile, value.LogMaxTotalMB
 	generation.admin.applyRoutingConfig(*cfg)
-	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts, active))
+	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts))
 	generation.service.ApplyCapacity(cfg.WarmWorkerLimit, cfg.MaxActiveWorkers, cfg.WarmStartupConcurrency, cfg.PerAccountConcurrency)
 	generation.service.SetAutoContinuation(cfg.AutoContinuation)
 }
@@ -681,9 +689,9 @@ func (manager *runtimeManager) RecordAccessLog(entry api.AccessLog) {
 func (manager *runtimeManager) decorateRuntimeConfig(value api.RuntimeConfig, active config.Config) api.RuntimeConfig {
 	value.ActiveListenAddr = manager.activeManagement.ListenAddr
 	value.ReservedListenAddr = manager.reservedListenAddr
-	value.ActiveAPIKey = manager.activeManagement.ProxyAPIKey
+	value.ActiveAPIKey = active.ProxyAPIKey
 	value.ActivePreviewListenAddr = manager.previewAddress
-	value.ManagementRestartRequired = value.ListenAddr != value.ActiveListenAddr && value.ListenAddr != value.ReservedListenAddr || value.APIKey != value.ActiveAPIKey ||
+	value.ManagementRestartRequired = value.ListenAddr != value.ActiveListenAddr && value.ListenAddr != value.ReservedListenAddr ||
 		value.PreviewListenAddr != manager.activeManagement.PreviewListenAddr
 	value.ManagementRestartRequired = value.ManagementRestartRequired ||
 		value.AdminAuthEnabled != manager.activeManagement.AdminAuthEnabled ||

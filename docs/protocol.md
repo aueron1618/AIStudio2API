@@ -1448,13 +1448,14 @@ Cookie 导入请求示例（凭据为占位值，`method` 位于每项）：
 | `admin_auth_enabled`、`admin_username` | 保存值；下一管理进程使用 |
 | `admin_password` | 只写；省略时保留现值，下一管理进程使用 |
 | `admin_password_set` | response-only；是否已保存管理密码 |
-| `listen_addr`、`proxy_api_key` | 保存值；下一管理进程使用 |
-| `active_listen_addr`、`active_proxy_api_key` | response-only；当前管理进程固定值 |
-| `management_restart_required` | response-only；保存的监听地址、API key 或管理凭据与当前管理进程不同 |
+| `listen_addr` | 保存值；下一管理进程使用 |
+| `proxy_api_key` | 保存后立即更新公开 API 鉴权，不需要重启 |
+| `active_listen_addr`、`active_proxy_api_key` | response-only；当前生效的监听地址与 API key |
+| `management_restart_required` | response-only；保存的监听地址或管理凭据与当前管理进程不同 |
 | `service_restart_required` | response-only；保存的生成服务配置与当前生成服务实例不同 |
 | `environment`、`invalid` | response-only；环境变量锁定项与普通无效配置提示，锁定项不可从设置页覆盖 |
 
-`PUT /api/config` 原子保存配置。监听地址、API key 认证列表和管理凭据在管理进程重启后生效；Worker 容量、路由策略、账户顺序、模型通道、模型及 API key 账户绑定和抗截断/自动续写开关保存后立即作用于当前生成服务；账户路径、代理、timeout、上游通道范围、WAA 后端与其他标明需重启的选项在 Stop/Start 创建的新实例中生效。保存新的认证列表后，重启前仍被接受的旧 key 沿用原绑定。普通无效配置回退默认值并显示提示，但无效 API key 账户绑定不回退成全账户。启动读取最新配置；加载、校验、创建失败或启用前取消时保留原实例，切换到新实例后由它完成启动或进入 `STOPPED`。
+`PUT /api/config` 原子保存配置。监听地址和管理凭据在管理进程重启后生效；API key 认证列表、Worker 容量、路由策略、账户顺序、模型通道、模型及 API key 账户绑定和抗截断/自动续写开关保存后立即作用于当前生成服务；账户路径、代理、timeout、上游通道范围、WAA 后端与其他标明需重启的选项在 Stop/Start 创建的新实例中生效。密钥轮换后旧 key 不再接受新请求，已通过鉴权的请求保留原账户权限范围。普通无效配置回退默认值并显示提示，但无效 API key 账户绑定不回退成全账户。启动读取最新配置；加载、校验、创建失败或启用前取消时保留原实例，切换到新实例后由它完成启动或进入 `STOPPED`。
 
 `GET /api/events` 建立连接时发送 `status`、`models`、`accounts`、最近 200 条 `log`、`cooldowns` 和按开始时间排序的活动 `request`，同时从独立任务订阅发送当前 `account_tasks` 列表。任务快照可能与其他初始事件交错，客户端不应依赖全局固定顺序。事件的 `data` 形状：
 

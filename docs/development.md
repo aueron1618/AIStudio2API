@@ -382,8 +382,8 @@ Camoufox 由 Go 通过 WebDriver BiDi 直接管理。启动数据面时，服务
 | `log_file`、`log_max_total_mb` | 保存后立即开关日志文件并按新的总量上限轮转 |
 | `admin_auth_enabled`、`admin_username`、`admin_password` | 保存的管理登录配置；省略密码保留现值，密码只接受写入 |
 | `admin_password_set` | 是否已配置管理密码 |
-| `listen_addr`、`proxy_api_key` | 保存的管理监听配置 |
-| `active_listen_addr`、`active_proxy_api_key` | 当前管理进程固定使用的值 |
+| `listen_addr`、`proxy_api_key` | 保存的监听地址和 API 密钥，密钥保存后立即生效 |
+| `active_listen_addr`、`active_proxy_api_key` | 当前生效的监听地址和 API 密钥 |
 | `reserved_listen_addr` | 被 Windows 保留而改用 `active_listen_addr` 的监听地址，没有改用时为空 |
 | `active_proxy` | 当前生成服务使用的出口，代理池为逗号分隔的全部代理，`proxy` 为空时为系统代理，没有系统代理时为空 |
 | `proxy_pool` | 当前生成服务的代理池：每个代理的地址、是否可用、绑定账户数、最近检测时间与最近错误 |

@@ -35,7 +35,7 @@ const { theme: uiTheme } = useTheme()
 const { compact, integer, duration, percent, bucketLabel, dimensionLabel } = useUsageFormat()
 const root = useTemplateRef<HTMLElement>('root')
 // visible 标记已进入视口的图表绘图区
-const visible = reactive({ traffic: false, outcomes: false, latency: false, tokens: false })
+const visible = reactive({ overview: false, latency: false, tokens: false })
 let observer: IntersectionObserver
 
 onMounted(() => {
@@ -55,21 +55,28 @@ const metric = ref<'requests' | 'tokens'>(
   ),
 )
 watch(metric, (value) => writePreference('usage.trafficMetric', value))
+const view = ref<'traffic' | 'outcomes'>(
+  readPreference('usage.overviewMode', 'traffic', (value) =>
+    ['traffic', 'outcomes'].includes(value as string),
+  ),
+)
 
-type ChartKey = 'traffic' | 'outcomes' | 'latency' | 'tokens'
+type ChartKey = 'overview' | 'latency' | 'tokens'
 // hidden 是各图在图例中关闭的序列名
 const hidden = reactive<Record<ChartKey, string[]>>({
-  traffic: [],
-  outcomes: [],
+  overview: [],
   latency: [],
   tokens: [],
 })
 const charts: Record<ChartKey, Readonly<{ value: Exposed | null }>> = {
-  traffic: useTemplateRef<Exposed>('traffic'),
-  outcomes: useTemplateRef<Exposed>('outcomes'),
+  overview: useTemplateRef<Exposed>('overview'),
   latency: useTemplateRef<Exposed>('latency'),
   tokens: useTemplateRef<Exposed>('tokens'),
 }
+watch(view, (value) => {
+  hidden.overview = []
+  writePreference('usage.overviewMode', value)
+})
 
 // Series 是图例需要的序列名与颜色
 interface Series {
@@ -195,44 +202,45 @@ function base(format: (value: number) => string, rightAxis?: (value: number) => 
   }
 }
 
-const trafficOption = computed(() => {
-  const { series, stack_by: stackBy } = props.report
-  const colors = assignColors(series.filter((item) => !item.other).map((item) => item.key))
-  return withLegend('traffic', {
-    ...base(compact),
-    tooltip: {
-      ...base(compact).tooltip,
-      axisPointer: { type: 'shadow' },
-      formatter: (items: TooltipItem[]) => tooltipRows(items, integer, { sort: true, total: true }),
-    },
-    series: series.map((item) => ({
-      name: item.other ? t('usage.other') : dimensionLabel(stackBy, item.key),
-      type: 'bar',
-      stack: 'traffic',
-      barMaxWidth: 22,
-      emphasis: { focus: 'series' },
-      color: item.other ? otherColor : colors.get(item.key)!,
-      data: barData(metric.value === 'tokens' ? item.tokens : item.requests),
-    })),
-  })
-})
-
-const outcomesOption = computed(() => {
-  const buckets = props.report.buckets
+const overviewOption = computed(() => {
+  const { buckets, series, stack_by: stackBy } = props.report
+  const options = base(compact)
+  if (view.value === 'traffic') {
+    const colors = assignColors(series.filter((item) => !item.other).map((item) => item.key))
+    return withLegend('overview', {
+      ...options,
+      tooltip: {
+        ...options.tooltip,
+        axisPointer: { type: 'shadow' },
+        formatter: (items: TooltipItem[]) =>
+          tooltipRows(items, integer, { sort: true, total: true }),
+      },
+      series: series.map((item) => ({
+        name: item.other ? t('usage.other') : dimensionLabel(stackBy, item.key),
+        type: 'bar',
+        stack: 'traffic',
+        barMaxWidth: 22,
+        emphasis: { focus: 'series' },
+        color: item.other ? otherColor : colors.get(item.key)!,
+        data: barData(item[metric.value]),
+      })),
+    })
+  }
   const rateName = t('usage.successRate')
   const rate = (value: number) => percent(value / 100, 0)
-  const bar = (name: string, color: string, data: number[]) => ({
+  const bar = (name: string, color: string, values: number[]) => ({
     name,
     type: 'bar',
     stack: 'outcomes',
     barMaxWidth: 22,
+    emphasis: { focus: 'series' },
     color,
-    data: barData(data),
+    data: barData(values),
   })
-  return withLegend('outcomes', {
-    ...base(compact, rate),
+  return withLegend('overview', {
+    ...options,
     tooltip: {
-      ...base(compact).tooltip,
+      ...options.tooltip,
       axisPointer: { type: 'shadow' },
       formatter: (items: TooltipItem[]) =>
         tooltipRows(items, (value, item) =>
@@ -240,9 +248,10 @@ const outcomesOption = computed(() => {
         ),
     },
     yAxis: [
-      base(compact).yAxis[0],
+      { ...options.yAxis[0], minInterval: 1 },
       {
         type: 'value',
+        position: 'right',
         min: 0,
         max: 100,
         splitLine: { show: false },
@@ -423,8 +432,7 @@ const tokensOption = computed(() => {
 // shown 是各图表已交给 ECharts 的配置，进入视口或配置变化后每帧绘制之后只更新一张图，重绘不与页面更新及其布局挤在同一个长任务里
 const shown = shallowReactive<Partial<Record<ChartKey, EChartsCoreOption>>>({})
 const options: Record<ChartKey, Readonly<{ value: EChartsCoreOption }>> = {
-  traffic: trafficOption,
-  outcomes: outcomesOption,
+  overview: overviewOption,
   latency: latencyOption,
   tokens: tokensOption,
 }
@@ -449,7 +457,7 @@ function stageCharts(): void {
   shown[key] = options[key].value
   scheduleStage()
 }
-watch([visible, trafficOption, outcomesOption, latencyOption, tokensOption], scheduleStage)
+watch([visible, overviewOption, latencyOption, tokensOption], scheduleStage)
 onUnmounted(() => {
   cancelAnimationFrame(frame)
   clearTimeout(staging)
@@ -461,11 +469,21 @@ onUnmounted(() => {
     <div class="grid grid-cols-1 gap-4 @min-[56rem]:grid-cols-2">
       <figure class="min-w-0 rounded-lg border border-line bg-panel p-4 @min-[56rem]:col-span-2">
         <div class="mb-2 flex flex-wrap items-center gap-2">
-          <figcaption class="mr-auto">
-            <span class="text-sm font-semibold text-gray-200">{{ t('usage.chartTraffic') }}</span>
-            <span class="ml-2 text-xs text-gray-500">{{ t('usage.chartTrafficHelp') }}</span>
+          <figcaption class="mr-auto inline-flex rounded-md border border-line bg-canvas p-0.5">
+            <button
+              v-for="item in ['traffic', 'outcomes'] as const"
+              :key="item"
+              type="button"
+              :aria-pressed="view === item"
+              class="rounded px-3 py-1 text-sm font-semibold transition-colors"
+              :class="view === item ? 'bg-raised text-white' : 'text-gray-400 hover:text-gray-200'"
+              @click="view = item"
+            >
+              {{ t(item === 'traffic' ? 'usage.chartTraffic' : 'usage.chartOutcomes') }}
+            </button>
           </figcaption>
           <UiSelect
+            v-if="view === 'traffic'"
             :model-value="stack"
             :aria-label="t('usage.stackBy')"
             class="w-32 rounded-md border border-line bg-canvas px-2 py-1 text-xs text-gray-200"
@@ -476,6 +494,7 @@ onUnmounted(() => {
             </option>
           </UiSelect>
           <div
+            v-if="view === 'traffic'"
             class="inline-flex rounded-md border border-line bg-canvas p-0.5"
             role="radiogroup"
             :aria-label="t('usage.chartTraffic')"
@@ -497,27 +516,19 @@ onUnmounted(() => {
           </div>
         </div>
         <ChartLegend
-          :items="legendItems(trafficOption)"
-          :hidden="hidden.traffic"
-          @toggle="toggle('traffic', $event)"
-          @focus="focus('traffic', $event)"
+          :items="legendItems(overviewOption)"
+          :hidden="hidden.overview"
+          @toggle="toggle('overview', $event)"
+          @focus="focus('overview', $event)"
         />
-        <div data-chart="traffic" class="h-72">
-          <VChart v-if="shown.traffic" ref="traffic" :option="shown.traffic" autoresize />
-        </div>
-        <div class="mt-4 border-t border-line/60 pt-3">
-          <h4 class="mb-2 text-xs font-semibold text-gray-400">
-            {{ t('usage.chartOutcomes') }}
-          </h4>
-          <ChartLegend
-            :items="legendItems(outcomesOption)"
-            :hidden="hidden.outcomes"
-            @toggle="toggle('outcomes', $event)"
-            @focus="focus('outcomes', $event)"
+        <div data-chart="overview" class="h-80">
+          <VChart
+            v-if="shown.overview"
+            ref="overview"
+            :option="shown.overview"
+            :update-options="{ replaceMerge: ['series', 'yAxis'] }"
+            autoresize
           />
-          <div data-chart="outcomes" class="h-60">
-            <VChart v-if="shown.outcomes" ref="outcomes" :option="shown.outcomes" autoresize />
-          </div>
         </div>
       </figure>
       <figure class="flex min-w-0 flex-col rounded-lg border border-line bg-panel p-4">

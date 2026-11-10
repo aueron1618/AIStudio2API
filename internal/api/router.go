@@ -14,7 +14,9 @@ import (
 
 // Config 定义公开 API 服务配置
 type Config struct {
-	APIKey           string
+	APIKey string
+	// APIKeys snapshots current authentication keys and their account restrictions.
+	APIKeys          func() (string, map[string][]string)
 	Admin            AdminService
 	AdminAuthEnabled bool
 	AdminUsername    string
@@ -150,7 +152,7 @@ func NewHandler(service aistudio.Service, config Config) http.Handler {
 
 	root := http.NewServeMux()
 	root.Handle("GET /health", corsMiddleware(http.HandlerFunc(s.handleHealth)))
-	publicHandler := bodyLimitMiddleware(browserOriginMiddleware(config.APIKey, authMiddleware(config.APIKey, apiKeyContextMiddleware(config.APIKey, requestBodyMiddleware(config.Ledger, waitLaunchMiddleware(config.WaitLaunch, public))))))
+	publicHandler := bodyLimitMiddleware(apiKeyMiddleware(config, requestBodyMiddleware(config.Ledger, waitLaunchMiddleware(config.WaitLaunch, public))))
 	loggedHandler := requestLoggingMiddleware(config.Admin, corsMiddleware(publicHandler))
 	root.Handle("/v1/", channelMiddleware(aistudio.ChannelPlayground, loggedHandler))
 	root.Handle("/build/v1/", channelMiddleware(aistudio.ChannelBuild,

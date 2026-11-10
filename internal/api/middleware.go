@@ -547,6 +547,19 @@ func sameOriginMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func apiKeyMiddleware(config Config, next http.Handler) http.Handler {
+	wrap := func(keys string, accounts map[string][]string) http.Handler {
+		return browserOriginMiddleware(keys, authMiddleware(keys, apiKeyContextMiddleware(keys, accounts, next)))
+	}
+	if config.APIKeys == nil {
+		return wrap(config.APIKey, nil)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		keys, accounts := config.APIKeys()
+		wrap(keys, accounts).ServeHTTP(w, r)
+	})
+}
+
 func authMiddleware(configuredKeys string, next http.Handler) http.Handler {
 	keys := apiKeys(configuredKeys)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -560,7 +573,7 @@ func authMiddleware(configuredKeys string, next http.Handler) http.Handler {
 }
 
 // apiKeyContextMiddleware 把请求所用的已配置 API key 放进请求上下文，供账户池按 key 绑定的账户选号
-func apiKeyContextMiddleware(configuredKeys string, next http.Handler) http.Handler {
+func apiKeyContextMiddleware(configuredKeys string, accounts map[string][]string, next http.Handler) http.Handler {
 	keys := apiKeys(configuredKeys)
 	if len(keys) == 0 {
 		return next
@@ -568,7 +581,11 @@ func apiKeyContextMiddleware(configuredKeys string, next http.Handler) http.Hand
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for _, candidate := range apiKeyCandidates(r) {
 			if candidate != "" && slices.Contains(keys, candidate) {
-				r = r.WithContext(aistudio.ContextWithAPIKey(r.Context(), candidate))
+				ctx := aistudio.ContextWithAPIKey(r.Context(), candidate)
+				if scope, bound := accounts[candidate]; bound {
+					ctx = aistudio.ContextWithAccountScope(ctx, scope)
+				}
+				r = r.WithContext(ctx)
 				break
 			}
 		}

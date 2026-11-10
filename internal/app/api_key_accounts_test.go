@@ -4,29 +4,29 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/Mag1cFall/AIStudio2API/internal/api"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 )
 
-// TestAPIKeyAccountsKeepRemovedKeyBinding 核对绑定按保存的 key 列表立即生效，已从列表移除而管理服务仍接受的 key 沿用管理服务启动时的绑定
-func TestAPIKeyAccountsKeepRemovedKeyBinding(t *testing.T) {
-	active := config.Config{ProxyAPIKey: "key-a,key-b", APIKeyAccounts: "key-a:b@example.com"}
-	same := apiKeyAccounts("key-a,key-b", "key-a:a@example.com", active)
+func TestAPIKeyAccountsDropsRemovedKeyBinding(t *testing.T) {
+	same := apiKeyAccounts("key-a,key-b", "key-a:a@example.com")
 	if len(same) != 1 || !slices.Equal(same["key-a"], []string{"a@example.com"}) {
 		t.Fatalf("key 列表不变时 %v", same)
 	}
-	rotated := apiKeyAccounts("key-new,key-b", "key-new:b@example.com", active)
-	if len(rotated) != 2 || !slices.Equal(rotated["key-a"], []string{"b@example.com"}) || !slices.Equal(rotated["key-new"], []string{"b@example.com"}) {
+	rotated := apiKeyAccounts("key-new,key-b", "key-a:a@example.com,key-new:b@example.com")
+	if len(rotated) != 1 || !slices.Equal(rotated["key-new"], []string{"b@example.com"}) {
 		t.Fatalf("换 key 后 %v", rotated)
 	}
 }
 
-func TestAPIKeyAccountsLiveSaveKeepsAuthenticationRestartBoundary(t *testing.T) {
+func TestAPIKeyAccountsLiveSaveUpdatesAuthentication(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	cfg := config.Default()
 	cfg.ProxyAPIKey, cfg.APIKeyAccounts = "key-a,key-b", "key-a:a@example.com"
@@ -36,6 +36,20 @@ func TestAPIKeyAccountsLiveSaveKeepsAuthenticationRestartBoundary(t *testing.T) 
 	manager := &runtimeManager{
 		activeManagement: cfg, current: configTestGeneration(t.Context(), path, cfg), logs: &logOutput{},
 	}
+	handler := api.NewHandler(nil, api.Config{APIKey: cfg.ProxyAPIKey, APIKeys: manager.apiKeys})
+	check := func(key, origin string, want int) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "/v1/unknown", nil)
+		request.Header.Set("Authorization", "Bearer "+key)
+		request.Header.Set("Origin", origin)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != want {
+			t.Fatalf("authentication status=%d want=%d", response.Code, want)
+		}
+	}
+	check("key-a", "", http.StatusNotFound)
+	check("key-new", "", http.StatusUnauthorized)
 	value := runtimeConfigDTO(cfg)
 	value.APIKeyAccounts = "key-a:b@example.com"
 	updated, err := manager.UpdateRuntimeConfig(t.Context(), value)
@@ -49,14 +63,18 @@ func TestAPIKeyAccountsLiveSaveKeepsAuthenticationRestartBoundary(t *testing.T) 
 	value = updated
 	value.APIKey, value.APIKeyAccounts = "key-new,key-b", "key-new:new@example.com"
 	updated, err = manager.UpdateRuntimeConfig(t.Context(), value)
-	if err != nil || !updated.ManagementRestartRequired || updated.ServiceRestartRequired || updated.ActiveAPIKey != cfg.ProxyAPIKey {
-		t.Fatalf("authentication restart boundary changed: %+v, %v", updated, err)
+	if err != nil || updated.ManagementRestartRequired || updated.ServiceRestartRequired || updated.ActiveAPIKey != value.APIKey {
+		t.Fatalf("authentication update did not apply immediately: %+v, %v", updated, err)
 	}
-	if !slices.Equal(service.bindings["key-a"], []string{"a@example.com"}) || !slices.Equal(service.bindings["key-new"], []string{"new@example.com"}) {
-		t.Fatalf("removed active key did not retain its startup restriction: %v", service.bindings)
+	if len(service.bindings) != 1 || !slices.Equal(service.bindings["key-new"], []string{"new@example.com"}) {
+		t.Fatalf("new key bindings did not apply: %v", service.bindings)
 	}
+	check("key-a", "", http.StatusUnauthorized)
+	check("key-new", "", http.StatusNotFound)
+	check("key-b", "", http.StatusNotFound)
+	check("", "", http.StatusUnauthorized)
 	before := service.bindings
-	value.APIKeyAccounts = "key-new:"
+	value.APIKey, value.APIKeyAccounts = "key-invalid", "key-invalid:"
 	_, err = manager.UpdateRuntimeConfig(t.Context(), value)
 	var status interface{ HTTPStatus() int }
 	if !errors.As(err, &status) || status.HTTPStatus() != http.StatusBadRequest {
@@ -66,6 +84,15 @@ func TestAPIKeyAccountsLiveSaveKeepsAuthenticationRestartBoundary(t *testing.T) 
 	if err != nil || loaded.APIKeyAccounts != updated.APIKeyAccounts || !reflect.DeepEqual(service.bindings, before) {
 		t.Fatalf("invalid save changed restrictions: %+v, %v", loaded, err)
 	}
+	check("key-new", "", http.StatusNotFound)
+	check("key-invalid", "", http.StatusUnauthorized)
+	value = updated
+	value.APIKey, value.APIKeyAccounts = "", ""
+	if updated, err = manager.UpdateRuntimeConfig(t.Context(), value); err != nil || updated.ManagementRestartRequired || updated.ActiveAPIKey != "" {
+		t.Fatalf("clearing the key required a restart: %+v, %v", updated, err)
+	}
+	check("", "", http.StatusNotFound)
+	check("", "https://example.com", http.StatusUnauthorized)
 }
 
 func TestLiveConfigSaveSurvivesConcurrentStartup(t *testing.T) {
@@ -124,7 +151,7 @@ func TestLiveConfigSaveSurvivesConcurrentStartup(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	service := next.service.(*configTestService)
-	wantBindings := map[string][]string{"key-a": {"a@example.com"}, "key-b": {"changed@example.com"}, "key-new": {"new@example.com"}}
+	wantBindings := map[string][]string{"key-b": {"changed@example.com"}, "key-new": {"new@example.com"}}
 	if manager.current != next || !reflect.DeepEqual(service.bindings, wantBindings) || service.capacity != [4]int{1, 3, 2, 2} ||
 		!service.autoContinuationDisabled.Load() || !manager.antiTruncationEnabled() {
 		t.Fatalf("startup replaced live settings: config=%+v bindings=%v capacity=%v", next.config, service.bindings, service.capacity)
@@ -141,7 +168,7 @@ func TestLiveConfigSaveSurvivesConcurrentStartup(t *testing.T) {
 		t.Fatalf("startup changed saved configuration: %+v, %v", loaded, err)
 	}
 	active, err := manager.RuntimeConfig(ctx)
-	if err != nil || !active.ManagementRestartRequired || !active.ServiceRestartRequired || active.ActiveAPIKey != cfg.ProxyAPIKey {
+	if err != nil || active.ManagementRestartRequired || !active.ServiceRestartRequired || active.ActiveAPIKey != value.APIKey {
 		t.Fatalf("pending changes lost their restart boundary: %+v, %v", active, err)
 	}
 }

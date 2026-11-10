@@ -32,7 +32,8 @@ const props = defineProps<{
 const emit = defineEmits<{ 'update:status': [value: string]; 'update:search': [value: string] }>()
 
 const { t, errorText } = useI18n()
-const { compact, integer, duration, outputSpeed, dateTime, dimensionLabel } = useUsageFormat()
+const { compact, integer, duration, durationSeconds, outputSpeed, dateTime, dimensionLabel } =
+  useUsageFormat()
 const id = useId()
 const pageSizes = [20, 50, 100]
 const allColumns: Column[] = [
@@ -390,22 +391,21 @@ function stateClass(record: UsageRecord): string {
                     {{ compact(record.reply_tokens) }}
                   </div>
                 </td>
-                <td v-else-if="column === 'latency'" class="px-4 py-0.5">
+                <td
+                  v-else-if="column === 'latency'"
+                  class="px-4 py-2 text-right whitespace-nowrap tabular-nums"
+                >
                   <div
-                    class="grid h-9 w-36 grid-cols-[auto_1fr] grid-rows-3 items-center gap-x-2 text-[11px] leading-3 whitespace-nowrap tabular-nums"
+                    v-tooltip="`${t('usage.duration')} / ${t('logs.firstToken')}`"
+                    class="text-gray-200"
                   >
-                    <span class="text-[10px] text-gray-500">{{ t('usage.duration') }}</span>
-                    <span class="text-right font-medium text-gray-200">{{
-                      duration(record.duration_ms)
-                    }}</span>
-                    <span class="text-[10px] text-gray-500">{{ t('logs.firstToken') }}</span>
-                    <span class="text-right text-gray-400">{{
-                      duration(record.first_event_ms)
-                    }}</span>
-                    <span class="col-span-2 text-right text-gray-400">
-                      {{ outputSpeed(record.average_tokens_per_second) }}
-                      <span class="ml-1 text-[10px] text-gray-500">tk/s</span>
-                    </span>
+                    {{ durationSeconds(record.duration_ms) }}
+                    <span class="text-gray-400">
+                      / {{ durationSeconds(record.first_event_ms) }}</span
+                    >
+                  </div>
+                  <div class="mt-0.5 text-xs text-gray-500">
+                    {{ outputSpeed(record.average_tokens_per_second) }} tk/s
                   </div>
                 </td>
                 <td
@@ -476,19 +476,17 @@ function stateClass(record: UsageRecord): string {
                   <span class="ml-auto shrink-0">{{ compact(record.total_tokens) }}</span>
                 </div>
               </div>
-              <div
-                class="grid h-9 shrink-0 grid-cols-[auto_1fr] grid-rows-3 items-center gap-x-2 text-[11px] leading-3 whitespace-nowrap tabular-nums"
-              >
-                <span class="text-[10px] text-gray-500">{{ t('usage.duration') }}</span>
-                <span class="text-right font-medium text-gray-200">{{
-                  duration(record.duration_ms)
-                }}</span>
-                <span class="text-[10px] text-gray-500">{{ t('logs.firstToken') }}</span>
-                <span class="text-right text-gray-400">{{ duration(record.first_event_ms) }}</span>
-                <span class="col-span-2 text-right text-gray-400">
-                  {{ outputSpeed(record.average_tokens_per_second) }}
-                  <span class="ml-1 text-[10px] text-gray-500">tk/s</span>
-                </span>
+              <div class="shrink-0 text-right text-xs leading-4 whitespace-nowrap tabular-nums">
+                <div
+                  v-tooltip="`${t('usage.duration')} / ${t('logs.firstToken')}`"
+                  class="text-gray-200"
+                >
+                  {{ durationSeconds(record.duration_ms) }}
+                  <span class="text-gray-400"> / {{ durationSeconds(record.first_event_ms) }}</span>
+                </div>
+                <div class="mt-0.5 text-gray-500">
+                  {{ outputSpeed(record.average_tokens_per_second) }} tk/s
+                </div>
               </div>
             </div>
           </button>
