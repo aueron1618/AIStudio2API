@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/mail"
 	"os"
@@ -33,7 +34,7 @@ import (
 
 const (
 	accountConfigName = "account.json"
-	storageStateName  = "storage-state.json"
+	StorageStateName  = "storage-state.json"
 	runtimeStateName  = "runtime-state.json"
 	catalogCacheName  = "catalog.json"
 	globalCooldownKey = "*"
@@ -304,6 +305,7 @@ type Account struct {
 	authCheckedAt         time.Time
 	modelAccessGeneration uint64
 	stateMessage          string
+	transition            AccountTransition
 	catalogErr            error
 	initializedAt         time.Time
 	buildModels           []Model
@@ -327,7 +329,21 @@ type AccountStatus struct {
 	LastUsed    *time.Time               `json:"last_used,omitempty"`
 	Message     string                   `json:"message,omitempty"`
 	Directory   string                   `json:"-"`
+	// Transition 是账户启停的后台收尾阶段，没有收尾时为空
+	Transition AccountTransition `json:"-"`
+	// ActiveRequests 是账户上进行中的请求数
+	ActiveRequests int `json:"-"`
 }
+
+// AccountTransition 是账户启停的后台收尾阶段
+type AccountTransition string
+
+const (
+	// AccountDraining 表示账户已停用，正在等待在途请求结束并关闭 Worker
+	AccountDraining AccountTransition = "draining"
+	// AccountSyncing 表示账户已启用，正在载入页面同步模型目录
+	AccountSyncing AccountTransition = "syncing"
+)
 
 // AccountSelection 描述账户调度所需的能力或粘性条件
 type AccountSelection struct {
@@ -395,6 +411,8 @@ type AccountPool struct {
 	channels              []Channel
 	modelChannels         map[string]Channel
 	apiKeyAccounts        map[string][]string
+	modelAccounts         map[string][]string
+	accountOrder          map[string]int
 	changed               chan struct{}
 	// sessionCheck 以官网页面的方式打开 AI Studio 检查账户会话，为空时认证失败直接标记需要重新登录
 	sessionCheck func(context.Context, *Account) error
@@ -483,13 +501,13 @@ func (s *AccountStore) Load() ([]*Account, error) {
 			return nil, fmt.Errorf("读取账户路径 %q: %w", source, err)
 		}
 		if !info.IsDir() {
-			if filepath.Base(absolute) != storageStateName {
-				return nil, fmt.Errorf("账户文件必须命名为 %s", storageStateName)
+			if filepath.Base(absolute) != StorageStateName {
+				return nil, fmt.Errorf("账户文件必须命名为 %s", StorageStateName)
 			}
 			directories = append(directories, filepath.Dir(absolute))
 			continue
 		}
-		if fileExists(filepath.Join(absolute, storageStateName)) || fileExists(filepath.Join(absolute, accountConfigName)) {
+		if fileExists(filepath.Join(absolute, StorageStateName)) || fileExists(filepath.Join(absolute, accountConfigName)) {
 			directories = append(directories, absolute)
 			continue
 		}
@@ -505,7 +523,7 @@ func (s *AccountStore) Load() ([]*Account, error) {
 				continue
 			}
 			directory := filepath.Join(absolute, entry.Name())
-			if fileExists(filepath.Join(directory, storageStateName)) || fileExists(filepath.Join(directory, accountConfigName)) {
+			if fileExists(filepath.Join(directory, StorageStateName)) || fileExists(filepath.Join(directory, accountConfigName)) {
 				directories = append(directories, directory)
 			}
 		}
@@ -566,7 +584,7 @@ func (s *AccountStore) Create(accountConfig AccountConfig, state StorageState) (
 	if err := writeAccountConfig(filepath.Join(temporary, accountConfigName), accountConfig); err != nil {
 		return nil, nil, err
 	}
-	if err := WriteStorageState(filepath.Join(temporary, storageStateName), state); err != nil {
+	if err := WriteStorageState(filepath.Join(temporary, StorageStateName), state); err != nil {
 		return nil, nil, err
 	}
 	directory := filepath.Join(root, id)
@@ -577,7 +595,7 @@ func (s *AccountStore) Create(accountConfig AccountConfig, state StorageState) (
 	account.ID = id
 	account.Directory = directory
 	account.ConfigPath = filepath.Join(directory, accountConfigName)
-	account.StoragePath = filepath.Join(directory, storageStateName)
+	account.StoragePath = filepath.Join(directory, StorageStateName)
 	account.RuntimePath = filepath.Join(directory, runtimeStateName)
 	publishLease, err := acquireAccountPublishLease(account, false)
 	if err != nil {
@@ -1115,7 +1133,7 @@ func (p *AccountPool) AcquireFor(ctx context.Context, selection AccountSelection
 	if p == nil {
 		return nil, ErrNoEligibleAccount
 	}
-	selection = p.keyScopedSelection(ctx, selection)
+	selection = p.scopedSelection(ctx, selection)
 	if selection.ResourceID != "" {
 		if err := p.refreshResource(ctx, selection.ResourceID); err != nil {
 			return nil, err
@@ -1229,7 +1247,7 @@ func (p *AccountPool) TryAcquireFor(ctx context.Context, selection AccountSelect
 	if p == nil {
 		return nil, false, ErrNoEligibleAccount
 	}
-	selection = p.keyScopedSelection(ctx, selection)
+	selection = p.scopedSelection(ctx, selection)
 	if selection.ResourceID != "" {
 		if err := p.refreshResource(ctx, selection.ResourceID); err != nil {
 			return nil, false, err
@@ -1326,15 +1344,19 @@ func (p *AccountPool) noEligibleErrorLocked(selection AccountSelection) error {
 		return errNoAccounts
 	}
 	selection.ModelID = strings.TrimPrefix(strings.TrimSpace(selection.ModelID), "models/")
+	scope, bound := p.modelAccounts[selection.ModelID]
 	var reasons []string
 	for _, account := range p.accounts {
-		if account.Config.Enabled && account.State == AccountReady {
+		if account.Config.Enabled && account.State == AccountReady || bound && !slices.Contains(scope, account.ID) {
 			continue
 		}
 		if selection.ModelID != "" && !p.accountSupportsAnyChannelLocked(account, selection) {
 			continue
 		}
 		reasons = append(reasons, accountStateReason(account))
+	}
+	if len(reasons) == 0 && bound {
+		return fmt.Errorf("%w：模型 %s 绑定的账户都无法调用", ErrNoEligibleAccount, selection.ModelID)
 	}
 	if len(reasons) == 0 {
 		return ErrNoEligibleAccount
@@ -1699,8 +1721,27 @@ func (l *AccountLease) BeginRuntimeUpdate() (func(), bool) {
 	}, true
 }
 
+// Config 返回与并发启停互斥读取的账户配置快照
+func (l *AccountLease) Config() AccountConfig {
+	l.pool.mu.Lock()
+	defer l.pool.mu.Unlock()
+	return l.account.Config
+}
+
 // SaveConfig 在租约内原子写回账户固定配置
 func (l *AccountLease) SaveConfig(value AccountConfig) error {
+	return l.updateConfig(func(AccountConfig) AccountConfig { return value })
+}
+
+// SetAuthUser 只提交认证会话编号，不覆盖认证期间并发更新的启停状态
+func (l *AccountLease) SetAuthUser(authUser int) error {
+	return l.updateConfig(func(value AccountConfig) AccountConfig {
+		value.AuthUser = authUser
+		return value
+	})
+}
+
+func (l *AccountLease) updateConfig(update func(AccountConfig) AccountConfig) error {
 	l.operation.Lock()
 	defer l.operation.Unlock()
 	if l.released {
@@ -1708,22 +1749,68 @@ func (l *AccountLease) SaveConfig(value AccountConfig) error {
 	}
 	l.account.storageMu.Lock()
 	defer l.account.storageMu.Unlock()
+	l.pool.mu.Lock()
+	value := update(l.account.Config)
+	l.pool.mu.Unlock()
 	if err := writeAccountConfig(l.account.ConfigPath, value); err != nil {
 		return err
 	}
 	l.pool.mu.Lock()
-	wasDisabled := l.account.State == AccountDisabled
-	l.account.Config = value
-	if !value.Enabled {
-		l.account.State = AccountDisabled
-		l.account.stateMessage = ""
-	} else if wasDisabled {
-		l.account.State = initialAccountState(value, l.account.StorageState)
-		l.account.stateMessage = ""
-	}
-	l.pool.notifyLocked()
-	l.pool.mu.Unlock()
+	defer l.pool.mu.Unlock()
+	l.pool.applyConfigLocked(l.account, value)
 	return nil
+}
+
+// applyConfigLocked 更新账户配置并按启用状态调整账户状态
+func (p *AccountPool) applyConfigLocked(account *Account, value AccountConfig) {
+	account.Config = value
+	p.applyEnabledLocked(account)
+}
+
+// applyEnabledLocked 按启用状态调整账户状态
+func (p *AccountPool) applyEnabledLocked(account *Account) {
+	if !account.Config.Enabled {
+		account.State = AccountDisabled
+		account.stateMessage = ""
+	} else if account.State == AccountDisabled {
+		account.State = initialAccountState(account.Config, account.StorageState)
+		account.stateMessage = ""
+	}
+	p.notifyLocked()
+}
+
+// SetEnabled 写回账户启用状态并立即生效，不等待账户上的在途请求
+func (p *AccountPool) SetEnabled(accountID string, enabled bool) (*Account, error) {
+	accountID = strings.TrimSpace(accountID)
+	p.mu.Lock()
+	account := p.byID[accountID]
+	p.mu.Unlock()
+	if account == nil {
+		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound, accountID)
+	}
+	account.storageMu.Lock()
+	defer account.storageMu.Unlock()
+	p.mu.Lock()
+	value := account.Config
+	p.mu.Unlock()
+	value.Enabled = enabled
+	if err := writeAccountConfig(account.ConfigPath, value); err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	account.Config.Enabled = enabled
+	p.applyEnabledLocked(account)
+	return account, nil
+}
+
+// SetTransition记录账户启停的后台收尾阶段，空值表示收尾结束
+func (p *AccountPool) SetTransition(accountID string, transition AccountTransition) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if account := p.byID[strings.TrimSpace(accountID)]; account != nil {
+		account.transition = transition
+	}
 }
 
 // ReloadStorageState 在租约内重新读取认证状态
@@ -2085,7 +2172,7 @@ func (p *AccountPool) CandidateStatesForScope(
 	return result
 }
 
-// PreferWarmPool 按权益分层轮选初始热账户
+// PreferWarmPool 按权益分层轮选初始热账户，fill-first 时 ACCOUNT_ORDER 列出的账户在前
 func (p *AccountPool) PreferWarmPool(accountIDs []string) []string {
 	type warmCandidate struct {
 		id       string
@@ -2132,6 +2219,13 @@ func (p *AccountPool) PreferWarmPool(accountIDs []string) []string {
 		if !added {
 			break
 		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.routingStrategy != "round-robin" {
+		sort.SliceStable(result, func(left int, right int) bool {
+			return p.accountRankLocked(result[left]) < p.accountRankLocked(result[right])
+		})
 	}
 	return result
 }
@@ -2479,6 +2573,9 @@ func (p *AccountPool) Status() []AccountStatus {
 			Cooldowns:   cloneCooldowns(account.runtime.Cooldowns),
 			Message:     message,
 			Directory:   account.Directory,
+
+			Transition:     account.transition,
+			ActiveRequests: account.active,
 		}
 		if !account.LastUsed.IsZero() {
 			status.LastUsed = timePointer(account.LastUsed)
@@ -2498,7 +2595,7 @@ func (p *AccountPool) ClassifyCandidates(
 	if p == nil {
 		return AccountCandidateGroups{}, ErrNoEligibleAccount
 	}
-	selection = p.keyScopedSelection(ctx, selection)
+	selection = p.scopedSelection(ctx, selection)
 	selection.ModelID = strings.TrimPrefix(strings.TrimSpace(selection.ModelID), "models/")
 	if selection.ResourceID != "" {
 		if err := p.refreshResource(ctx, selection.ResourceID); err != nil {
@@ -2804,9 +2901,20 @@ func (p *AccountPool) selectionIndicesLocked(selection AccountSelection) ([]int,
 	if p.routingStrategy == "round-robin" {
 		last := p.lastPicked[selectionAccessScope(selection)]
 		start := sort.Search(len(indices), func(index int) bool { return p.accounts[indices[index]].ID > last })
-		indices = append(indices[start:], indices[:start]...)
+		return append(indices[start:], indices[:start]...), nil
 	}
+	sort.SliceStable(indices, func(left, right int) bool {
+		return p.accountRankLocked(p.accounts[indices[left]].ID) < p.accountRankLocked(p.accounts[indices[right]].ID)
+	})
 	return indices, nil
+}
+
+// accountRankLocked 返回账户在 ACCOUNT_ORDER 中的位置，未列出的账户排在最后
+func (p *AccountPool) accountRankLocked(accountID string) int {
+	if rank, listed := p.accountOrder[accountID]; listed {
+		return rank
+	}
+	return math.MaxInt
 }
 
 // SetRoutingStrategy 设置账户轮询或优先填满策略
@@ -2916,7 +3024,7 @@ func loadAccount(directory string) (*Account, error) {
 	}
 	id := filepath.Base(directory)
 	configPath := filepath.Join(directory, accountConfigName)
-	storagePath := filepath.Join(directory, storageStateName)
+	storagePath := filepath.Join(directory, StorageStateName)
 	accountConfig, err := readAccountConfig(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("账户 %s: %w", id, err)

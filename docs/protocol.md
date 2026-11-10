@@ -105,6 +105,7 @@ Chrome Local State + Profile Preferences + Web Data/token_service
   -> 有 binding key：OAuthMultilogin sentinel 请求取得 DBSC challenge
      -> NCrypt 设备密钥签发 ES256 assertion
      -> X25519/HPKE 解密服务端 Cookie
+     -> 响应为 google.com 登记 DBSC 会话时保存会话登记
   -> 没有 binding key：MultiBearer 头的 OAuthMultilogin 直接返回明文 Cookie
   -> 保存 Playwright storage state 结构与续签材料
 ```
@@ -113,9 +114,11 @@ Chrome 运行期间以排他锁打开 `Web Data`，程序把 `Web Data` 与 `Web
 
 设备绑定的账号 OAuthMultilogin 使用 `MultiOAuth` 头，`token_service.binding_key` 为空的账号使用 `MultiBearer <refresh token>:<Gaia ID>` 头，一次请求返回明文 Cookie。`MultiOAuth` 第一次 assertion 为 `DBSC_CHALLENGE_IF_REQUIRED`，响应提供 challenge；第二次 assertion 的 JWT header 使用 `ES256` 与 `DEVICE_BOUND_SESSION_CREDENTIALS_ASSERTION`。payload 绑定 Google OAuth client、challenge、设备公钥 issuer 和临时 HPKE 公钥。Cookie 密文使用 X25519、HKDF-SHA256 与 AES-128-GCM 解密。
 
+Google 对部分账户强制设备绑定会话：OAuthMultilogin 响应的 `device_bound_session_info` 为 `GOOGLE_COM` 登记一个 DBSC 会话，给出 `session_identifier`（`sidts_session`）、`refresh_url`（`/RotateBoundCookies`）与绑定的 `__Secure-1PSIDTS`、`__Secure-3PSIDTS`、`__Secure-1PSIDRTS`、`__Secure-3PSIDRTS`，会话以同一把设备绑定密钥刷新，不刷新时签发约 2 小时后失效。服务在 Worker 启动、普通 RPC、受保护 RPC 与 Live 建连之前检查绑定 Cookie，最早到期的一项剩余不足 2 分钟时按 Chromium `RegistrationFetcher` 刷新：`POST` 刷新地址并带 `Sec-Secure-Session-Id`，服务端返回 `403` 与 `Secure-Session-Challenge`；以设备密钥签发 header 为 `{"alg":"ES256","typ":"dbsc+jwt"}`、payload 为 `{"jti":"<challenge>"}` 的 JWT，放入 `Secure-Session-Response` 重发，`200` 响应下发新的绑定 Cookie。新 Cookie 写回 `storage-state.json` 并写入账户当前 WAA Worker 的页面。刷新返回 3xx 或 4xx（`429` 除外）时进入认证恢复。远程配对上传的状态不带 DBSC 会话登记。
+
 OAuthMultilogin 以该 Profile 的 Chrome 身份发出，请求头与 Chrome `GaiaAuthFetcher` 相同：HTTP/2 下依次为 `content-length`、`authorization`、`content-type`、`sec-fetch-site: none`、`sec-fetch-mode: no-cors`、`sec-fetch-dest: empty`、`user-agent`、`accept-encoding: gzip, deflate, br, zstd`、`accept-language` 与 `priority: u=4, i`。`user-agent` 的主版本取 User Data 的 `Last Version`；`accept-language` 取 Profile `Preferences` 的 `intl.accept_languages`，没有该项时取 `intl.selected_languages`，按 Chromium 的规则在带地区的语言后补主语言并依次加 `q=0.9` 到 `q=0.1`。导入与续签都读取账户导入来源的 User Data 目录中当前的 Chrome 版本与该 Profile 的语言设置，来源没有记录目录时读取稳定版 Chrome 的默认目录。
 
-Chrome 导入状态在 `storage-state.json` 的 `aistudio2api` 扩展中保存来源（浏览器、User Data 目录、Profile 与邮箱）、Gaia ID、refresh token 与 wrapped binding key。登录页跳转、签名 Cookie 失效、HTTP `401` 与协议 Code 16 进入同一认证恢复流程，覆盖 Worker 预热、按需启动、普通 RPC、受保护 RPC 与 Live 建连。服务优先在同一账户出口续签 Cookie；保存的 OAuth 材料被拒绝时，从当前 Chrome 匹配原账户邮箱与 Gaia ID，更新来源材料。没有 `aistudio2api` 扩展的账户在本机 Chrome 登录着同一邮箱时，从 Chrome 导入该邮箱的材料并写入扩展，此后按 Chrome 导入账户续签。有效 Cookie 提交后使动态头失效、关闭该账户 WAA runtime，并重放一次。恢复失败后，服务以账户的指纹、出口与保存的 Cookie 打开 AI Studio 新对话页：被转到 Google 登录页时账户标为 `auth_required`，管理事件同步发布账户状态，后续调度使用其他合格账户；页面正常打开时账户状态不变，只有该次请求失败或换号。
+Chrome 导入状态在 `storage-state.json` 的 `aistudio2api` 扩展中保存来源（浏览器、User Data 目录、Profile 与邮箱）、Gaia ID、refresh token、wrapped binding key 与 DBSC 会话登记。登录页跳转、签名 Cookie 失效、HTTP `401` 与协议 Code 16 进入同一认证恢复流程，覆盖 Worker 预热、按需启动、普通 RPC、受保护 RPC 与 Live 建连。服务优先在同一账户出口续签 Cookie；保存的 OAuth 材料被拒绝时，从当前 Chrome 匹配原账户邮箱与 Gaia ID，更新来源材料。没有 `aistudio2api` 扩展的账户在本机 Chrome 登录着同一邮箱时，从 Chrome 导入该邮箱的材料并写入扩展，此后按 Chrome 导入账户续签。有效 Cookie 提交后使动态头失效、关闭该账户 WAA runtime，并重放一次。恢复失败后，服务以账户的指纹、出口与保存的 Cookie 打开 AI Studio 新对话页：被转到 Google 登录页时账户标为 `auth_required`，管理事件同步发布账户状态，后续调度使用其他合格账户；页面正常打开时账户状态不变，只有该次请求失败或换号。
 
 认证恢复等待同账户的正常请求结束；并发失效复用一次提交结果。替换登录材料推进认证代际，旧请求的认证结果按代际和请求顺序写回；生成正常结束后确认认证有效。HTTP `403`、协议 Code 7 与 Drive `unauthorized_client` 保留模型权限或 Drive 授权含义。隔离 Camoufox 登录和外部 storage state 在本机 Chrome 没有同一邮箱时只使用各自的登录材料。
 
@@ -148,6 +151,11 @@ Chrome 导入状态在 `storage-state.json` 的 `aistudio2api` 扩展中保存�
       "gaia_id": "<GAIA_ID>",
       "refresh_token": "<REFRESH_TOKEN>",
       "wrapped_binding_key": "<BASE64>"
+    },
+    "bound_session": {
+      "id": "sidts_session",
+      "refresh_url": "https://accounts.google.com/RotateBoundCookies",
+      "credentials": ["__Secure-1PSIDTS", "__Secure-3PSIDTS", "__Secure-1PSIDRTS", "__Secure-3PSIDRTS"]
     }
   }
 }
@@ -206,6 +214,12 @@ Google 邮箱的小写形式同时作为账户目录、管理页面标识和日�
 | 9 | 条款对话框为 `1`，onboarding 表单为 `5` |
 
 服务在每个账户本进程的首次目录同步前读取 `GetLoggingContext`，需要同意时按 field 10 选择 field 9，以不订阅邮件发送 `AcceptTerms`；成功后本进程内不再读取，失败时本次目录同步失败，下次同步重新读取。
+
+### Google AI 方案欢迎对话框
+
+Google AI 方案账户的 `GetUserPreferences` field 12 不为真时，官网弹出欢迎对话框 `ms-g1-welcome-dialog`，页面载入几秒后才打开，打开时遮挡 Run 按钮。点击 Continue 后官网发送 `UpdateUserPreferences`，field 12 为真，field mask 为 `has_seen_g1_welcome_dialog`。
+
+Camoufox 后端在页面载入后、每次运行开始时与等待 Run 按钮可点时关闭该对话框。
 
 ### 地区或账户不受支持
 
@@ -1331,7 +1345,7 @@ server content 的 index `0/1/2/4/5/6` 分别为 model content、turn complete�
 | `AdminStatus` | `state`、`running`、`ready`、`version`、`active_requests`、`accounts`、`camoufox` |
 | `AdminAccountCounts` | `total`、`ready`、`busy`、`cooldown`、`auth_required` |
 | `AdminCamoufox` | `ready`、可选 `download`（`received`、`total`） |
-| `AdminAccount` | `id`、`label`、`enabled`、`state`、`proxy`、`locale`、`timezone`、`models`、`benefit_tier`、`message`、可选 `pairing_renewed_at` |
+| `AdminAccount` | `id`、`label`、`enabled`、`state`、`proxy`、`locale`、`timezone`、`models`、`benefit_tier`、`message`、`active_requests`、可选 `pairing_renewed_at`、可选 `transition` |
 | `AccountCreateInput` | `proxy`、`locale`、`timezone` |
 | `AccountInput` | `label`、`enabled`、`proxy`、`locale`、`timezone` |
 | `ChromeImportProfile` | `id`、`profile`、`display_name`、`email`、`locale` |
@@ -1406,7 +1420,9 @@ Cookie 导入请求示例（凭据为占位值，`method` 位于每项）：
 }
 ```
 
-`PUT /api/accounts/{id}` 的提交顺序固定为：校验不可变邮箱 ID，取得账户独占租约，创建未发布的新固定出口，关闭当前 Worker 并把新 Worker 配置标记为 `pending`（尚未发布），在模型目录写锁内原子写入 `account.json` 并更新账户池，随后发布 Worker 配置、替换固定出口、释放租约并重建模型缓存。`account.json` 写入是唯一持久提交点。提交前的出口创建、Worker 关闭或写入错误会丢弃这份待发布配置并保持旧配置；已经关闭的 Worker 由后续请求按旧配置重建。持久写入后，新配置、Worker 配置与固定出口共同成为已提交状态。租约释放错误保留该提交状态并返回原始 unlock 错误；释放成功后记录完成日志并同步模型缓存。
+`PUT /api/accounts/{id}` 只切换 `enabled` 时立即写回 `account.json` 并返回，账户状态同时更新，后台收尾的阶段写在 `AdminAccount.transition`：`draining` 表示停用后等待该账户在途请求结束（`active_requests` 为等待的请求数）并关闭 Worker，`syncing` 表示启用后载入页面同步该账户的模型目录，收尾结束后字段省略；再次切换同一账户会取消进行中的收尾。
+
+其余账户更新的提交顺序固定为：校验不可变邮箱 ID，取得账户独占租约，创建未发布的新固定出口，关闭当前 Worker 并把新 Worker 配置标记为 `pending`（尚未发布），在模型目录写锁内原子写入 `account.json` 并更新账户池，随后发布 Worker 配置、替换固定出口、释放租约并重建模型缓存。`account.json` 写入是唯一持久提交点。提交前的出口创建、Worker 关闭或写入错误会丢弃这份待发布配置并保持旧配置；已经关闭的 Worker 由后续请求按旧配置重建。持久写入后，新配置、Worker 配置与固定出口共同成为已提交状态。租约释放错误保留该提交状态并返回原始 unlock 错误；释放成功后记录完成日志并同步模型缓存。
 
 `RuntimeConfig` 字段。`response-only` 表示字段由服务器填充，客户端提交的值不参与保存：
 
@@ -1415,7 +1431,8 @@ Cookie 导入请求示例（凭据为占位值，`method` 位于每项）：
 | `auth_states`、`proxy`、`init_timeout`、`request_timeout` | 保存值；下一次启动生成服务时使用 |
 | `waa_backend` | 保存值；下一次启动生成服务时使用，默认 `spidermonkey`，可选 `camoufox`；两者都固定使用临时页面 |
 | `warm_worker_limit`、`max_active_workers`、`warm_startup_concurrency`、`per_account_concurrency` | 保存值；立即应用，默认 `0/1/1/1`，启动并发对两种后端都生效 |
-| `routing_strategy`、`upstream_channels`、`model_channels` | 保存值；立即应用路由策略、通道范围与模型通道约束，固定 URL 优先 |
+| `routing_strategy`、`account_order`、`model_channels`、`model_accounts` | 保存值；立即应用路由策略、账户顺序、模型通道与账户约束，固定 URL 优先 |
+| `upstream_channels` | 保存值；下一次启动生成服务时使用的通道范围 |
 | `build_native_nonstream` | 保存值；下一次启动生成服务时决定非流式请求是否优先选择 Build |
 | `nonstream_keepalive`、`fake_stream` | 保存值；下一次启动生成服务时决定非流式请求是否保活、流式请求是否按非流式生成 |
 | `youtube_links` | 保存值；下一次启动生成服务时决定是否把用户消息文本中的 YouTube 链接作为视频外部媒体发送 |
@@ -1437,7 +1454,7 @@ Cookie 导入请求示例（凭据为占位值，`method` 位于每项）：
 | `service_restart_required` | response-only；保存的生成服务配置与当前生成服务实例不同 |
 | `environment`、`invalid` | response-only；环境变量锁定项与普通无效配置提示，锁定项不可从设置页覆盖 |
 
-`PUT /api/config` 原子保存配置。监听地址、API key 认证列表和管理凭据在管理进程重启后生效；Worker 容量、路由策略、通道范围、模型通道、API key 账户绑定及抗截断/自动续写开关保存后立即作用于当前生成服务；账户路径、代理、timeout、WAA 后端与其他标明需重启的选项在 Stop/Start 创建的新实例中生效。保存新的认证列表后，重启前仍被接受的旧 key 沿用原绑定。普通无效配置回退默认值并显示提示，但无效账户绑定不回退成全账户。启动读取最新配置；加载、校验、创建失败或启用前取消时保留原实例，切换到新实例后由它完成启动或进入 `STOPPED`。
+`PUT /api/config` 原子保存配置。监听地址、API key 认证列表和管理凭据在管理进程重启后生效；Worker 容量、路由策略、账户顺序、模型通道、模型及 API key 账户绑定和抗截断/自动续写开关保存后立即作用于当前生成服务；账户路径、代理、timeout、上游通道范围、WAA 后端与其他标明需重启的选项在 Stop/Start 创建的新实例中生效。保存新的认证列表后，重启前仍被接受的旧 key 沿用原绑定。普通无效配置回退默认值并显示提示，但无效 API key 账户绑定不回退成全账户。启动读取最新配置；加载、校验、创建失败或启用前取消时保留原实例，切换到新实例后由它完成启动或进入 `STOPPED`。
 
 `GET /api/events` 建立连接时发送 `status`、`models`、`accounts`、最近 200 条 `log`、`cooldowns` 和按开始时间排序的活动 `request`，同时从独立任务订阅发送当前 `account_tasks` 列表。任务快照可能与其他初始事件交错，客户端不应依赖全局固定顺序。事件的 `data` 形状：
 
@@ -2197,7 +2214,7 @@ delta 联合类型为 `text_delta{text}`、`citations_delta{citation}`、`thinki
 
 `webhook_config:{uris,user_metadata}` 随 `background:true` 使用，否则返回 `400 INVALID_ARGUMENT`，`uris` 为 http 或 https 地址。后台交互结束时服务向每个地址 POST `{type,version:"v1",timestamp,data:{id},user_metadata}`，请求头带 `webhook-id` 与 `webhook-timestamp`：`type` 按终态为 `interaction.completed`（含 `incomplete`）、`interaction.requires_action`、`interaction.failed`（`data` 另有 `error_code` 与 `error_message`）或 `interaction.cancelled`；应答不是 2xx 或 10 秒内没有应答时，从 1 秒起按倍数退避（间隔最长 1 小时）重试 24 小时。
 
-非流式响应包含 `id`、`object:"interaction"`、`model`、`created`、`updated`、`status`、`steps` 与 `usage`，以 `previous_interaction_id` 续接时同时带该字段。`steps` 的 `model_output.content` 保存文本或媒体，带引用的文本内容含 `annotations`，每项为 `{type:"url_citation",url,title,start_index,end_index}`，下标为该段文本中的字节位置；音频位于 `{type:"audio",data,mime_type,sample_rate,channels}`；SDK 的 `output_audio` 与 `output_text` 从这些步骤读取。正文、图片与函数调用携带的思考签名作为其前 `thought` 步骤的 `signature` 输出，按步骤回传时签名回到其后第一个模型 Part。函数调用作为 `function_call` 步骤返回，状态为 `requires_action`；正常生成与命中停止序列的状态为 `completed`，输出限额与内容拦截的状态为 `incomplete`。`usage` 包含 `total_input_tokens`、`total_cached_tokens`、`total_output_tokens`、`total_thought_tokens`、`total_tool_use_tokens` 与 `total_tokens`；上游给出模态细分时另有 `input_tokens_by_modality`、`cached_tokens_by_modality`、`output_tokens_by_modality`、`tool_use_tokens_by_modality`，元素为 `{modality,tokens}`，`modality` 为小写模态名；使用 Google Search 或 Google Maps 时 `grounding_tool_count` 按 `{type:"google_search"|"google_maps",count}` 给出调用次数。
+非流式响应包含 `id`、`object:"interaction"`、`model`、`created`、`updated`、`status`、`steps` 与 `usage`，以 `previous_interaction_id` 续接时同时带该字段，agent 运行结束时上游给出远程环境时带 `environment_id`。`steps` 的 `model_output.content` 保存文本或媒体，带引用的文本内容含 `annotations`，每项为 `{type:"url_citation",url,title,start_index,end_index}`，下标为该段文本中的字节位置；音频位于 `{type:"audio",data,mime_type,sample_rate,channels}`；SDK 的 `output_audio` 与 `output_text` 从这些步骤读取。正文、图片与函数调用携带的思考签名作为其前 `thought` 步骤的 `signature` 输出，按步骤回传时签名回到其后第一个模型 Part。函数调用作为 `function_call` 步骤返回，状态为 `requires_action`；正常生成与命中停止序列的状态为 `completed`，输出限额与内容拦截的状态为 `incomplete`。`usage` 包含 `total_input_tokens`、`total_cached_tokens`、`total_output_tokens`、`total_thought_tokens`、`total_tool_use_tokens` 与 `total_tokens`；上游给出模态细分时另有 `input_tokens_by_modality`、`cached_tokens_by_modality`、`output_tokens_by_modality`、`tool_use_tokens_by_modality`，元素为 `{modality,tokens}`，`modality` 为小写模态名；使用 Google Search 或 Google Maps 时 `grounding_tool_count` 按 `{type:"google_search"|"google_maps",count}` 给出调用次数。
 
 SSE 使用相同的事件名与 JSON `event_type`：`interaction.created` → `step.start` → `step.delta` → `step.stop` → `interaction.completed`。`background:true` 的流式与后台生成写入事件记录，每个事件带从 1 递增的 `event_id`；客户端断开后生成继续，`GET` 带 `stream=true` 与 `last_event_id` 从下一个事件继续读取。步骤以 `index` 对应，引用在其所在文本之后以 `{type:"text_annotation_delta",annotations}` 增量输出，音频增量为 `{type:"audio",data,mime_type,sample_rate,channels}`。距上一次写出满 10 秒时发送 `: ping`，上游错误或缺失终态发送 `error` 事件并结束；客户端断开会取消上游生成。流开始前使用 Gemini HTTP 错误对象。
 
@@ -2731,7 +2748,7 @@ setup 之后的客户端对象统一字段为 `type`、可选 `text`、`mime_typ
 | Anthropic | `message_start` | `content_block_start`、delta、`content_block_stop` | `message_delta.usage` | `message_stop` |
 | Gemini | candidate Part | `GenerateContentResponse` 增量 | 最后一帧 `usageMetadata` | 最后一帧 finish reason |
 
-流式响应距上一次写出满 10 秒时，OpenAI 各接口与 Interactions 发送 SSE 注释帧 `: ping`，Anthropic 发送 `ping` 事件，Gemini SSE 发送空行，均立即 flush；流式响应头带 `X-Accel-Buffering: no`，经 nginx 反向代理时逐帧转发。图片与转写的流式请求在首个结果晚于 10 秒时先由心跳写出响应头，之后的错误以 SSE 错误事件返回。OpenAI Chat 先发送 assistant role chunk，Responses 先发送 `response.created` 与 `response.in_progress`，Anthropic 先发送 `message_start`；这些起始事件在账户调度期间即可到达客户端。Gemini 的首个帧来自上游语义事件或保活空行。
+流式响应距上一次写出满 10 秒时，OpenAI 各接口与 Interactions 发送 SSE 注释帧 `: ping`，Responses 写出开场事件后重发 `response.in_progress` 事件，序号与其他事件连续递增；Anthropic 发送 `ping` 事件，Gemini SSE 发送空行，均立即 flush；流式响应头带 `X-Accel-Buffering: no`，经 nginx 反向代理时逐帧转发。图片与转写的流式请求在首个结果晚于 10 秒时先由心跳写出响应头，之后的错误以 SSE 错误事件返回。OpenAI Chat 先发送 assistant role chunk，Responses 先发送 `response.created` 与 `response.in_progress`，Anthropic 先发送 `message_start`；这些起始事件在账户调度期间即可到达客户端。Gemini 的首个帧来自上游语义事件或保活空行。
 
 公开适配规则：
 

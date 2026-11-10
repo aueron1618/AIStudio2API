@@ -108,6 +108,7 @@ func TestLiveConfigSaveSurvivesConcurrentStartup(t *testing.T) {
 	value.AntiTruncation, value.AutoContinuation = true, new(bool)
 	value.WarmWorkerLimit, value.MaxActiveWorkers, value.WarmStartupConcurrency, value.PerAccountConcurrency = 1, 3, 2, 2
 	value.RoutingStrategy, value.ModelChannels = "fill-first", "gemini-test:build"
+	value.AccountOrder, value.ModelAccounts = "changed@example.com,new@example.com", "gemini-test:changed@example.com"
 	value.RequestTimeout, value.ContinuationRewrite = "15m", false
 	updated, err := manager.UpdateRuntimeConfig(ctx, value)
 	if err != nil {
@@ -128,7 +129,8 @@ func TestLiveConfigSaveSurvivesConcurrentStartup(t *testing.T) {
 		!service.autoContinuationDisabled.Load() || !manager.antiTruncationEnabled() {
 		t.Fatalf("startup replaced live settings: config=%+v bindings=%v capacity=%v", next.config, service.bindings, service.capacity)
 	}
-	if next.config.RoutingStrategy != value.RoutingStrategy || next.config.ModelChannels != value.ModelChannels {
+	if next.config.RoutingStrategy != value.RoutingStrategy || next.config.ModelChannels != value.ModelChannels ||
+		next.config.AccountOrder != value.AccountOrder || next.config.ModelAccounts != value.ModelAccounts {
 		t.Fatalf("startup replaced live routing: %+v", next.config)
 	}
 	if next.config.RequestTimeout != cfg.RequestTimeout || next.config.ContinuationRewrite != cfg.ContinuationRewrite {

@@ -5,6 +5,12 @@ export { default as serverMessages } from '../../../internal/i18n/messages/fr.js
 
 // messages 是界面文案与管理接口错误码文案
 export const messages: Record<TranslationKey, string> = {
+  'access.client.geminiCli': 'Agent en terminal de Google, connecté via l’API Gemini',
+  'access.client.hermes':
+    'Agent open source de Nous Research, connecté comme fournisseur personnalisé',
+  'access.step.geminiAuth':
+    'Ajoutez le contenu suivant au fichier de paramètres de {name} pour choisir l’authentification par clé API Gemini',
+  'access.step.envFile': 'Ou écrivez le fichier .env, puis lancez directement {name}',
   'accounts.localeZhCN': 'Chinois (Chine)',
   'accounts.localeEnUS': 'Anglais (États-Unis)',
   'accounts.timezoneShanghai': 'Heure de Chine',
@@ -211,6 +217,16 @@ export const messages: Record<TranslationKey, string> = {
   'accounts.refreshedAll': '{count} comptes actualisés, {failed} en échec',
   'accounts.refreshingAll': 'Actualisation {done}/{total}',
   'accounts.queued': 'En attente',
+  'accounts.selectAllRows': 'Sélectionner tous les comptes',
+  'accounts.selectRow': 'Sélectionner {name}',
+  'accounts.selectedCount': '{count} sélectionnés',
+  'accounts.totalCount': '{count} comptes',
+  'accounts.bulk': 'Actions groupées',
+  'accounts.bulkEnabled': '{count} comptes activés, {failed} en échec',
+  'accounts.bulkDisabled': '{count} comptes désactivés, {failed} en échec',
+  'accounts.draining': 'Désactivation · finalisation',
+  'accounts.drainingRequests': 'Désactivation · {count} requêtes en cours',
+  'accounts.syncing': 'Activation · synchronisation des modèles',
   'accounts.refreshFailed': 'Échec',
   'accounts.saved': 'Compte enregistré',
   'accounts.remoteAdd': 'Ajouter à distance',
@@ -262,9 +278,9 @@ export const messages: Record<TranslationKey, string> = {
   'logs.loadOlder': 'Charger les journaux plus anciens ({count})',
   'logs.reasoning': 'Réflexion',
   'logs.reply': 'Réponse',
-  'logs.outputTotal': 'Total en sortie',
-  'logs.averageSpeed': 'Vitesse moyenne',
-  'logs.firstToken': 'Premier jeton',
+  'logs.outputTotal': 'Total',
+  'logs.averageSpeed': 'Vitesse moy.',
+  'logs.firstToken': '1er jeton',
   'logs.details': 'Détails',
   'logs.endpoint': 'Point de terminaison',
   'logs.inputTokens': 'Jetons en entrée',
@@ -340,15 +356,45 @@ export const messages: Record<TranslationKey, string> = {
   'settings.perAccountConcurrency': 'Requêtes simultanées par compte',
   'settings.routingStrategy': 'Stratégie de sélection des comptes',
   'settings.routingRoundRobin': 'Tourniquet',
+  'settings.accountOrder': 'Ordre des comptes',
+  'settings.accountOrderHelp':
+    'Avec « Même compte en priorité », ces comptes sont utilisés dans cet ordre ; le compte suivant prend le relais lorsqu’un compte est saturé, en temporisation ou indisponible',
+  'settings.accountOrderUp': 'Monter {account}',
+  'settings.accountOrderDown': 'Descendre {account}',
   'settings.routingFillFirst': 'Même compte en priorité',
   'settings.routingHelp':
     'Le tourniquet alterne les comptes. « Même compte en priorité » garde un compte jusqu’à ce qu’il soit saturé ou indisponible.',
   'settings.waaBackend': 'Moteur WAA',
-  'settings.waaBackendCamoufox': 'Navigateur Camoufox',
+  'settings.waaBackendCamoufox': 'Camoufox',
   'settings.waaBackendSpiderMonkey': 'SpiderMonkey',
   'settings.waaBackendHelp':
     'SpiderMonkey s’exécute dans le processus du service sans Camoufox ; la connexion des comptes exige toujours un navigateur',
-  'settings.upstreamChannels': 'Canaux amont',
+  'settings.helpFor': 'À propos de {label}',
+  'settings.section.runtime': 'Exécution et canaux',
+  'settings.section.models': 'Modèles et protocoles',
+  'settings.workerCapacity': 'Capacité des Workers',
+  'settings.workerCapacityHelp':
+    'Les extrémités du curseur fixent les Workers préchargés et la limite de pointe. La simultanéité de démarrage limite les démarrages à froid ; celle par compte limite les requêtes simultanées. Les deux moteurs utilisent 0/1/1/1 par défaut pour démarrer à la demande et limiter le pic mémoire',
+  'settings.capacitySummary': "Jusqu'à {requests} requêtes simultanées sur {accounts} comptes",
+  'settings.accountOrderDrag': 'Faire glisser {account} pour réordonner',
+  'settings.accountOrderRemove': 'Retirer {account}',
+  'settings.accountOrderAdd': 'Ajouter des comptes prioritaires',
+  'settings.accountOrderClear': 'Vider les comptes prioritaires',
+  'settings.accountOrderUnset': "Non défini ; les comptes sont utilisés dans l'ordre des ID",
+  'settings.accountOrderRest': "Les {count} autres comptes suivent dans l'ordre des ID",
+  'settings.authPathAdd': 'Ajouter un chemin',
+  'settings.authPathBrowse': 'Parcourir',
+  'settings.authPathRemove': 'Retirer {path}',
+  'settings.authPathRow': 'Chemin {index}',
+  'settings.pathPickerTitle': 'Choisir un fichier de compte ou un dossier',
+  'settings.pathPickerRoots': 'Lecteurs',
+  'settings.pathPickerUp': 'Niveau supérieur',
+  'settings.pathPickerEmpty': 'Aucun dossier ni fichier d’état de compte ici',
+  'settings.pathPickerSelect': 'Sélectionner ce dossier',
+  'settings.legacy': 'Ancien',
+  'settings.buildLegacyNotice':
+    'L’ancien canal Build peut être refusé en amont ; les requêtes fixes /build/v1 ne basculent jamais vers Playground',
+  'settings.channelRow': 'Canal {channel}',
   'settings.upstreamChannelsHelp':
     'Playground est le canal par défaut. Build est l’ancien canal, à génération désactivée en amont ; activé, les requêtes refusées passent par Playground',
   'settings.modelMapping': 'Correspondance des modèles',
@@ -369,6 +415,10 @@ export const messages: Record<TranslationKey, string> = {
   'channel.assistant': 'Chat Build',
   'logs.channel': 'Canal',
   'models.channels': 'Canaux',
+  'models.accounts': 'Comptes',
+  'models.accountsHelp':
+    'La sélection automatique utilise uniquement ces comptes. Sans sélection, tous les comptes sont utilisables',
+  'models.accountsSaved': 'Comptes enregistrés et appliqués',
   'models.channelAll': 'Tous les canaux',
   'models.channelSaved': 'Canal enregistré et appliqué',
   'settings.activeValue': 'Valeur active',
@@ -1256,6 +1306,8 @@ export const messages: Record<TranslationKey, string> = {
   'pg.environmentSources': 'Sources',
   'pg.sourcesTip': 'Sources à installer dans l’environnement',
   'pg.addSources': 'Ajouter des sources',
+  'pg.viewSources': 'Voir les sources',
+  'pg.viewRules': 'Voir les règles',
   'pg.oneSource': '1 source',
   'pg.sourceCount': '{count} sources',
   'pg.environmentNetwork': 'Réseau',
@@ -1716,29 +1768,19 @@ export const messages: Record<TranslationKey, string> = {
   'nav.usage': 'Utilisation',
   'common.undo': 'Annuler',
   'accounts.deletedNamed': 'Compte {name} supprimé',
+  'accounts.deletedCount': '{count} comptes supprimés',
   'logs.body': 'Corps de la requête et de la réponse',
   'logs.requestBody': 'Corps de la requête',
   'logs.responseBody': 'Corps de la réponse',
   'logs.bodyMissing':
     'Aucun corps enregistré. Activez « Enregistrer les corps de requête » dans les paramètres',
   'settings.section.service': 'Service',
-  'settings.section.serviceHelp':
-    'Démarrage du service de génération, adresse d’écoute et fichiers de comptes',
   'settings.section.capacity': 'Capacité',
-  'settings.section.capacityHelp':
-    'Nombre de workers, démarrages à froid simultanés et répartition des comptes',
-  'settings.section.upstream': 'Amont',
-  'settings.section.upstreamHelp': 'Canaux amont, exécution de WAA et délais',
   'settings.section.network': 'Réseau',
-  'settings.section.networkHelp':
-    'Sortie réseau par défaut pour la connexion, l’import et les requêtes des comptes',
   'settings.section.security': 'Sécurité et journalisation',
-  'settings.section.securityHelp':
-    'Connexion à la console, enregistrement des corps de requête et fichiers journaux',
   'settings.effect.immediate': 'Appliqué à l’enregistrement',
   'settings.effect.service': 'Appliqué après le redémarrage du service de génération',
   'settings.effect.management': 'Appliqué après le redémarrage de l’application',
-  'settings.unsavedField': 'Non enregistré',
   'settings.unsavedSection': 'Cette section contient des modifications non enregistrées',
   'settings.unsavedBar': 'Modifications non enregistrées',
   'settings.unsavedCount': '{count} modifications non enregistrées',
@@ -1784,13 +1826,13 @@ export const messages: Record<TranslationKey, string> = {
   'settings.authPathHelp':
     'Fichier ou dossier de comptes, ou plusieurs chemins séparés par des virgules.',
   'settings.warmWorkerLimitHelp':
-    'Nombre de comptes maintenus préchauffés après le démarrage du service de génération.',
+    'Valeur par défaut 0 : démarrage à la demande et libération de tous les Workers après 30 secondes d’inactivité.',
   'settings.maxActiveWorkersHelp': 'Nombre maximal de workers actifs en pointe',
   'settings.warmStartupConcurrencyHelp':
     'Démarrages à froid simultanés pour les deux moteurs ; 1 par défaut pour limiter le pic mémoire',
   'settings.perAccountConcurrencyHelp': 'Nombre de requêtes qu’un compte traite en même temps.',
   'settings.buildNativeHelp':
-    'Les requêtes sans streaming utilisent Build en priorité, sinon Playground',
+    'Le routage automatique sans streaming privilégie Build ; le canal fixé par l’URL reste prioritaire',
   'settings.nonstreamKeepaliveHelp':
     'Envoie un saut de ligne toutes les 10 secondes pendant l’attente pour que les proxys inverses gardent la connexion',
   'settings.fakeStreamHelp':
@@ -2012,8 +2054,6 @@ export const messages: Record<TranslationKey, string> = {
   'theme.dark': 'Sombre',
   'nav.access': 'Intégration',
   'section.access.title': 'Guide d’intégration',
-  'section.access.description':
-    'URL du service et clés, configuration des clients, exemples de code par capacité et liste des points de terminaison',
   'access.nav.start': 'Démarrage rapide',
   'access.nav.clients': 'Clients',
   'access.nav.capabilities': 'Capacités',
@@ -2061,6 +2101,7 @@ export const messages: Record<TranslationKey, string> = {
   'access.tierHaiku': 'Modèle pour Haiku',
   'access.importCCSwitch': 'Importer dans CC Switch',
   'access.importCherry': 'Importer dans Cherry Studio',
+  'access.importMagpie': 'Importer dans Magpie',
   'access.importHelp':
     'L’application doit être installée sur cet ordinateur ; confirmez l’import dans l’application',
   'access.dockerNote':
@@ -2069,39 +2110,38 @@ export const messages: Record<TranslationKey, string> = {
     'Agent de programmation en terminal d’Anthropic, connecté via Anthropic Messages, avec un modèle distinct pour les niveaux Opus, Sonnet et Haiku',
   'access.client.codex':
     'Agent de programmation en terminal d’OpenAI, connecté via OpenAI Responses',
-  'access.client.geminiCli': 'Agent en terminal de Google, connecté via l’API Gemini',
   'access.client.opencode':
-    'Agent de programmation open source en terminal, connecté comme fournisseur compatible OpenAI listant tous les modèles de chat',
+    'Agent de programmation open source en terminal, avec tous les modèles de chat listés dans sa configuration',
   'access.client.openclaw':
-    'Agent assistant personnel open source, connecté comme fournisseur compatible OpenAI',
-  'access.client.hermes':
-    'Agent open source de Nous Research, connecté comme fournisseur personnalisé',
+    'Agent assistant personnel open source, connecté comme fournisseur personnalisé dans sa configuration',
+  'access.client.magpie':
+    "Passerelle de changement de modèle qui propose les modèles de ce service à Claude Code, Codex et d'autres agents",
   'access.client.pi':
     'Agent de programmation open source en terminal, connecté comme fournisseur personnalisé dans models.json',
-  'access.client.omp':
-    'Version étendue de pi : le chat passe par l’API compatible OpenAI et la recherche web par l’API Gemini',
+  'access.client.omp': 'Version étendue de pi, avec la recherche web par l’API Gemini',
   'access.client.dsh':
-    'Agent en terminal de DeepSeek, avec un fournisseur compatible OpenAI ajouté par un fichier de correctif',
+    'Agent en terminal de DeepSeek, avec un fournisseur personnalisé ajouté par un fichier de correctif',
   'access.client.cherry':
     'Client IA de bureau qui ajoute des fournisseurs de type OpenAI, Gemini ou Anthropic',
   'access.client.sillytavern':
-    'Interface de chat pour le jeu de rôle, avec la source Google AI Studio et un reverse proxy',
+    'Interface de chat pour le jeu de rôle, avec une source de complétion de chat et un reverse proxy',
   'access.client.openWebui':
     'Interface de chat web auto-hébergée, avec une connexion compatible OpenAI',
   'access.client.lobechat':
-    'Application de chat open source, avec une URL de proxy sur son fournisseur Google',
-  'access.client.newApi': 'Passerelle et système de distribution d’API, avec un canal Gemini',
+    'Application de chat open source, avec une URL de proxy sur le fournisseur correspondant',
+  'access.client.newApi':
+    'Passerelle et système de distribution d’API, avec un canal pour le protocole choisi',
   'access.step.envRun':
     'Définissez les variables d’environnement dans un terminal et lancez {name}',
-  'access.step.geminiAuth':
-    'Ajoutez le contenu suivant au fichier de paramètres de {name} pour choisir l’authentification par clé API Gemini',
   'access.step.settingsFile':
     'Ou ajoutez le contenu suivant au fichier de paramètres, puis lancez directement {name}',
   'access.step.configFile': 'Ajoutez le contenu suivant au fichier de configuration de {name}',
   'access.step.keyRun': 'Définissez la variable de la clé dans un terminal et lancez {name}',
-  'access.step.envFile': 'Ou écrivez le fichier .env, puis lancez directement {name}',
   'access.step.ompSearch': 'Confiez le rôle de recherche web au fournisseur Gemini dans config.yml',
   'access.step.patchFile': 'Enregistrez le contenu suivant comme fichier de correctif',
+  'access.step.magpieImport': 'Ou importez-le depuis un terminal',
+  'access.step.magpieManual':
+    "Pour l'ajouter à la main, ouvrez Providers dans {name}, choisissez Add provider, puis Custom provider, et renseignez ces champs",
   'access.step.cherry':
     'Dans « Paramètres → Services de modèles », ajoutez un fournisseur avec les champs ci-dessous, puis ajoutez les modèles voulus depuis sa liste',
   'access.step.sillytavern':
@@ -2111,7 +2151,7 @@ export const messages: Record<TranslationKey, string> = {
   'access.step.dockerEnv':
     'Pour un déploiement Docker, vous pouvez aussi utiliser des variables d’environnement',
   'access.step.lobechat':
-    'Dans « Paramètres → Fournisseur d’IA → Google », remplissez les champs ci-dessous et activez le fournisseur',
+    'Dans « Paramètres → Fournisseur d’IA », ouvrez le fournisseur ci-dessous, remplissez les champs et activez-le',
   'access.step.newApi':
     'Dans « Canaux », cliquez sur « Créer un canal », choisissez le fournisseur et remplissez les champs ci-dessous',
   'access.field.cherryType': 'Type de fournisseur',
@@ -2121,10 +2161,14 @@ export const messages: Record<TranslationKey, string> = {
   'access.field.stSource': 'Source de complétion de chat',
   'access.field.stUrl': 'URL du serveur proxy',
   'access.field.stPassword': 'Mot de passe proxy',
-  'access.field.stModel': 'Modèle Google',
+  'access.field.stModel': 'Modèle',
   'access.field.webuiKey': 'Clé',
   'access.field.lobeKey': 'Clé API',
   'access.field.lobeUrl': 'URL du proxy API',
+  'access.field.lobeResponses': 'Utiliser la spécification Responses API',
+  'access.field.lobeOn': 'Activé',
+  'access.field.webuiApiType': "Type d'API",
+  'access.field.webuiResponses': 'Responses',
   'access.field.newapiProvider': 'Fournisseur',
   'access.field.newapiUrl': 'URL de base',
   'access.field.newapiKey': 'Clé API',

@@ -72,6 +72,10 @@ func (worker *budgetWorker) BrowserStorageState(context.Context) (aistudio.Stora
 	return aistudio.StorageState{}, errors.New("offline worker has no credentials")
 }
 
+func (*budgetWorker) MergeSetCookieHeaders(ctx context.Context, _ []string, _ string) error {
+	return ctx.Err()
+}
+
 func (worker *budgetWorker) PageCatalog() camoufoxnative.PageCatalog {
 	return camoufoxnative.PageCatalog{Logging: []byte("[]"), Tier: []byte("[]"), Models: []byte(worker.id)}
 }

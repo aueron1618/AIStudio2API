@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -153,6 +154,146 @@ func sseTestPayloads(t *testing.T, raw []byte) []map[string]any {
 		t.Fatalf("no SSE frames: %s", raw)
 	}
 	return frames
+}
+
+type sseMarshalFunc func() ([]byte, error)
+
+func (marshal sseMarshalFunc) MarshalJSON() ([]byte, error) { return marshal() }
+
+func TestResponsesHeartbeatSequence(t *testing.T) {
+	for _, terminal := range []string{"completed", "incomplete", "failed"} {
+		t.Run(terminal, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			stream, err := openStream(recorder, sseHeartbeat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.stop()
+			request := responsesRequest{
+				Model: "test-model", Instructions: "private-instructions", Input: json.RawMessage(`"private-input"`),
+				Metadata: map[string]string{"secret": "private-metadata"}, PreviousResponseID: "private-previous",
+				Tools: []responsesTool{{Type: "function", Name: "private-function"}},
+			}
+			writer := newResponsesWriter(stream, "resp-test", 123, request)
+			for _, event := range []string{"response.created", "response.in_progress"} {
+				if err := writer.emit(event, map[string]any{"response": responseShell(writer.id, writer.created, "in_progress", request)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stream.setFrame(writer.progressFrame)
+
+			encoding, resume := make(chan struct{}), make(chan struct{})
+			emitted, beaten := make(chan error, 1), make(chan struct{})
+			go func() {
+				emitted <- writer.emit("response.output_text.delta", map[string]any{"delta": sseMarshalFunc(func() ([]byte, error) {
+					close(encoding)
+					<-resume
+					return []byte(`"first"`), nil
+				})})
+			}()
+			<-encoding
+			// Pause after taking the event's number. A free lock lets the heartbeat
+			// overtake it deterministically, reproducing the original wire order.
+			if stream.mu.TryLock() {
+				stream.mu.Unlock()
+				stream.beat()
+				close(beaten)
+			} else {
+				go func() {
+					stream.beat()
+					close(beaten)
+				}()
+			}
+			close(resume)
+			if err := <-emitted; err != nil {
+				t.Error(err)
+			}
+			<-beaten
+
+			const rounds = 64
+			var concurrent sync.WaitGroup
+			start := make(chan struct{})
+			for range 2 {
+				concurrent.Go(func() {
+					<-start
+					for range rounds {
+						if err := writer.emit("response.output_text.delta", map[string]any{"delta": "next"}); err != nil {
+							t.Error(err)
+							return
+						}
+					}
+				})
+			}
+			concurrent.Go(func() {
+				<-start
+				for range rounds {
+					stream.beat()
+				}
+			})
+			close(start)
+			concurrent.Wait()
+			if terminal == "failed" {
+				err = writer.failed(io.ErrUnexpectedEOF)
+			} else {
+				err = writer.terminal(responseShell(writer.id, writer.created, terminal, request))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream.stop()
+			stream.beat()
+
+			frames := sseTestPayloads(t, recorder.Body.Bytes())
+			if len(frames) != 5+3*rounds {
+				t.Fatalf("got %d frames, want %d", len(frames), 5+3*rounds)
+			}
+			for index, frame := range frames {
+				if frame["sequence_number"] != float64(index) {
+					t.Fatalf("wire frame %d has sequence_number=%v", index, frame["sequence_number"])
+				}
+				if index > 1 && frame["type"] == "response.in_progress" {
+					raw, _ := json.Marshal(frame)
+					if bytes.Contains(raw, []byte("private-")) {
+						t.Fatalf("heartbeat echoed request fields: %s", raw)
+					}
+					shell := frame["response"].(map[string]any)
+					if shell["id"] != writer.id || shell["model"] != request.Model || shell["status"] != "in_progress" {
+						t.Fatalf("heartbeat lost response identity: %s", raw)
+					}
+				}
+			}
+			last := frames[len(frames)-1]
+			if last["type"] != "response."+terminal || last["response"].(map[string]any)["status"] != terminal {
+				t.Fatalf("terminal event was lost: %+v", last)
+			}
+		})
+	}
+}
+
+func TestStreamHeartbeatFormats(t *testing.T) {
+	for _, frame := range []string{sseHeartbeat, anthropicHeartbeat, geminiHeartbeat} {
+		t.Run(fmt.Sprintf("frame=%q", frame), func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			stream, err := openStream(recorder, frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.stop()
+			stream.beat()
+			if _, err := stream.Write([]byte("payload")); err != nil {
+				t.Fatal(err)
+			}
+			if err := stream.FlushError(); err != nil {
+				t.Fatal(err)
+			}
+			stream.beat()
+			stream.stop()
+			stream.beat()
+			if got := recorder.Body.String(); got != frame+"payload"+frame {
+				t.Fatalf("heartbeat framing changed: %q", got)
+			}
+		})
+	}
 }
 
 type protocolFixtureTransport struct {

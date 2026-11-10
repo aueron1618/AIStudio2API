@@ -76,6 +76,8 @@ func (*cookieCatalogStub) ReclaimExpiredResources(context.Context) error { retur
 
 func (*cookieCatalogStub) ReclaimIdleAssistantApplets(context.Context) error { return nil }
 
+func (*cookieCatalogStub) DeleteAccountAssistantApplets(context.Context, string) error { return nil }
+
 func newAccountTestAdmin(t *testing.T) *runtimeAdmin {
 	t.Helper()
 	pool := aistudio.NewAccountPool(nil, 1)
@@ -530,6 +532,7 @@ func TestChromeImportVerifiesBeforePublication(t *testing.T) {
 			state.SetAuthExtension(aistudio.AuthExtension{
 				Source: aistudio.AuthSource{Browser: "chrome", Email: "user@example.test", Root: "fixture-root", Profile: "Default"},
 				OAuth:  &aistudio.ChromeOAuthMaterial{GaiaID: "fixture-gaia", RefreshToken: "fixture-oauth"},
+				Bound:  &aistudio.BoundSession{ID: "fixture-session"},
 			})
 			admin.importChrome = func(_ context.Context, options chromeauth.ImportOptions) ([]chromeauth.ImportResult, error) {
 				if len(options.AccountIDs) != 1 || options.AccountIDs[0] != "fixture-id" || options.Proxy != "http://127.0.0.1:4321" {
@@ -569,6 +572,43 @@ func TestChromeImportVerifiesBeforePublication(t *testing.T) {
 			extension, exists, err := stored[0].StorageState.AuthExtension()
 			if err != nil || !exists || extension.OAuth == nil || extension.OAuth.RefreshToken != "fixture-oauth" || extension.Source.Browser != "chrome" {
 				t.Fatal("verified local Chrome import lost renewal material")
+			}
+			lease, err := admin.pool.AcquireAccount(ctx, accounts[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := lease.Account()
+			cfg := previous.Config
+			cfg.AuthUser, cfg.Proxy, cfg.Locale, cfg.Timezone = 2, "http://127.0.0.1:7777", "ja-JP", "Asia/Tokyo"
+			if err := errors.Join(lease.SaveConfig(cfg), lease.BindResource("files/reimport-fixture", "drive-file")); err != nil {
+				_ = lease.Release()
+				t.Fatal(err)
+			}
+			previous.State = aistudio.AccountAuthRequired
+			if err := lease.Release(); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := admin.accountIDs()[previous.ID]; !exists {
+				t.Fatal("expired accounts lost raw Cookie duplicate protection")
+			}
+			accounts, err = admin.ImportChromeAccounts(ctx, api.ChromeImportInput{AccountIDs: []string{"fixture-id"}, Proxy: "http://127.0.0.1:4321"})
+			if err != nil || len(accounts) != 1 || calls != 2 || admin.service.catalog.(*cookieCatalogStub).refreshCalls != 2 {
+				t.Fatalf("verified reimport did not update once: accounts=%v calls=%d error=%v", accounts, calls, err)
+			}
+			current, err := admin.pool.Account(previous.ID)
+			if err != nil || current != previous || current.Config.AuthUser != 0 || current.Config.Proxy != cfg.Proxy ||
+				current.Config.Locale != cfg.Locale || current.Config.Timezone != cfg.Timezone || current.State != aistudio.AccountReady {
+				t.Fatal("Chrome reimport replaced the account or its custom environment")
+			}
+			if extension, _, err := current.StorageState.AuthExtension(); err != nil || extension.Bound == nil || extension.Bound.ID != "fixture-session" {
+				t.Fatal("Chrome reimport dropped its fresh device-bound session")
+			}
+			resource, err := admin.pool.AcquireResource(ctx, "files/reimport-fixture")
+			if err != nil || resource.Account().ID != previous.ID {
+				t.Fatalf("Chrome reimport lost resource ownership: %v", err)
+			}
+			if err := resource.Release(); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

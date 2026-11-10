@@ -27,6 +27,8 @@ describe('management API contracts', () => {
       continuation_rewrite: false,
       strip_thought_signatures: true,
       api_key_accounts: 'first-key:account-a|account-b',
+      model_accounts: 'models/gemini-test:account-a|account-b',
+      account_order: 'account-b,account-a',
       first_event_hedge_models: 'gemini-test',
     } as ServiceConfig
     const fetch = vi.fn().mockResolvedValue(Response.json(config))
@@ -117,5 +119,13 @@ describe('management API contracts', () => {
     await rejected
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(fetch.mock.calls[0]![0]).toBe('/api/accounts/import/cookies/discover')
+  })
+
+  it('encodes server-side Windows paths without reading local files', async () => {
+    const listing = { path: 'D:\\fixture accounts', parent: 'D:\\', entries: [] }
+    const fetch = vi.fn().mockResolvedValue(Response.json(listing))
+    vi.stubGlobal('fetch', fetch)
+    expect(await api.paths(listing.path)).toEqual(listing)
+    expect(fetch).toHaveBeenCalledWith('/api/paths?path=D%3A%5Cfixture%20accounts', undefined)
   })
 })

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -189,12 +190,12 @@ func TestRemoteRenewalPersistenceAndCookiePush(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatal("atomic renewal save left temporary secret files")
 	}
-	refreshRemoteCookies = func(_ context.Context, source aistudio.AuthSource, oauth aistudio.ChromeOAuthMaterial, _ string) ([]aistudio.StateCookie, error) {
+	refreshRemoteCookies = func(_ context.Context, source aistudio.AuthSource, oauth aistudio.ChromeOAuthMaterial, _ string) ([]aistudio.StateCookie, *aistudio.BoundSession, error) {
 		if source != renewal.Source || !reflect.DeepEqual(oauth, renewal.OAuth) {
 			t.Fatal("renewal did not use source Chrome OAuth")
 		}
 		state, err := aistudio.ParseCookieImport("SAPISID=refreshed-fixture; __Secure-1PAPISID=one; __Secure-3PAPISID=three")
-		return state.Cookies, err
+		return state.Cookies, &aistudio.BoundSession{ID: "source-session"}, err
 	}
 	calls := 0
 	client := &http.Client{Transport: setupTransport(func(request *http.Request) (*http.Response, error) {
@@ -212,10 +213,47 @@ func TestRemoteRenewalPersistenceAndCookiePush(t *testing.T) {
 	if err := pushRenewal(t.Context(), client, stored[0]); err != nil || calls != 1 {
 		t.Fatalf("renewal push calls=%d error=%v", calls, err)
 	}
-	refreshRemoteCookies = func(context.Context, aistudio.AuthSource, aistudio.ChromeOAuthMaterial, string) ([]aistudio.StateCookie, error) {
-		return nil, context.Canceled
+	refreshRemoteCookies = func(context.Context, aistudio.AuthSource, aistudio.ChromeOAuthMaterial, string) ([]aistudio.StateCookie, *aistudio.BoundSession, error) {
+		return nil, nil, context.Canceled
 	}
 	if err := pushRenewal(t.Context(), client, stored[0]); !errors.Is(err, context.Canceled) || calls != 1 {
 		t.Fatal("canceled cookie refresh still made a remote request")
+	}
+}
+
+// TestPairingRenewalUploadWithoutBoundSession 验证 OAuth 续签材料与 DBSC 会话登记不随 Cookie 上传
+func TestPairingRenewalUploadWithoutBoundSession(t *testing.T) {
+	var uploaded aistudio.AuthExtension
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input api.AccountStateInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+		}
+		uploaded, _, _ = input.StorageState.AuthExtension()
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(api.PairingAccountResult{Account: api.AdminAccount{ID: "user@example.com", Label: "user@example.com"}, RenewalToken: "renewal"})
+	}))
+	defer server.Close()
+	state, err := aistudio.ParseCookieImport("SAPISID=fixture; __Secure-1PAPISID=one; __Secure-3PAPISID=three")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.SetAuthExtension(aistudio.AuthExtension{
+		Source: aistudio.AuthSource{Browser: "chrome", Profile: "Default", Email: "user@example.com"},
+		OAuth:  &aistudio.ChromeOAuthMaterial{GaiaID: "gaia", RefreshToken: "token", WrappedBindingKey: []byte("key")},
+		Bound:  &aistudio.BoundSession{ID: "sidts_session", RefreshURL: "https://accounts.google.com/RotateBoundCookies", Credentials: []string{"__Secure-1PSIDRTS"}},
+	})
+	target := &remoteTarget{client: server.Client(), origin: server.URL, token: "pairing"}
+	if _, err := target.Save(t.Context(), aistudio.DefaultAccountConfig("user@example.com"), state, ""); err != nil {
+		t.Fatal(err)
+	}
+	if uploaded.OAuth != nil || uploaded.Bound != nil || uploaded.Source.Browser != "" {
+		t.Fatalf("上传的认证扩展 %+v", uploaded)
+	}
+	if len(target.renewals) != 1 || target.renewals[0].OAuth.RefreshToken != "token" {
+		t.Fatalf("本机续签材料 %+v", target.renewals)
+	}
+	if original, _, err := state.AuthExtension(); err != nil || original.Bound == nil || original.Bound.ID != "sidts_session" {
+		t.Fatal("upload changed the source DBSC session")
 	}
 }

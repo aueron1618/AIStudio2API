@@ -50,7 +50,7 @@ func configTestGeneration(ctx context.Context, path string, cfg config.Config) *
 	service := &configTestService{trackedService: &trackedService{pool: pool, requests: requests}}
 	service.SetAutoContinuation(cfg.AutoContinuation)
 	admin := &runtimeAdmin{configPath: path, config: cfg, pool: pool, requests: requests, service: service.trackedService}
-	admin.applyRoutingConfig(cfg.RoutingStrategy, cfg.ModelChannels)
+	admin.applyRoutingConfig(cfg)
 	return &runtimeGeneration{
 		service: service, admin: configStartAdmin{admin}, config: cfg,
 		lifecycleCancel: func() {}, closeRuntime: func() error { return nil },
@@ -159,12 +159,15 @@ func TestLocalRuntimeConfigEnvironmentLocksAndDTO(t *testing.T) {
 	cfg := config.Default()
 	cfg.AntiTruncation, cfg.AutoContinuation = true, false
 	cfg.ProxyAPIKey, cfg.APIKeyAccounts = "test-key", "test-key:file@example.com"
+	cfg.AccountOrder, cfg.ModelAccounts = "file@example.com", "test-model:file@example.com"
 	if err := cfg.Save(path); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("ANTI_TRUNCATION", "false")
 	t.Setenv("AUTO_CONTINUATION", "true")
 	t.Setenv("API_KEY_ACCOUNTS", "test-key:env@example.com")
+	t.Setenv("ACCOUNT_ORDER", "env@example.com")
+	t.Setenv("MODEL_ACCOUNTS", "test-model:env@example.com")
 	t.Setenv("FIRST_EVENT_HEDGE_MODELS", "locked-model")
 	t.Setenv("WARM_WORKER_LIMIT", "0")
 	saved, err := config.Load(path)
@@ -186,13 +189,14 @@ func TestLocalRuntimeConfigEnvironmentLocksAndDTO(t *testing.T) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"anti_truncation", "auto_continuation", "first_event_hedge_models", "api_key_accounts", "environment", "invalid"} {
+	for _, key := range []string{"anti_truncation", "auto_continuation", "first_event_hedge_models", "api_key_accounts", "account_order", "model_accounts", "environment", "invalid"} {
 		if _, ok := fields[key]; !ok {
 			t.Errorf("management DTO is missing %s", key)
 		}
 	}
 	value.AntiTruncation, value.AutoContinuation = true, new(bool)
 	value.APIKeyAccounts, value.FirstEventHedgeModels = "test-key:changed@example.com", "changed-model"
+	value.AccountOrder, value.ModelAccounts = "changed@example.com", "test-model:changed@example.com"
 	value.WarmWorkerLimit = 1
 	updated, err := manager.UpdateRuntimeConfig(t.Context(), value)
 	if err != nil || updated.AntiTruncation || updated.AutoContinuation == nil || !*updated.AutoContinuation ||
@@ -202,6 +206,10 @@ func TestLocalRuntimeConfigEnvironmentLocksAndDTO(t *testing.T) {
 	service := manager.current.service.(*configTestService)
 	if service.autoContinuationDisabled.Load() || manager.antiTruncationEnabled() || !slices.Equal(service.bindings["test-key"], []string{"env@example.com"}) {
 		t.Fatal("locked runtime values were changed")
+	}
+	if updated.AccountOrder != saved.AccountOrder || updated.ModelAccounts != saved.ModelAccounts ||
+		manager.current.config.AccountOrder != saved.AccountOrder || manager.current.config.ModelAccounts != saved.ModelAccounts {
+		t.Fatal("locked account order or model bindings were changed")
 	}
 	if updated.ServiceRestartRequired || updated.ManagementRestartRequired {
 		t.Fatalf("locked values incorrectly require a restart: %+v", updated)

@@ -4,7 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import { api } from '@/api'
 import { messages } from '@/locales/en'
 import { mountSetup } from '@/test-component'
-import type { AccountDraft, AccountLoginInput, AccountTask, CookieBrowser } from '@/types'
+import type {
+  Account,
+  AccountDraft,
+  AccountLoginInput,
+  AccountTask,
+  ChromeImportProfile,
+  CookieBrowser,
+} from '@/types'
 import AccountsPanel from './AccountsPanel.vue'
 
 vi.mock('@/desktop', () => ({ keepPage: () => () => {} }))
@@ -17,6 +24,9 @@ vi.mock('@/api', async (original) => {
       discoverCookieAccounts: vi.fn(),
       importCookieAccounts: vi.fn(),
       dismissAccountTask: vi.fn(),
+      chromeImportProfiles: vi.fn(),
+      importChromeAccounts: vi.fn(),
+      refreshAccount: vi.fn(),
     },
   }
 })
@@ -42,6 +52,8 @@ interface CookieState {
   cookieFiles: { name: string; text: string }[]
   cookieCandidates: Candidate[]
   selectedCookieUsers: string[]
+  toggleAllCookieCandidates: () => void
+  allCookieCandidatesSelected: boolean
   cookieImportError: string
   cookieDiscoveryError: string
   cookieEnvironment: AccountLoginInput
@@ -51,6 +63,16 @@ interface CookieState {
   cookieBrowsers: CookieBrowser[]
   selectedBrowsers: string[]
   importBrowserAccounts: () => Promise<void>
+  showChromeImport: boolean
+  chromeProfiles: ChromeImportProfile[]
+  selectedChromeProfiles: string[]
+  openChromeImport: () => Promise<void>
+  importChromeAccounts: () => Promise<void>
+  toggleAllChromeProfiles: () => void
+  transitionText: (account: Account) => string
+  refreshAccounts: (accounts: Account[]) => Promise<void>
+  toggleAccountSelected: (id: string) => void
+  bulkDelete: () => void
   importCookieAccounts: (direct?: boolean) => Promise<void>
   discoverCookieAccounts: () => Promise<void>
   closeCookieImport: () => void
@@ -93,7 +115,7 @@ function mount() {
   const taskEvents = vi.fn()
   const refresh = vi.fn()
   const props = reactive({
-    accounts: [],
+    accounts: [] as Account[],
     tasks: [] as AccountTask[],
     loading: false,
     error: '',
@@ -105,6 +127,7 @@ function mount() {
     onRefreshTasks: refresh,
     onRefresh: vi.fn(),
     onNotice: vi.fn(),
+    onDelete: vi.fn(),
   })
   const instance = mountSetup<CookieState>(AccountsPanel, props)
   cleanups.push(instance.unmount)
@@ -410,6 +433,91 @@ describe('background Cookie account tasks', () => {
       locale: '',
       timezone: '',
     })
+  })
+
+  it('never selects or submits existing identities from raw Cookie text or files', async () => {
+    const { state } = mount()
+    state.cookieFiles = [{ name: 'state.json', text: '{"cookies":[]}' }]
+    vi.mocked(api.discoverCookieAccounts).mockResolvedValue([candidate(0, true)])
+    await state.discoverCookieAccounts()
+    expect(state.selectedCookieUsers).toEqual([])
+    state.toggleAllCookieCandidates()
+    expect(state.selectedCookieUsers).toEqual([])
+    expect(state.allCookieCandidatesSelected).toBe(false)
+    state.selectedCookieUsers = ['0:0']
+    await state.importCookieAccounts()
+    expect(api.importCookieAccounts).not.toHaveBeenCalled()
+    expect(state.cookieFiles).toHaveLength(1)
+  })
+
+  it('keeps CDP imports from overwriting existing identities', async () => {
+    const { state } = mount()
+    state.cookieBrowsers = [{ ...candidate(0, true), address: 'http://browser.example.test:9222' }]
+    state.selectedBrowsers = ['http://browser.example.test:9222#0']
+    await state.importBrowserAccounts()
+    expect(api.importCookieAccounts).not.toHaveBeenCalled()
+  })
+
+  it('allows Chrome reimport selection while preserving source ID and task acceptance', async () => {
+    const { state, taskEvents, refresh } = mount()
+    const profile: ChromeImportProfile = {
+      id: 'existing-source',
+      email: 'existing@example.test',
+      profile: 'Default',
+      display_name: 'Existing account',
+      locale: 'en',
+    }
+    vi.mocked(api.chromeImportProfiles).mockResolvedValue([profile])
+    vi.mocked(api.importChromeAccounts).mockResolvedValue({ ...queued(), kind: 'chrome' })
+    await state.openChromeImport()
+    state.toggleAllChromeProfiles()
+    expect(state.selectedChromeProfiles).toEqual([profile.id])
+    await state.importChromeAccounts()
+    expect(api.importChromeAccounts).toHaveBeenCalledWith({
+      accounts: [{ id: profile.id, email: profile.email }],
+      proxy: '',
+      locale: '',
+      timezone: '',
+    })
+    expect(state.showChromeImport).toBe(false)
+    expect(taskEvents).toHaveBeenCalledWith({ ...queued(), kind: 'chrome' })
+    expect(refresh).toHaveBeenCalled()
+  })
+
+  it('shows asynchronous transitions and keeps batch deletion separate from refreshing', async () => {
+    const { state, props } = mount()
+    const account: Account = {
+      id: 'fixture-account',
+      label: 'Fixture',
+      enabled: true,
+      state: 'ready',
+      proxy: '',
+      egress: '',
+      locale: '',
+      timezone: '',
+      models: [],
+      benefit_tier: 'Unknown',
+      message: '',
+      active_requests: 2,
+    }
+    const draining: Account = { ...account, id: 'draining', transition: 'draining' }
+    const syncing: Account = { ...account, id: 'syncing', transition: 'syncing' }
+    expect(state.transitionText(draining)).toBe(
+      messages['accounts.drainingRequests'].replace('{count}', '2'),
+    )
+    expect(state.transitionText({ ...draining, active_requests: 0 })).toBe(
+      messages['accounts.draining'],
+    )
+    expect(state.transitionText(syncing)).toBe(messages['accounts.syncing'])
+    expect(state.transitionText(account)).toBe('')
+    await state.refreshAccounts([draining, syncing])
+    expect(api.refreshAccount).not.toHaveBeenCalled()
+    props.accounts = [account, draining]
+    await nextTick()
+    state.toggleAccountSelected(account.id)
+    state.toggleAccountSelected(draining.id)
+    state.bulkDelete()
+    expect(props.onDelete).toHaveBeenCalledWith([account, draining])
   })
 
   it('retains failed input for a method switch and marks only confirmed successes', async () => {

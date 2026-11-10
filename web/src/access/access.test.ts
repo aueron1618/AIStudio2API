@@ -6,7 +6,7 @@ import type { Model } from '@/types'
 import AccessPanel from '@/components/AccessPanel.vue'
 import GetCodeDialog from '@/playground/GetCodeDialog.vue'
 import { capabilities } from './capabilities'
-import { clients, type ClientInput } from './clients'
+import { clients, type ClientInput, type Protocol } from './clients'
 import { endpointExample, endpointGroups, endpointPath } from './endpoints'
 
 const catalog = vi.hoisted(() => ({ value: [] as Model[] }))
@@ -73,7 +73,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-function clientInput(model: Model): ClientInput {
+function clientInput(model: Model, protocol: Protocol = 'chat'): ClientInput {
   return {
     origin,
     key: 'fixture-key',
@@ -83,15 +83,18 @@ function clientInput(model: Model): ClientInput {
     models: catalog.value,
     catalog: catalog.value,
     shell: 'unix',
-    cherry: 'openai',
+    protocol,
     t: (key) => messages[key],
   }
 }
 
 describe('Access fixed-channel contracts', () => {
-  it('retains the fourteen upstream clients and all capability families', () => {
-    expect(clients).toHaveLength(14)
-    expect(new Set(clients.map((client) => client.id)).size).toBe(14)
+  it('retains the fourteen existing clients, adds Magpie and keeps all capability families', () => {
+    expect(clients).toHaveLength(15)
+    expect(new Set(clients.map((client) => client.id)).size).toBe(15)
+    expect(clients.map((client) => client.id)).toEqual(
+      expect.arrayContaining(['gemini-cli', 'hermes', 'magpie']),
+    )
     expect(capabilities.map((capability) => capability.id)).toEqual([
       'chat',
       'image',
@@ -106,24 +109,28 @@ describe('Access fixed-channel contracts', () => {
     ])
   })
 
-  it.each(clients.map((client) => [client.id, client] as const))(
-    '%s keeps Build aliases on their permitted protocol entrance',
-    (_id, client) => {
-      const text = JSON.stringify(client.steps(clientInput(aliasModel)))
-      if (client.id === 'claude-code') {
-        expect(text).toContain(`${origin}/build`)
-        expect(text).not.toContain(`${origin}/build/v1`)
-      } else if (client.protocol.includes('OpenAI')) {
-        expect(text).toContain(`${origin}/build/v1`)
-        expect(text).not.toContain(`${origin}/v1/chat`)
-      } else {
-        expect(text).toContain(origin)
-        expect(text).not.toContain(`${origin}/build`)
-      }
-      const normalText = JSON.stringify(client.steps(clientInput(normal)))
-      expect(normalText).not.toContain(`${origin}/build`)
-    },
-  )
+  it.each(
+    clients.flatMap((client) =>
+      client.protocols.map((protocol) => [client.id, protocol, client] as const),
+    ),
+  )('%s/%s keeps Build aliases on their permitted protocol entrance', (_id, protocol, client) => {
+    const text = JSON.stringify(client.steps(clientInput(aliasModel, protocol)))
+    if (protocol === 'gemini' && !client.importsAll) {
+      expect(text).toContain(origin)
+      expect(text).not.toContain(`${origin}/build`)
+    } else if (
+      client.id === 'new-api' ||
+      (protocol === 'anthropic' && !['opencode', 'sillytavern', 'magpie'].includes(client.id))
+    ) {
+      expect(text).toContain(`${origin}/build`)
+      expect(text).not.toContain(`${origin}/build/v1`)
+    } else {
+      expect(text).toContain(`${origin}/build/v1`)
+      expect(text).not.toContain(`${origin}/v1/chat`)
+    }
+    const normalText = JSON.stringify(client.steps(clientInput(normal, protocol)))
+    expect(normalText).not.toContain(`${origin}/build`)
+  })
 
   it('does not advertise Playground models in a fixed Build OpenCode provider', () => {
     const steps = clients.find((client) => client.id === 'opencode')!.steps(clientInput(aliasModel))
@@ -135,18 +142,53 @@ describe('Access fixed-channel contracts', () => {
     expect(Object.keys(config.provider.aistudio2api!.models)).toEqual(['build-only', alias])
   })
 
-  it.each(['openai', 'anthropic', 'gemini'] as const)(
+  it.each(['chat', 'responses', 'anthropic', 'gemini'] as const)(
     'uses the same %s URL in Cherry fields and import links',
-    (cherry) => {
+    (protocol) => {
       const client = clients.find((item) => item.id === 'cherry-studio')!
-      const input = { ...clientInput(aliasModel), cherry }
+      const input = clientInput(aliasModel, protocol)
       const expected =
-        origin + (cherry === 'openai' ? '/build/v1' : cherry === 'anthropic' ? '/build' : '')
+        origin + (protocol === 'gemini' ? '' : protocol === 'anthropic' ? '/build' : '/build/v1')
       expect(JSON.stringify(client.steps(input))).toContain(expected)
       const url = new URL(client.links!(input)[0]!.href)
       expect(JSON.parse(atob(url.searchParams.get('data')!))).toMatchObject({ baseUrl: expected })
     },
   )
+
+  it('keeps all models for Gemini OpenCode while filtering fixed-channel providers', () => {
+    const client = clients.find((item) => item.id === 'opencode')!
+    const step = client.steps(clientInput(aliasModel, 'gemini'))[0]!
+    if (step.kind !== 'code') throw new Error('Missing configuration')
+    const config = JSON.parse(step.code)
+    expect(config.provider.aistudio2api.options.baseURL).toBe(`${origin}/v1beta`)
+    expect(config.provider.aistudio2api.npm).toBe('@ai-sdk/google')
+    expect(Object.keys(config.provider.aistudio2api.models)).toEqual([
+      'normal',
+      'build-only',
+      alias,
+    ])
+  })
+
+  it('imports Magpie with fixed OpenAI/Anthropic channels and automatic Gemini routing', () => {
+    const client = clients.find((item) => item.id === 'magpie')!
+    const url = new URL(client.links!(clientInput(aliasModel))[0]!.href)
+    expect(url.searchParams.get('chat')).toBe(`${origin}/build/v1`)
+    expect(url.searchParams.get('responses')).toBe(`${origin}/build/v1`)
+    expect(url.searchParams.get('anthropic')).toBe(`${origin}/build`)
+    expect(url.searchParams.get('gemini')).toBe(`${origin}/v1beta`)
+    expect(url.searchParams.get('key')).toBe('fixture-key')
+    expect(client.noModel).not.toBe(true)
+  })
+
+  it('does not advertise Playground-only models in a fixed Build New API channel', () => {
+    const client = clients.find((item) => item.id === 'new-api')!
+    const step = client.steps(clientInput(aliasModel))[0]!
+    if (step.kind !== 'fields') throw new Error('Missing fields')
+    expect(
+      step.fields.find((field) => field.label === messages['access.field.newapiModels'])?.value,
+    ).toBe(`build-only,${alias}`)
+    expect(client.noModel).not.toBe(true)
+  })
 
   it('routes every REST/WebSocket endpoint example while leaving v1beta auto and media unchanged', () => {
     for (const group of endpointGroups)

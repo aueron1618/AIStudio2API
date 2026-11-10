@@ -52,7 +52,7 @@ type pageLoad struct {
 	responses map[string]string
 	// headers 是页面第一个带 x-aistudio-visit-id 的 MakerSuite 请求的请求头，键为小写名称
 	headers map[string]string
-	// image 表示官方 WAA 程序的 /generate_204 图片请求已完成
+	// image 表示官方 WAA 程序的 /generate_204 图片请求已结束，网络错误与 204 一样在页面中以 error 事件结束
 	image bool
 }
 
@@ -273,7 +273,7 @@ func (client *bidiClient) observe(message map[string]any) {
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	load := client.loads[contextID]
-	if load != nil && method == "network.responseCompleted" && strings.EqualFold(parsed.Hostname(), "aistudio.google.com") && path.Base(parsed.Path) == "generate_204" {
+	if load != nil && (method == "network.responseCompleted" || method == "network.fetchError") && strings.EqualFold(parsed.Hostname(), "aistudio.google.com") && path.Base(parsed.Path) == "generate_204" {
 		load.image = true
 		return
 	}
@@ -397,6 +397,7 @@ func (client *bidiClient) closeChannel(name string) {
 
 // installCookies 按 storage state 的顺序与分区逐个恢复 Cookie
 func (client *bidiClient) installCookies(ctx context.Context, cookies []storageCookie) error {
+	now := float64(time.Now().UnixNano()) / 1e9
 	for _, item := range cookies {
 		cookie := map[string]any{
 			"name":     item.Name,
@@ -417,7 +418,13 @@ func (client *bidiClient) installCookies(ctx context.Context, cookies []storageC
 		if item.PartitionKey != "" {
 			params["partition"] = map[string]any{"type": "storageKey", "sourceOrigin": item.PartitionKey}
 		}
-		if _, err := client.command(ctx, "storage.setCookie", params); err != nil {
+		method := "storage.setCookie"
+		if item.Expires >= 0 && item.Expires <= now {
+			method = "storage.deleteCookies"
+			delete(params, "cookie")
+			params["filter"] = map[string]any{"name": item.Name, "domain": item.Domain, "path": item.Path}
+		}
+		if _, err := client.command(ctx, method, params); err != nil {
 			return fmt.Errorf("写入 Cookie %s: %w", item.Name, err)
 		}
 	}
@@ -680,7 +687,7 @@ func (client *bidiClient) waitLoad(ctx context.Context, contextID string, timeou
 			return fmt.Errorf("页面载入 %s 内没有%s", timeout, what)
 		}
 		if err := waitContext(ctx, 100*time.Millisecond); err != nil {
-			return err
+			return fmt.Errorf("等待页面载入%s: %w", what, err)
 		}
 	}
 }

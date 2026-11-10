@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
+import { nextTick, reactive } from 'vue'
 import type { Model } from '@/types'
 import { generateCode } from './code'
+import {
+  attachmentBlob,
+  attachmentURL,
+  cacheAttachmentBlob,
+  copyAttachmentBlob,
+  useAttachmentPreview,
+} from './attachment'
+import { driveFileExists } from './drive'
 import { createOpenAIVideo, waitOpenAIVideo } from './media/api'
 import { videoCode } from './media/code'
 import { liveCode } from './media/live-code'
@@ -45,7 +54,10 @@ const input: Parameters<typeof generateCode>[1] = {
   previous: undefined,
 }
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
 
 describe('fixed public channel URLs', () => {
   it('keeps dual-channel and unknown models on Playground, and routes Build-only models explicitly', () => {
@@ -498,12 +510,14 @@ describe('Interactions and current media capabilities', () => {
       event_type: 'interaction.completed',
       interaction: {
         id: 'interaction-id',
+        environment_id: 'environment-id',
         status: 'completed',
         usage: { total_input_tokens: 2, total_output_tokens: 3, total_thought_tokens: 4 },
       },
     }
     expect(call.decoder.event(completed)).toMatchObject({
       interactionId: 'interaction-id',
+      environmentId: 'environment-id',
       tokens: 7,
       thoughtTokens: 4,
       promptTokens: 2,
@@ -534,4 +548,51 @@ describe('Interactions and current media capabilities', () => {
       expect(wav).toContain('https://example.test/build/v1')
     },
   )
+})
+
+describe('merged media previews', () => {
+  it('reuses cached media Blobs across reactive wrappers and copies without changing API parts', async () => {
+    const createURL = vi
+      .spyOn(URL, 'createObjectURL')
+      .mockReturnValueOnce('blob:fixture-original')
+      .mockReturnValueOnce('blob:fixture-copy')
+    const revokeURL = vi.spyOn(URL, 'revokeObjectURL')
+    const blob = new Blob(['offline media'], { type: 'video/mp4' })
+    const inline = { mimeType: 'video/mp4', data: 'b2ZmbGluZQ==' }
+    const part: Part = {
+      inlineData: inline,
+      fileData: { mimeType: 'video/mp4', fileUri: 'https://example.test/v1beta/files/fixture' },
+      fileName: 'fixture.mp4',
+    }
+    cacheAttachmentBlob(inline, blob)
+    expect(attachmentURL(reactive(part))).toBe('blob:fixture-original')
+    expect(attachmentBlob(part)).toBe(blob)
+    const clone = { ...inline }
+    copyAttachmentBlob(inline, clone)
+    expect(attachmentBlob({ inlineData: clone })).toBe(blob)
+    expect(attachmentURL({ inlineData: clone })).toBe('blob:fixture-copy')
+    expect(createURL).toHaveBeenCalledTimes(2)
+    expect(apiPart(part)).toEqual({ fileData: part.fileData })
+    const { preview, show } = useAttachmentPreview()
+    await show(part)
+    expect(preview.src).toBe('blob:fixture-original')
+    preview.open = false
+    await nextTick()
+    expect(preview.src).toBe('')
+    expect(preview.part).toBeUndefined()
+    expect(revokeURL).not.toHaveBeenCalled()
+  })
+
+  it('checks missing uploaded files through the local Files API', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(Response.json({ name: 'files/fixture' }))
+    vi.stubGlobal('fetch', fetch)
+    expect(await driveFileExists('https://example.test/v1beta/files/fixture')).toBe(false)
+    expect(await driveFileExists('https://example.test/v1beta/files/fixture')).toBe(true)
+    expect(fetch.mock.calls.every(([path]) => path === '/v1beta/files/fixture')).toBe(true)
+    expect(await driveFileExists('invalid-reference')).toBe(false)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
 })

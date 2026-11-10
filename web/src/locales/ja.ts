@@ -5,6 +5,12 @@ export { default as serverMessages } from '../../../internal/i18n/messages/ja.js
 
 // messages 是界面文案与管理接口错误码文案
 export const messages: Record<TranslationKey, string> = {
+  'access.client.geminiCli': 'Google のターミナル向けエージェント。Gemini API で接続します',
+  'access.client.hermes':
+    'Nous Research のオープンソースエージェント。カスタムプロバイダーとして接続します',
+  'access.step.geminiAuth':
+    '{name} の設定ファイルに次の内容を追加し、Gemini API キー認証を選びます',
+  'access.step.envFile': 'または .env ファイルに書き込めば、以後はそのまま {name} を起動できます',
   'accounts.localeZhCN': '中国語（中国）',
   'accounts.localeEnUS': '英語（米国）',
   'accounts.timezoneShanghai': '中国標準時',
@@ -210,6 +216,16 @@ export const messages: Record<TranslationKey, string> = {
   'accounts.refreshedAll': '{count} 件のアカウントを更新しました（失敗 {failed} 件）',
   'accounts.refreshingAll': '更新中 {done}/{total}',
   'accounts.queued': '待機中',
+  'accounts.selectAllRows': 'すべてのアカウントを選択',
+  'accounts.selectRow': '{name} を選択',
+  'accounts.selectedCount': '{count} 件選択中',
+  'accounts.totalCount': '{count} 件のアカウント',
+  'accounts.bulk': '一括操作',
+  'accounts.bulkEnabled': '{count} 件のアカウントを有効にしました（失敗 {failed} 件）',
+  'accounts.bulkDisabled': '{count} 件のアカウントを無効にしました（失敗 {failed} 件）',
+  'accounts.draining': '無効化中 · 後処理中',
+  'accounts.drainingRequests': '無効化中 · 残り {count} 件',
+  'accounts.syncing': '有効化中 · モデルを同期',
   'accounts.refreshFailed': '更新失敗',
   'accounts.saved': 'アカウントを保存しました',
   'accounts.remoteAdd': 'リモートで追加',
@@ -338,15 +354,45 @@ export const messages: Record<TranslationKey, string> = {
   'settings.perAccountConcurrency': 'アカウントあたりの同時リクエスト数',
   'settings.routingStrategy': 'アカウントの選択方法',
   'settings.routingRoundRobin': 'ラウンドロビン',
+  'settings.accountOrder': 'アカウントの順序',
+  'settings.accountOrderHelp':
+    '同じアカウントを優先する場合、この順序で使用し、上限到達・クールダウン中・利用不可のときは次のアカウントに切り替えます',
+  'settings.accountOrderUp': '{account} を上へ移動',
+  'settings.accountOrderDown': '{account} を下へ移動',
   'settings.routingFillFirst': '同じアカウントを優先',
   'settings.routingHelp':
     'ラウンドロビンは順番にアカウントを使い、同じアカウントを優先すると上限到達か利用不可まで同じアカウントを使います',
   'settings.waaBackend': 'WAA バックエンド',
-  'settings.waaBackendCamoufox': 'Camoufox ブラウザ',
+  'settings.waaBackendCamoufox': 'Camoufox',
   'settings.waaBackendSpiderMonkey': 'SpiderMonkey',
   'settings.waaBackendHelp':
     'SpiderMonkey はサービス プロセス内で動作し Camoufox 不要。アカウントのログインにはブラウザが必要',
-  'settings.upstreamChannels': '上流チャネル',
+  'settings.helpFor': '{label}の説明',
+  'settings.section.runtime': '実行とチャネル',
+  'settings.section.models': 'モデルとプロトコル',
+  'settings.workerCapacity': 'Worker 容量',
+  'settings.workerCapacityHelp':
+    'スライダーの両端は常駐 Worker 数とピーク上限です。同時起動数はコールドスタート数、アカウント別並列数は同時リクエスト数を制限します。両バックエンドの既定値は 0/1/1/1 で、必要時に起動してピークメモリを抑えます',
+  'settings.capacitySummary': '{accounts} 個のアカウントで最大 {requests} 件を同時に処理',
+  'settings.accountOrderDrag': '{account} をドラッグして並べ替え',
+  'settings.accountOrderRemove': '{account} を削除',
+  'settings.accountOrderAdd': '優先アカウントを追加',
+  'settings.accountOrderClear': '優先アカウントをクリア',
+  'settings.accountOrderUnset': '未指定（アカウント ID 順に使用）',
+  'settings.accountOrderRest': '残りの {count} 個のアカウントは ID 順に続きます',
+  'settings.authPathAdd': 'パスを追加',
+  'settings.authPathBrowse': '参照',
+  'settings.authPathRemove': '{path} を削除',
+  'settings.authPathRow': 'パス {index}',
+  'settings.pathPickerTitle': 'アカウントファイルまたはフォルダを選択',
+  'settings.pathPickerRoots': 'ドライブ一覧',
+  'settings.pathPickerUp': '1 つ上へ',
+  'settings.pathPickerEmpty': 'フォルダまたはアカウント状態ファイルがありません',
+  'settings.pathPickerSelect': 'このフォルダを選択',
+  'settings.legacy': 'レガシー',
+  'settings.buildLegacyNotice':
+    '旧版 Build チャネルは上流で拒否される場合があります。固定 /build/v1 経路は Playground に切り替えません',
+  'settings.channelRow': '{channel} チャネル',
   'settings.upstreamChannelsHelp':
     '既定は Playground。Build は旧チャネルで上流の生成は停止済み。オン時、拒否されたリクエストは Playground で完了',
   'settings.modelMapping': 'モデルのマッピング',
@@ -366,6 +412,10 @@ export const messages: Record<TranslationKey, string> = {
   'channel.assistant': 'Build チャット',
   'logs.channel': 'チャネル',
   'models.channels': 'チャネル',
+  'models.accounts': '利用アカウント',
+  'models.accountsHelp':
+    '自動選択ではこれらのアカウントのみを使用します。未選択の場合はすべてのアカウントを使用します',
+  'models.accountsSaved': 'アカウントを保存し、すぐに反映しました',
   'models.channelAll': 'すべてのチャネル',
   'models.channelSaved': 'チャネルを保存し、すぐに反映しました',
   'settings.activeValue': '適用中の値',
@@ -1221,6 +1271,8 @@ export const messages: Record<TranslationKey, string> = {
   'pg.environmentSources': 'ソース',
   'pg.sourcesTip': '環境にマウントするソース',
   'pg.addSources': 'ソースを追加',
+  'pg.viewSources': 'ソースを表示',
+  'pg.viewRules': 'ルールを表示',
   'pg.oneSource': '1 個のソース',
   'pg.sourceCount': '{count} 個のソース',
   'pg.environmentNetwork': 'ネットワーク',
@@ -1668,27 +1720,19 @@ export const messages: Record<TranslationKey, string> = {
   'nav.usage': '使用量',
   'common.undo': '元に戻す',
   'accounts.deletedNamed': 'アカウント {name} を削除しました',
+  'accounts.deletedCount': '{count} 件のアカウントを削除しました',
   'logs.body': 'リクエストとレスポンスの本文',
   'logs.requestBody': 'リクエスト本文',
   'logs.responseBody': 'レスポンス本文',
   'logs.bodyMissing':
     '本文は保存されていません。設定で「リクエスト本文を保存」をオンにしてください',
   'settings.section.service': 'サービス',
-  'settings.section.serviceHelp':
-    '生成サービスの起動方法、待ち受けアドレス、アカウント ファイルの場所',
   'settings.section.capacity': '容量',
-  'settings.section.capacityHelp': 'Worker の数、コールド スタートの同時数、アカウントの振り分け',
-  'settings.section.upstream': '上流',
-  'settings.section.upstreamHelp': '上流チャネル、WAA の実行方法、タイムアウト',
   'settings.section.network': 'ネットワーク',
-  'settings.section.networkHelp':
-    'ログイン、インポート、アカウントのリクエストで使うデフォルトの接続経路',
   'settings.section.security': 'セキュリティとログ',
-  'settings.section.securityHelp': 'コンソールのログイン、リクエスト本文の記録、ログファイル',
   'settings.effect.immediate': '保存するとすぐに反映',
   'settings.effect.service': '生成サービスの再起動後に反映',
   'settings.effect.management': 'アプリの再起動後に反映',
-  'settings.unsavedField': '未保存',
   'settings.unsavedSection': 'このセクションには未保存の変更があります',
   'settings.unsavedBar': '未保存の変更',
   'settings.unsavedCount': '未保存の変更が {count} 件あります',
@@ -1730,13 +1774,13 @@ export const messages: Record<TranslationKey, string> = {
   'settings.keyDuplicate': 'キー {key} はすでに一覧にあるため、追加していません',
   'settings.authPathHelp': 'アカウントのファイル、ディレクトリ、またはカンマ区切りの複数のパス。',
   'settings.warmWorkerLimitHelp':
-    '生成サービスの起動後にウォームアップしたまま常駐させるアカウントの数。',
+    '既定値 0：必要時に起動し、30 秒間アイドル状態になると全 Worker を解放します。',
   'settings.maxActiveWorkersHelp': 'ピーク時に同時実行する Worker の上限',
   'settings.warmStartupConcurrencyHelp':
     '両バックエンドの同時コールドスタート数。既定値 1 でピークメモリを抑制',
   'settings.perAccountConcurrencyHelp': '1 つのアカウントで同時に実行するリクエストの数。',
   'settings.buildNativeHelp':
-    '非ストリーミング リクエストは Build を優先し、使えない場合は Playground を使用',
+    '自動ルーティングの非ストリーミング要求は Build を優先します。固定 URL チャネルが優先されます',
   'settings.nonstreamKeepaliveHelp':
     '結果を待つ間 10 秒ごとに改行を送り、リバースプロキシが接続を切らないようにする',
   'settings.fakeStreamHelp':
@@ -1957,8 +2001,6 @@ export const messages: Record<TranslationKey, string> = {
   'theme.dark': 'ダーク',
   'nav.access': '接続',
   'section.access.title': '接続ガイド',
-  'section.access.description':
-    'サービスの URL とキー、クライアントの設定、機能ごとのサンプルコード、すべてのエンドポイント',
   'access.nav.start': 'クイックスタート',
   'access.nav.clients': 'クライアント',
   'access.nav.capabilities': '機能とサンプル',
@@ -2005,6 +2047,7 @@ export const messages: Record<TranslationKey, string> = {
   'access.tierHaiku': 'Haiku 用モデル',
   'access.importCCSwitch': 'CC Switch にインポート',
   'access.importCherry': 'Cherry Studio にインポート',
+  'access.importMagpie': 'Magpie にインポート',
   'access.importHelp':
     'このコンピュータにアプリがインストールされている必要があります。アプリ側でインポートを確認してください',
   'access.dockerNote':
@@ -2013,37 +2056,36 @@ export const messages: Record<TranslationKey, string> = {
     'Anthropic のターミナル向けコーディングエージェント。Anthropic Messages で接続し、Opus・Sonnet・Haiku の各ティアに別々のモデルを指定できます',
   'access.client.codex':
     'OpenAI のターミナル向けコーディングエージェント。OpenAI Responses で接続します',
-  'access.client.geminiCli': 'Google のターミナル向けエージェント。Gemini API で接続します',
   'access.client.opencode':
-    'オープンソースのターミナル向けコーディングエージェント。OpenAI 互換プロバイダーとして接続し、設定にすべてのチャットモデルを列挙します',
+    'オープンソースのターミナル向けコーディングエージェント。設定にすべてのチャットモデルを列挙します',
   'access.client.openclaw':
-    'オープンソースのパーソナルアシスタントエージェント。OpenAI 互換プロバイダーとして接続します',
-  'access.client.hermes':
-    'Nous Research のオープンソースエージェント。カスタムプロバイダーとして接続します',
+    'オープンソースのパーソナルアシスタントエージェント。設定ファイルにカスタムプロバイダーを追加します',
+  'access.client.magpie':
+    'モデル切替ゲートウェイ。このサービスのモデルを Claude Code、Codex などのエージェントから使えるようにします',
   'access.client.pi':
     'オープンソースのターミナル向けコーディングエージェント。models.json にカスタムプロバイダーを追加します',
-  'access.client.omp':
-    'pi の拡張版。チャットは OpenAI 互換 API、ウェブ検索は Gemini API を使います',
+  'access.client.omp': 'pi の拡張版。ウェブ検索は Gemini API を使います',
   'access.client.dsh':
-    'DeepSeek のターミナル向けエージェント。パッチファイルで OpenAI 互換プロバイダーを追加します',
+    'DeepSeek のターミナル向けエージェント。パッチファイルでカスタムプロバイダーを追加します',
   'access.client.cherry':
     'デスクトップ AI クライアント。OpenAI、Gemini、Anthropic のいずれかのタイプでプロバイダーを追加します',
   'access.client.sillytavern':
-    'ロールプレイ向けチャットフロントエンド。Google AI Studio ソースにリバースプロキシを設定します',
+    'ロールプレイ向けチャットフロントエンド。チャット補完ソースにリバースプロキシを設定します',
   'access.client.openWebui': 'セルフホスト型のウェブチャット UI。OpenAI 互換の接続を追加します',
   'access.client.lobechat':
-    'オープンソースのチャットアプリ。Google プロバイダーにプロキシアドレスを設定します',
-  'access.client.newApi': 'API ゲートウェイ兼配信システム。Gemini チャネルを追加します',
+    'オープンソースのチャットアプリ。対応するプロバイダーにプロキシアドレスを設定します',
+  'access.client.newApi':
+    'API ゲートウェイ兼配信システム。選択したプロトコルのチャネルを追加します',
   'access.step.envRun': 'ターミナルで環境変数を設定して {name} を起動します',
-  'access.step.geminiAuth':
-    '{name} の設定ファイルに次の内容を追加し、Gemini API キー認証を選びます',
   'access.step.settingsFile':
     'または設定ファイルに次の内容を追加すれば、以後はそのまま {name} を起動できます',
   'access.step.configFile': '{name} の設定ファイルに次の内容を追加します',
   'access.step.keyRun': 'ターミナルでキーの環境変数を設定して {name} を起動します',
-  'access.step.envFile': 'または .env ファイルに書き込めば、以後はそのまま {name} を起動できます',
   'access.step.ompSearch': 'config.yml でウェブ検索のロールを Gemini プロバイダーに割り当てます',
   'access.step.patchFile': '次の内容をパッチファイルとして保存します',
+  'access.step.magpieImport': 'またはターミナルで次のコマンドを実行してインポートします',
+  'access.step.magpieManual':
+    '手動で追加する場合は {name} の Providers で Add provider から Custom provider を選び、次の項目を入力します',
   'access.step.cherry':
     '「設定 → モデルプロバイダー」でプロバイダーを追加して次の項目を入力し、モデル一覧から使うモデルを追加します',
   'access.step.sillytavern': '「API接続」パネルで次の項目を選択・入力し、「接続」をクリックします',
@@ -2051,7 +2093,7 @@ export const messages: Record<TranslationKey, string> = {
     '「管理者パネル → 設定 → 接続」で OpenAI API に接続を追加し、次の項目を入力します',
   'access.step.dockerEnv': 'Docker でデプロイする場合は環境変数でも設定できます',
   'access.step.lobechat':
-    '「設定 → AIサービスプロバイダー → Google」で次の項目を入力し、プロバイダーを有効にします',
+    '「設定 → AIサービスプロバイダー」で下記のプロバイダーを開き、項目を入力して有効にします',
   'access.step.newApi':
     '「チャネル」で「チャネルを作成」をクリックし、プロバイダーを選んで次の項目を入力します',
   'access.field.cherryType': 'プロバイダータイプ',
@@ -2061,10 +2103,14 @@ export const messages: Record<TranslationKey, string> = {
   'access.field.stSource': 'チャット補完ソース',
   'access.field.stUrl': 'プロキシサーバー URL',
   'access.field.stPassword': 'プロキシパスワード',
-  'access.field.stModel': 'Google モデル',
+  'access.field.stModel': 'モデル',
   'access.field.webuiKey': 'キー',
   'access.field.lobeKey': 'API キー',
   'access.field.lobeUrl': 'API プロキシアドレス',
+  'access.field.lobeResponses': 'Responses API 規格の使用',
+  'access.field.lobeOn': 'オン',
+  'access.field.webuiApiType': 'APIの種類',
+  'access.field.webuiResponses': '応答',
   'access.field.newapiProvider': 'プロバイダ',
   'access.field.newapiUrl': 'ベースURL',
   'access.field.newapiKey': 'APIキー',

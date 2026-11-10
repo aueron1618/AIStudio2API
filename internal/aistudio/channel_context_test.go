@@ -149,3 +149,61 @@ func TestContextChannelAndAPIKeyScope(t *testing.T) {
 		})
 	}
 }
+
+func TestContextChannelAndModelAccountScope(t *testing.T) {
+	model := Model{ID: "shared", Methods: []string{"generateContent"}}
+	accounts := []*Account{
+		{ID: "a", Config: AccountConfig{Enabled: true}, State: AccountReady, Models: []Model{model}},
+		{ID: "b", Config: AccountConfig{Enabled: true}, State: AccountReady, Models: []Model{model}},
+		{ID: "c", Config: AccountConfig{Enabled: true}, State: AccountReady, Models: []Model{model}},
+	}
+	pool := NewAccountPool(accounts, 1)
+	pool.SetUpstreamChannels([]Channel{ChannelPlayground, ChannelBuild})
+	pool.SetRoutingStrategy("fill-first")
+	pool.SetAccountOrder([]string{"c", "b", "a"})
+	pool.SetAPIKeyAccounts(map[string][]string{"limited": {"b", "c"}})
+	pool.SetModelAccounts(map[string][]string{model.ID: {"a", "b"}})
+	for _, account := range accounts {
+		if err := pool.SetBuildCatalog(account.ID, []Model{model}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, channel := range []Channel{ChannelPlayground, ChannelBuild} {
+		t.Run(string(channel), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(ContextWithChannel(t.Context(), channel), time.Second)
+			defer cancel()
+			selection := AccountSelection{ModelID: "models/" + model.ID, Method: "generateContent", PreferredChannel: ChannelBuild}
+			for _, key := range []string{"", "limited"} {
+				keyCtx := ContextWithAPIKey(ctx, key)
+				lease, err := pool.AcquireFor(keyCtx, selection)
+				if err != nil || lease == nil || lease.Account().ID != "b" || lease.Channel() != channel {
+					t.Fatalf("model binding, order or URL boundary lost: key=%q lease=%v error=%v", key, lease, err)
+				}
+				if err := lease.Release(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx = ContextWithAPIKey(ctx, "limited")
+			groups, err := pool.ClassifyCandidates(ctx, selection, []string{"a", "b", "c"})
+			if err != nil || !slices.Equal(groups.WarmReady, []string{"b"}) {
+				t.Fatalf("worker candidates escaped model/key intersection: %+v, %v", groups, err)
+			}
+			selection.AllowedAccountIDs = []string{"c"}
+			if lease, err := pool.AcquireFor(ctx, selection); lease != nil || !errors.Is(err, ErrNoEligibleAccount) {
+				t.Fatalf("disjoint model binding allowed an automatic request: %v, %v", lease, err)
+			}
+			selection.AllowedAccountIDs, selection.AccountID = nil, "c"
+			lease, _, err := pool.TryAcquireFor(ctx, selection)
+			if err != nil || lease == nil || lease.Account().ID != "c" || lease.Channel() != channel {
+				t.Fatalf("explicit key-allowed account rejected: %v, %v", lease, err)
+			}
+			if err := lease.Release(); err != nil {
+				t.Fatal(err)
+			}
+			selection.AccountID = "a"
+			if lease, _, err := pool.TryAcquireFor(ctx, selection); lease != nil || !errors.Is(err, ErrNoEligibleAccount) {
+				t.Fatalf("model binding bypassed API key restriction: %v, %v", lease, err)
+			}
+		})
+	}
+}
