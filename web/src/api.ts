@@ -162,8 +162,12 @@ export const api = {
         body: jsonBody(input),
       })
     ).task,
-  cookieBrowsers: async () =>
-    (await requestJSON<{ browsers: CookieBrowser[] }>('/api/accounts/import/browsers')).browsers,
+  cookieBrowsers: async (proxy: string) =>
+    (
+      await requestJSON<{ browsers: CookieBrowser[] }>(
+        `/api/accounts/import/browsers?${new URLSearchParams({ proxy })}`,
+      )
+    ).browsers,
   discoverCookieAccounts: async (input: CookieImportInput, signal?: AbortSignal) =>
     (
       await requestJSON<{ accounts: CookieBrowser[] }>('/api/accounts/import/cookies/discover', {

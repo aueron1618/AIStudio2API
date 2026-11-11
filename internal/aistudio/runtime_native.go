@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,9 @@ type nativeRuntimeUse struct {
 	retired   bool
 	responses map[*nativeResponseBody]struct{}
 }
+
+// ErrProtectedTransport 表示 SpiderMonkey 后端受保护请求在出口连接上失败，VM 与页面状态不受影响
+var ErrProtectedTransport = errors.New("受保护请求网络错误")
 
 var _ ProtectedPreparer = (*NativeWorker)(nil)
 var _ ProtocolHeaderProvider = (*NativeWorker)(nil)
@@ -277,6 +281,10 @@ func (worker *NativeWorker) sendProtected(ctx context.Context, runtime workerRun
 	}
 	response, err := runtime.SendProtected(ctx, request.URL, headers, request.Body)
 	if err != nil {
+		var transport *url.Error
+		if errors.As(err, &transport) {
+			return nil, fmt.Errorf("%w: %w", ErrProtectedTransport, err)
+		}
 		if ctx.Err() == nil {
 			worker.setPhase(WorkerFailed)
 		}
@@ -542,11 +550,11 @@ func (worker *NativeWorker) Close() error {
 	return err
 }
 
-// setPhase 更新账户 WAA runtime 阶段
+// setPhase 更新账户 WAA runtime 阶段，进入关闭后只接受 WorkerClosed
 func (worker *NativeWorker) setPhase(phase WorkerPhase) {
 	worker.stateMu.Lock()
 	defer worker.stateMu.Unlock()
-	if (worker.state.Phase == WorkerClosing || worker.state.Phase == WorkerClosed) && phase != WorkerClosing && phase != WorkerClosed {
+	if current := worker.state.Phase; (current == WorkerClosing || current == WorkerClosed) && phase != WorkerClosed {
 		return
 	}
 	worker.state.Phase = phase

@@ -22,9 +22,9 @@ const { t } = useI18n()
     class="group/row @container min-w-0 border-b border-line py-3.5 last:border-b-0 [&:has([role=switch])_label]:cursor-pointer"
   >
     <div
-      class="flex min-w-0 flex-col gap-3 has-[[role=switch]]:flex-row has-[[role=switch]]:items-center has-[[role=switch]]:justify-between @xl:xl:flex-row @xl:xl:items-start @xl:xl:justify-between @xl:xl:gap-10"
+      class="flex min-w-0 flex-col gap-3 has-[[role=switch]]:flex-row has-[[role=switch]]:items-center has-[[role=switch]]:justify-between @xl:xl:flex-row @xl:xl:items-start @xl:xl:justify-between @xl:xl:gap-10 @xl:xl:has-[[role=switch]]:items-start"
     >
-      <div class="min-w-0 flex-1 @xl:xl:max-w-md @xl:xl:pt-2 has-[+[role=switch]]:pt-0">
+      <div class="min-w-0 flex-1 @xl:xl:max-w-md @xl:xl:pt-2">
         <div class="flex flex-wrap items-center gap-2">
           <span v-if="groupId" :id="`${groupId}-label`" class="text-sm font-medium text-gray-200">{{
             label
@@ -50,7 +50,7 @@ const { t } = useI18n()
       </div>
       <fieldset
         :disabled="env !== undefined"
-        class="w-full min-w-0 disabled:opacity-60 has-[[role=switch]]:w-auto has-[[role=switch]]:shrink-0 @xl:xl:w-80 @xl:xl:shrink-0"
+        class="w-full min-w-0 disabled:opacity-60 has-[[role=switch]]:flex has-[[role=switch]]:w-auto has-[[role=switch]]:shrink-0 @xl:xl:w-80 @xl:xl:shrink-0 @xl:xl:has-[[role=switch]]:py-[11px]"
       >
         <slot />
       </fieldset>

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -19,13 +20,15 @@ type cookieImportAdmin struct {
 	mu           sync.Mutex
 	inputs       []CookieImportInput
 	browserCalls int
+	browserProxy string
 	importCookie func(context.Context, CookieImportInput) (AdminAccount, error)
 }
 
 func (admin *cookieImportAdmin) AccountTaskContext() context.Context { return admin.lifecycle }
 
-func (admin *cookieImportAdmin) CookieBrowsers(context.Context) ([]CookieBrowser, error) {
+func (admin *cookieImportAdmin) CookieBrowsers(_ context.Context, proxy string) ([]CookieBrowser, error) {
 	admin.browserCalls++
+	admin.browserProxy = proxy
 	return []CookieBrowser{{Address: "127.0.0.1:9222", Email: "cookie@example.com", Browser: "Chromium", Locale: "zh-CN", Timezone: "Asia/Shanghai"}}, nil
 }
 
@@ -174,8 +177,9 @@ func TestCookieImportEndpoint(t *testing.T) {
 	if response := serve(path, unicodeLarge, session); response.Code != http.StatusBadRequest {
 		t.Fatal("Cookie limit counted characters instead of UTF-8 bytes")
 	}
+	const browserProxy = "http://proxy.example.test:8080"
 	for _, authenticated := range []bool{false, true} {
-		request := httptest.NewRequest(http.MethodGet, "/api/accounts/import/browsers", nil)
+		request := httptest.NewRequest(http.MethodGet, "/api/accounts/import/browsers?proxy="+url.QueryEscape(browserProxy), nil)
 		if authenticated {
 			request.Header = session.Clone()
 		}
@@ -191,6 +195,9 @@ func TestCookieImportEndpoint(t *testing.T) {
 	}
 	if admin.browserCalls != 1 {
 		t.Fatal("unauthenticated browser discovery reached the service")
+	}
+	if admin.browserProxy != browserProxy {
+		t.Fatal("browser discovery lost the selected proxy")
 	}
 	for _, method := range []string{"browser", "http"} {
 		importTask(encodeItems([]cookieImportItem{{Cookies: "SAPISID=cookie-secret", Method: method}}))

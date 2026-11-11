@@ -95,3 +95,32 @@ func TestInvalidLeaseCannotUpdateRuntime(t *testing.T) {
 		}
 	}
 }
+
+func TestRetainedAccountLeaseDefersCapacityRelease(t *testing.T) {
+	account := &Account{ID: "fixture", Config: AccountConfig{Enabled: true}, State: AccountReady}
+	pool := NewAccountPool([]*Account{account}, 1)
+	selection := AccountSelection{AccountID: account.ID}
+	lease, err := pool.AcquireFor(t.Context(), selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	first, second := lease.Retain(), lease.Retain()
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first(); err != nil {
+		t.Fatal(err)
+	}
+	if next, waitable, err := pool.TryAcquireFor(t.Context(), selection); err != nil || next != nil || !waitable {
+		t.Fatalf("retained lease released its account early: lease=%v waitable=%t err=%v", next, waitable, err)
+	}
+	if err := second(); err != nil {
+		t.Fatal(err)
+	}
+	next, _, err := pool.TryAcquireFor(t.Context(), selection)
+	if err != nil || next == nil {
+		t.Fatalf("final retain did not release account capacity: lease=%v err=%v", next, err)
+	}
+	defer next.Release()
+}
