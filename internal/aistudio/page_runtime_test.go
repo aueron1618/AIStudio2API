@@ -276,6 +276,98 @@ func TestGoPageCanRebuildCanceledProofVM(t *testing.T) {
 	}
 }
 
+func TestGoPageRefreshOutlivesCallerAndJoinsOnClose(t *testing.T) {
+	for _, closePage := range []bool{false, true} {
+		name := "complete"
+		if closePage {
+			name = "close"
+		}
+		t.Run(name, func(t *testing.T) {
+			started, release := make(chan struct{}), make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			defer unblock()
+			var creates atomic.Int32
+			fixture := pageFixtureRoundTrip(t, pageFixtureInterpreter, nil)
+			transport := &pageTestTransport{roundTrip: func(request *http.Request) (*http.Response, error) {
+				if request.URL.String() == waaCreateURL && creates.Add(1) == 2 {
+					close(started)
+					select {
+					case <-release:
+					case <-request.Context().Done():
+						return nil, request.Context().Err()
+					}
+				}
+				return fixture(request)
+			}}
+			runtime, fingerprint := newTestGoPageRuntime(t, transport)
+			if err := runtime.open(t.Context(), fingerprint); err != nil {
+				t.Fatal(err)
+			}
+			previous := runtime.vm
+			runtime.vmMu.Lock()
+			runtime.vmExpires = time.Now().Add(-time.Second)
+			runtime.vmMu.Unlock()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := runtime.RunProof(ctx, "digest", "canceled"); done <- err }()
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("expired VM did not start a background refresh")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("canceled proof waiter = %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("proof cancellation waited for the shared VM refresh")
+			}
+			runtime.vmMu.Lock()
+			refresh := runtime.refreshing
+			reused := refresh != nil && runtime.refreshVM() == refresh
+			runtime.vmMu.Unlock()
+			if !reused {
+				t.Fatal("caller cancellation lost or duplicated the shared VM refresh")
+			}
+			if closePage {
+				go func() { done <- runtime.Close() }()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("page closure did not cancel and join the refresh")
+				}
+				select {
+				case <-refresh.done:
+				default:
+					t.Fatal("page closed before its VM refresh completed")
+				}
+				if refresh.err == nil || runtime.vm != nil || runtime.interpreter != "" || len(runtime.requests) != 0 || len(runtime.timers) != 0 {
+					t.Fatal("closed page retained refresh resources")
+				}
+				return
+			}
+			unblock()
+			select {
+			case <-refresh.done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("background refresh did not complete")
+			}
+			if proof, err := runtime.RunProof(t.Context(), "digest", "next"); err != nil || proof != "!fixture" {
+				t.Fatalf("refreshed proof = %q, %v", proof, err)
+			}
+			if runtime.vm == previous || creates.Load() != 2 {
+				t.Fatal("refresh did not replace the VM exactly once")
+			}
+		})
+	}
+}
+
 func TestGoPageCloseCancelsUnreadBodyAndScheduledRequests(t *testing.T) {
 	body := &imageProbeBody{remaining: 1024}
 	transport := &pageTestTransport{roundTrip: func(request *http.Request) (*http.Response, error) {

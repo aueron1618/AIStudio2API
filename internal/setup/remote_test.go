@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
@@ -210,14 +211,80 @@ func TestRemoteRenewalPersistenceAndCookiePush(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 	})}
-	if err := pushRenewal(t.Context(), client, stored[0]); err != nil || calls != 1 {
+	state := renewalState{renewal: stored[0]}
+	if err := pushRenewal(t.Context(), client, &state); err != nil || calls != 1 {
 		t.Fatalf("renewal push calls=%d error=%v", calls, err)
 	}
 	refreshRemoteCookies = func(context.Context, aistudio.AuthSource, aistudio.ChromeOAuthMaterial, string) ([]aistudio.StateCookie, *aistudio.BoundSession, error) {
 		return nil, nil, context.Canceled
 	}
-	if err := pushRenewal(t.Context(), client, stored[0]); !errors.Is(err, context.Canceled) || calls != 1 {
+	if err := pushRenewal(t.Context(), client, &state); !errors.Is(err, context.Canceled) || calls != 1 {
 		t.Fatal("canceled cookie refresh still made a remote request")
+	}
+}
+
+func TestRemoteRenewalReusesUndeliveredCookies(t *testing.T) {
+	previousRefresh := refreshRemoteCookies
+	t.Cleanup(func() { refreshRemoteCookies = previousRefresh })
+	cookies, err := aistudio.ParseCookieImport("SAPISID=fixture; __Secure-1PAPISID=one; __Secure-3PAPISID=three")
+	if err != nil {
+		t.Fatal(err)
+	}
+	minted, pushes := 0, 0
+	refreshRemoteCookies = func(context.Context, aistudio.AuthSource, aistudio.ChromeOAuthMaterial, string) ([]aistudio.StateCookie, *aistudio.BoundSession, error) {
+		minted++
+		return cookies.Cookies, nil, nil
+	}
+	client := &http.Client{Transport: setupTransport(func(request *http.Request) (*http.Response, error) {
+		pushes++
+		status := http.StatusServiceUnavailable
+		if pushes == 3 {
+			status = http.StatusOK
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	state := renewalState{renewal: remoteRenewal{Origin: "https://fixture.invalid", Account: "user@example.test", Token: "renewal-fixture"}}
+	if err := pushRenewal(t.Context(), client, &state); err == nil || minted != 1 || state.cookies == nil {
+		t.Fatal("failed delivery did not retain the minted session")
+	}
+	mintedAt := state.mintedAt
+	if err := pushRenewal(t.Context(), client, &state); err == nil || minted != 1 || state.mintedAt != mintedAt {
+		t.Fatal("retry minted a second session before the first expired")
+	}
+	state.mintedAt = time.Now().Add(-renewalInterval)
+	if err := pushRenewal(t.Context(), client, &state); err != nil || minted != 2 || pushes != 3 || state.cookies != nil {
+		t.Fatal("expired pending session was not replaced and released after delivery")
+	}
+}
+
+func TestRemoteRenewalStopsRevokedAccounts(t *testing.T) {
+	for code, status := range map[string]int{"pairing_renewal_invalid": http.StatusUnauthorized, "account_not_found": http.StatusNotFound} {
+		t.Run(code, func(t *testing.T) {
+			previousPath, previousRefresh := renewalsPath, refreshRemoteCookies
+			t.Cleanup(func() { renewalsPath, refreshRemoteCookies = previousPath, previousRefresh })
+			renewalsPath = filepath.Join(t.TempDir(), "remote-renewals.json")
+			revoked := remoteRenewal{Origin: "https://fixture.invalid", Account: "revoked@example.test", Token: "revoked-fixture"}
+			kept := remoteRenewal{Origin: "https://other.invalid", Account: "kept@example.test", Token: "kept-fixture"}
+			if err := saveRenewals([]remoteRenewal{revoked, kept}); err != nil {
+				t.Fatal(err)
+			}
+			refreshRemoteCookies = func(context.Context, aistudio.AuthSource, aistudio.ChromeOAuthMaterial, string) ([]aistudio.StateCookie, *aistudio.BoundSession, error) {
+				return []aistudio.StateCookie{{Name: "SAPISID", Value: "fixture"}}, nil, nil
+			}
+			client := &http.Client{Transport: setupTransport(func(*http.Request) (*http.Response, error) {
+				body := `{"error":{"code":"` + code + `","message":"revoked fixture"}}`
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
+			})}
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			if err := renewRemote(ctx, client, []remoteRenewal{revoked}, io.Discard); err != nil || ctx.Err() != nil {
+				t.Fatalf("revoked renewal did not stop immediately: %v", err)
+			}
+			stored, err := readRenewals()
+			if err != nil || !reflect.DeepEqual(stored, []remoteRenewal{kept}) {
+				t.Fatal("revocation removed another account or retained revoked credentials")
+			}
+		})
 	}
 }
 

@@ -81,8 +81,11 @@ type accountWorker struct {
 	busyUntil      time.Time
 	busyDelay      time.Duration
 	busyErr        error
+	// closing 表示持有启动锁的调用方正在释放状态锁关闭 Worker
+	closing bool
 }
 
+// accountWorkerPreparer 是账户 Worker 的受保护请求 preparer，pending 时 Worker 尚未发布，preparer 持有账户启动锁，由 activateAccountWorker、discardAccountWorker 或 closePendingWorker 释放
 type accountWorkerPreparer struct {
 	account        *accountWorker
 	worker         managedWorker
@@ -371,13 +374,14 @@ func (manager *accountWorkerManager) reapIdleWorkers() {
 // reapIdleWorker 关闭一个多余的空闲 Worker 并返回是否关闭：超出峰值上限时立即关闭，否则只关闭最近使用早于 before 的
 func (manager *accountWorkerManager) reapIdleWorker(before time.Time) bool {
 	manager.rebalanceMu.Lock()
-	defer manager.rebalanceMu.Unlock()
 	warm := len(manager.WarmAccountIDs())
 	if len(manager.openings) > 0 || warm <= manager.warmLimit() {
+		manager.rebalanceMu.Unlock()
 		return false
 	}
 	victim := manager.idleWarmVictim("")
 	if victim == "" {
+		manager.rebalanceMu.Unlock()
 		return false
 	}
 	manager.mu.RLock()
@@ -386,9 +390,13 @@ func (manager *accountWorkerManager) reapIdleWorker(before time.Time) bool {
 	_, lastUsed := manager.pool.Activity(victim)
 	if warm <= manager.activeLimit() &&
 		(lastUsed.After(before) || account != nil && time.Unix(0, account.readyAt.Load()).After(before)) {
+		manager.rebalanceMu.Unlock()
 		return false
 	}
+	manager.reserveVictim(victim)
+	manager.rebalanceMu.Unlock()
 	evicted, err := manager.evictIdleWorker(manager.lifecycle, victim)
+	manager.releaseVictim(victim)
 	if err != nil {
 		manager.requests.log(victim, "WARN", fmt.Sprintf("WAA Worker 空闲回收失败 | 错误=%v", err))
 		return false
@@ -1155,6 +1163,9 @@ func (manager *accountWorkerManager) readyWorker(accountID string, bootstrapMode
 	if !active {
 		return nil, false, fmt.Errorf("账户不存在: %s", accountID)
 	}
+	if account.closing {
+		return nil, false, nil
+	}
 	if accountWorkerCleanupPending(account) {
 		return nil, false, fmt.Errorf("%w: %s", errAccountWorkerCleanupPending, accountID)
 	}
@@ -1427,6 +1438,16 @@ func closePendingWorker(preparer *accountWorkerPreparer) error {
 	return cleanupErr
 }
 
+// closeUnlocked 在持有账户启动锁与状态锁时关闭 worker，关闭期间释放状态锁，其他账户的调度与本账户的状态读取不等这次关闭
+func (account *accountWorker) closeUnlocked(worker managedWorker) error {
+	account.closing = true
+	account.mu.Unlock()
+	err := worker.Close()
+	account.mu.Lock()
+	account.closing = false
+	return err
+}
+
 func accountWorkerCleanupPending(account *accountWorker) bool {
 	if account.reloadPending || account.cleanupWorker != nil || account.cleanupLease != nil || account.worker == nil && account.runtimeLease != nil {
 		return true
@@ -1651,12 +1672,7 @@ func (manager *accountWorkerManager) ensureWorker(
 			}
 			return preparer, nil
 		}
-		victim := ""
-		if len(manager.openings) == 0 {
-			victim = manager.idleWarmVictimFor(accountID, modelID, false)
-		} else {
-			victim = manager.idleWarmVictimFor(accountID, modelID, true)
-		}
+		victim := manager.idleWarmVictimFor(accountID, modelID, len(manager.openings) > 0)
 		if victim == "" {
 			manager.rebalanceMu.Unlock()
 			if !waitForOpening {
@@ -1667,9 +1683,11 @@ func (manager *accountWorkerManager) ensureWorker(
 			}
 			continue
 		}
+		manager.reserveVictim(victim)
+		manager.rebalanceMu.Unlock()
 		// A replacement cannot overlap its victim, even with a positive warm target.
 		evicted, err := manager.evictIdleWorker(ctx, victim)
-		manager.rebalanceMu.Unlock()
+		manager.releaseVictim(victim)
 		if err != nil {
 			return nil, err
 		}
@@ -2034,18 +2052,20 @@ func (manager *accountWorkerManager) Close() error {
 	return errors.Join(closeErrors...)
 }
 
+// closeAccountWorker 在持有账户启动锁与状态锁时关闭账户的 Worker 并释放 runtime 租约，关闭期间释放状态锁
 func (manager *accountWorkerManager) closeAccountWorker(account *accountWorker) error {
 	var closeErrors []error
-	if account.worker != nil {
-		if closeErr := account.worker.Close(); closeErr != nil {
+	if worker := account.worker; worker != nil {
+		account.worker = nil
+		if closeErr := account.closeUnlocked(worker); closeErr != nil {
+			account.worker = worker
 			closeErrors = append(closeErrors, closeErr)
 		} else {
-			account.worker = nil
 			account.generation.Add(1)
 		}
 	}
-	if account.cleanupWorker != nil {
-		if closeErr := account.cleanupWorker.Close(); closeErr != nil {
+	if worker := account.cleanupWorker; worker != nil {
+		if closeErr := account.closeUnlocked(worker); closeErr != nil {
 			closeErrors = append(closeErrors, closeErr)
 		} else {
 			account.cleanupWorker = nil

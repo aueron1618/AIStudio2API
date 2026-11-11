@@ -323,7 +323,7 @@ Windows 桌面版在命令行中运行以下命令时写作 `cmd /c start /wait 
 - 文件导入：`aistudio2api setup --storage-state <file>`
 - Cookie 导入：`aistudio2api setup --cookie-file <file>`、`aistudio2api setup --cookie "<Cookie 请求头>"` 或 `aistudio2api setup --cdp <调试地址>`，账户邮箱按 Cookie 识别，`--cdp` 导入的账户沿用该浏览器的语言与时区；Cookie 来自同时登录多个 Google 账户的浏览器时，以 `--authuser N` 选择官网地址 `/u/N/` 中第 N 个账户
 
-`aistudio2api setup --remote https://<远程实例>`：向远程实例添加账户。在远程实例的账户页点击“远程添加”，对话框给出完整命令（Windows 为 `cmd /c start /wait aistudio2api.exe setup --remote <地址> --token <令牌>`，其他系统为 `./aistudio2api setup --remote <地址> --token <令牌>`），账户来源可选“该电脑 Chrome 中的账户”或“在新窗口登录”（命令带 `--login`），一键复制后在能登录 Google 的电脑上运行；省略 `--token` 时运行后从标准输入读取令牌。对话框打开期间沿用仍有效的令牌，令牌到期时自动换新，点击“换一个令牌”立即换新，旧令牌随即失效。从该电脑 Chrome 导入的账户只能由这台电脑续签：命令上传这类账户后留在前台，立即并每 100 分钟向远程实例发送它们的新会话，失败时 5 分钟后重试；保持该窗口打开，重启电脑后运行 `aistudio2api setup --remote <地址> --renew` 恢复续签。
+`aistudio2api setup --remote https://<远程实例>`：向远程实例添加账户。在远程实例的账户页点击“远程添加”，对话框给出完整命令（Windows 为 `cmd /c start /wait aistudio2api.exe setup --remote <地址> --token <令牌>`，其他系统为 `./aistudio2api setup --remote <地址> --token <令牌>`），账户来源可选“该电脑 Chrome 中的账户”或“在新窗口登录”（命令带 `--login`），一键复制后在能登录 Google 的电脑上运行；省略 `--token` 时运行后从标准输入读取令牌。对话框打开期间沿用仍有效的令牌，令牌到期时自动换新，点击“换一个令牌”立即换新，旧令牌随即失效。从该电脑 Chrome 导入的账户只能由这台电脑续签：命令上传这类账户后留在前台，立即并每 100 分钟向远程实例发送它们的新会话，失败时 5 分钟后重试，远程实例已删除账户或续签凭据失效时停止为该账户续签；保持该窗口打开，重启电脑后运行 `aistudio2api setup --remote <地址> --renew` 恢复续签。
 
 原电脑的 `runtime/remote-renewals.json` 保管 Chrome OAuth 材料与每账户续签 token；服务器验证上传 Cookie 的真实身份，只在账户目录的 `pairing-renewal.json` 保存 token 摘要。不要把这些续签文件或 token 分享给他人，服务器不能替代原电脑独立续签。
 
@@ -533,6 +533,7 @@ Veo 专用实现已移除。升级前尚未完成的 Veo 任务不能继续执�
 
 | Model ID | 名称 | 类型 | 输入 | 输出 |
 | --- | --- | --- | ---: | ---: |
+| `gemini-4-carbon` | Gemini 4 Carbon | 文本 | 1048576 | 32768 |
 | `gemini-4-argon` | Gemini 4 Argon | 文本 | 1048576 | 32768 |
 | `gemini-3.8-flash` | Gemini 3.8 Flash | 文本 | 1048576 | 65536 |
 | `gemini-3.6-flash` | Gemini 3.6 Flash | 文本 | 1048576 | 65536 |

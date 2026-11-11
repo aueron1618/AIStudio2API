@@ -316,6 +316,57 @@ func TestWorkerPageCatalogTemporaryBudget(t *testing.T) {
 	}
 }
 
+func TestWorkerSlowEvictionPreservesBudgetAndScheduling(t *testing.T) {
+	manager, probe := newWorkerBudgetTest(t, 1, 2, 1, 2)
+	for _, id := range []string{"a@example.test", "b@example.test"} {
+		if _, err := manager.Worker(t.Context(), id, "shared"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lease, err := manager.pool.AcquireFor(t.Context(), aistudio.AccountSelection{AccountID: "b@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	closing, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	started := sync.OnceFunc(func() { close(closing) })
+	probe.beforeClose = func(id string) {
+		if id == "a@example.test" {
+			started()
+			<-release
+		}
+	}
+	replacement := make(chan error, 1)
+	go func() { _, err := manager.Worker(t.Context(), "c@example.test", "shared"); replacement <- err }()
+	workerBudgetResult(t, closing)
+	ready := make(chan error, 1)
+	go func() { _, err := manager.Worker(t.Context(), "b@example.test", "shared"); ready <- err }()
+	if err := workerBudgetResult(t, ready); err != nil {
+		t.Fatalf("slow eviction blocked an unrelated ready worker: %v", err)
+	}
+	state := make(chan bool, 1)
+	go func() {
+		_, ready, err := manager.readyWorker("a@example.test", "shared")
+		state <- !ready && err == nil
+	}()
+	if !workerBudgetResult(t, state) {
+		t.Fatal("closing worker was reusable or blocked state inspection")
+	}
+	probe.mu.Lock()
+	live, peak := probe.live, probe.peak
+	probe.mu.Unlock()
+	if live != 2 || peak != 2 || manager.occupiedWorkers().slots != 2 {
+		t.Fatal("slow eviction released capacity before the old worker stopped")
+	}
+	unblock()
+	if err := workerBudgetResult(t, replacement); err != nil {
+		t.Fatalf("replacement failed after eviction: %v", err)
+	}
+	assertWorkerBudget(t, manager, probe, 2)
+}
+
 func TestWorkerWarmTargetsAndCatalogReuse(t *testing.T) {
 	for _, warm := range []int{0, 1} {
 		t.Run(fmt.Sprintf("warm=%d", warm), func(t *testing.T) {

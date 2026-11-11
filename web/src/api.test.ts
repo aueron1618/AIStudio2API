@@ -69,6 +69,19 @@ describe('management API contracts', () => {
     },
   )
 
+  it.each(['', 'http://user:fixture+value@proxy.example.test:8080'])(
+    'forwards the selected browser discovery proxy %s',
+    async (proxy) => {
+      const fetch = vi.fn().mockResolvedValue(Response.json({ browsers: [] }))
+      vi.stubGlobal('fetch', fetch)
+      expect(await api.cookieBrowsers(proxy)).toEqual([])
+      const [path] = fetch.mock.calls[0] as [string]
+      const url = new URL(path, 'http://localhost')
+      expect(url.pathname).toBe('/api/accounts/import/browsers')
+      expect(url.searchParams.get('proxy')).toBe(proxy)
+    },
+  )
+
   it('queues Chrome accounts with source IDs and discovery emails', async () => {
     const input = {
       accounts: [{ id: 'fixture-id', email: 'fixture@example.test' }],

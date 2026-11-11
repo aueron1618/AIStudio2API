@@ -83,11 +83,22 @@ type goWAARuntime struct {
 	vmMu            sync.Mutex
 	vm              *waa.Runtime
 	vmExpires       time.Time
+	refreshing      *vmRefresh
 	interpreterHash string
 	interpreter     string
 	closed          bool
 	refreshTimer    *time.Timer
 	incidentsTimer  *time.Timer
+}
+
+// vmRefreshTimeout 是后台重建 VM 的期限
+const vmRefreshTimeout = 2 * time.Minute
+
+// vmRefresh 是一次后台 VM 重建，done 关闭后 err 为重建结果
+type vmRefresh struct {
+	done   chan struct{}
+	cancel context.CancelFunc
+	err    error
 }
 
 // pageRPC 是官网页面自身发出的 MakerSuite 请求方法与正文
@@ -392,10 +403,8 @@ func (runtime *goWAARuntime) scheduleRefresh() {
 	runtime.refreshTimer = runtime.schedule(waaLifetime, func(ctx context.Context) {
 		runtime.vmMu.Lock()
 		defer runtime.vmMu.Unlock()
-		if _, err := runtime.currentVM(ctx, true); err != nil {
-			if ctx.Err() == nil {
-				slog.Warn("WAA SpiderMonkey VM 刷新失败", "error", err)
-			}
+		if ctx.Err() == nil && !time.Now().Before(runtime.vmExpires) {
+			runtime.refreshVM()
 		}
 	})
 }
@@ -932,29 +941,66 @@ func (runtime *goWAARuntime) loadImage(address string) bool {
 	return response.StatusCode == http.StatusOK && strings.HasPrefix(response.Header.Get("Content-Type"), "image/") && size > 0
 }
 
-// currentVM 返回未过期的 VM，到期时按官网刷新流程重建
-func (runtime *goWAARuntime) currentVM(ctx context.Context, force bool) (*waa.Runtime, error) {
-	if runtime.ctx.Err() != nil {
-		return nil, errors.New("SpiderMonkey WAA runtime 已关闭")
+// refreshVM 在后台按官网刷新流程重建 VM 并返回这次重建，已有重建进行中时返回它；调用方持有 vmMu
+func (runtime *goWAARuntime) refreshVM() *vmRefresh {
+	if runtime.refreshing != nil {
+		return runtime.refreshing
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	ctx, cancel := context.WithTimeout(runtime.ctx, vmRefreshTimeout)
+	refresh := &vmRefresh{done: make(chan struct{}), cancel: cancel}
+	runtime.lifecycleMu.Lock()
+	if runtime.closed {
+		runtime.lifecycleMu.Unlock()
+		cancel()
+		refresh.err = errors.New("SpiderMonkey WAA runtime 已关闭")
+		close(refresh.done)
+		return refresh
 	}
-	if !force && runtime.vm != nil && time.Now().Before(runtime.vmExpires) {
-		return runtime.vm, nil
-	}
+	// Join refresh work before releasing page resources during Close.
+	runtime.pending.Add(1)
+	runtime.lifecycleMu.Unlock()
+	runtime.refreshing = refresh
+	previous := runtime.vm
+	go func() {
+		defer runtime.pending.Done()
+		defer cancel()
+		vm, err := runtime.nextVM(ctx, previous)
+		runtime.vmMu.Lock()
+		defer runtime.vmMu.Unlock()
+		switch {
+		case err != nil:
+			if ctx.Err() == nil {
+				slog.Warn("WAA SpiderMonkey VM 刷新失败", "error", err)
+			}
+		case ctx.Err() != nil:
+			vm.Close()
+			err = ctx.Err()
+		default:
+			if previous != nil {
+				previous.Close()
+			}
+			runtime.vm = vm
+			runtime.scheduleRefresh()
+		}
+		refresh.err = err
+		runtime.refreshing = nil
+		close(refresh.done)
+	}()
+	return refresh
+}
+
+// nextVM 以旧 VM 的无绑定 snapshot 调用 Waa/Create 并返回静置后的新 VM，没有旧 VM 时按首次载入创建
+func (runtime *goWAARuntime) nextVM(ctx context.Context, previous *waa.Runtime) (*waa.Runtime, error) {
 	var refresh []string
-	if runtime.vm != nil {
-		previous, err := runtime.vm.RefreshSnapshot(ctx)
+	if previous != nil {
+		snapshot, err := previous.RefreshSnapshot(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				runtime.vm.Close()
-				runtime.vm = nil
 				return nil, ctx.Err()
 			}
-			previous = "E:UCE"
+			snapshot = "E:UCE"
 		}
-		refresh = []string{runtime.interpreterHash, previous}
+		refresh = []string{runtime.interpreterHash, snapshot}
 	}
 	challenge, err := runtime.createChallenge(ctx, refresh)
 	if err != nil {
@@ -968,11 +1014,6 @@ func (runtime *goWAARuntime) currentVM(ctx context.Context, force bool) (*waa.Ru
 		vm.Close()
 		return nil, err
 	}
-	if runtime.vm != nil {
-		runtime.vm.Close()
-	}
-	runtime.vm = vm
-	runtime.scheduleRefresh()
 	return vm, nil
 }
 
@@ -986,16 +1027,34 @@ func (runtime *goWAARuntime) RunProof(ctx context.Context, digest string, prompt
 	return runtime.proof(ctx, digest, prompt, true)
 }
 
-// proof 以当前 VM 生成 fresh WAA proof，run 时写入提示词后点击 Run
+// proof 以当前 VM 生成 fresh WAA proof，run 时写入提示词后点击 Run；VM 到期时等待后台重建完成，等待随 ctx 结束
 func (runtime *goWAARuntime) proof(ctx context.Context, digest string, prompt string, run bool) (string, error) {
 	ctx, cancel := runtime.operationContext(ctx)
 	defer cancel()
 	runtime.vmMu.Lock()
 	defer runtime.vmMu.Unlock()
-	vm, err := runtime.currentVM(ctx, false)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	for runtime.ctx.Err() == nil && (runtime.vm == nil || !time.Now().Before(runtime.vmExpires)) {
+		refresh := runtime.refreshVM()
+		runtime.vmMu.Unlock()
+		select {
+		case <-refresh.done:
+		case <-ctx.Done():
+		}
+		runtime.vmMu.Lock()
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if refresh.err != nil {
+			return "", refresh.err
+		}
+	}
+	if runtime.ctx.Err() != nil {
+		return "", errors.New("SpiderMonkey WAA runtime 已关闭")
+	}
+	vm := runtime.vm
 	snapshot := vm.Proof
 	if run {
 		snapshot = vm.RunProof
@@ -1101,6 +1160,9 @@ func (runtime *goWAARuntime) Close() error {
 			runtime.refreshTimer.Stop()
 			runtime.refreshTimer = nil
 		}
+		if runtime.refreshing != nil {
+			runtime.refreshing.cancel()
+		}
 		if runtime.incidentsTimer != nil {
 			runtime.incidentsTimer.Stop()
 			runtime.incidentsTimer = nil
@@ -1109,9 +1171,11 @@ func (runtime *goWAARuntime) Close() error {
 			runtime.vm.Close()
 			runtime.vm = nil
 		}
-		runtime.interpreter = ""
 		runtime.vmMu.Unlock()
 		runtime.pending.Wait()
+		runtime.vmMu.Lock()
+		runtime.interpreter = ""
+		runtime.vmMu.Unlock()
 		if runtime.client != nil {
 			runtime.client.CloseIdleConnections()
 		}

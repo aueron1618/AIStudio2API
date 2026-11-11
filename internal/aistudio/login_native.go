@@ -11,22 +11,24 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 )
 
+// loginTimeout 是隔离登录从启动浏览器到导出认证状态的期限
+const loginTimeout = 30 * time.Minute
+
 // NativeLoginDriver 通过纯 Go WebDriver BiDi 完成隔离登录
 type NativeLoginDriver struct {
 	camoufox string
-	timeout  time.Duration
 }
 
 var _ IsolatedLoginDriver = (*NativeLoginDriver)(nil)
 var _ CookieLoginDriver = (*NativeLoginDriver)(nil)
 
 // NewNativeLoginDriver 创建纯 Go Camoufox 登录驱动
-func NewNativeLoginDriver(camoufoxPath string, timeout time.Duration) (*NativeLoginDriver, error) {
+func NewNativeLoginDriver(camoufoxPath string) (*NativeLoginDriver, error) {
 	absolute, err := filepath.Abs(camoufoxPath)
 	if err != nil {
 		return nil, fmt.Errorf("解析 Camoufox 路径: %w", err)
 	}
-	return &NativeLoginDriver{camoufox: absolute, timeout: timeout}, nil
+	return &NativeLoginDriver{camoufox: absolute}, nil
 }
 
 // Login 启动隔离 Camoufox 供用户登录并导出认证状态
@@ -86,7 +88,7 @@ func (driver *NativeLoginDriver) options(request IsolatedLoginRequest) camoufoxn
 		Timezone:       request.Timezone,
 		AuthUser:       request.AuthUser,
 		Proxy:          request.Proxy,
-		Timeout:        driver.timeout,
+		Timeout:        loginTimeout,
 		View:           request.View,
 	}
 }

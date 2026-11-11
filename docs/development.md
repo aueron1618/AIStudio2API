@@ -200,7 +200,7 @@ npm.cmd --prefix web run build
 
 `setup` 写入本机时要求 `AISTUDIO_AUTH_STATES` 指向一个账户目录。
 
-加 `--remote` 时，Chrome 导入、隔离登录、文件导入与 Cookie 导入照常在本机完成，结果凭远程实例账户页“远程添加”生成的配对令牌逐个上传，隔离登录同时上传 Camoufox 指纹。远程账户使用远程实例的默认代理，`--proxy` 只用于本机导入与登录。来源带可续签 Chrome OAuth 材料时，上传完成后命令留在原电脑前台：立即并每 100 分钟以本机 Chrome 来源与 OAuth 材料签发新会话，经 `PUT /api/pairing/accounts/{account}/cookies` 凭上传响应的 `renewal_token` 更新远程 Cookie，失败时 5 分钟后重试；OAuth 与 token 保存在原电脑的 `runtime/remote-renewals.json`（权限 0600），`--remote <origin> --renew` 读取该 origin 的记录恢复续签。服务端不信任上传邮箱、OAuth 或 localStorage，按安全 Cookie 解析和真实 HTTP 验证后提交，只在 `pairing-renewal.json` 保存 token 摘要；不能在服务器独立使用原电脑的设备材料续签。没有可续签 Chrome 来源的导入完成后退出。
+加 `--remote` 时，Chrome 导入、隔离登录、文件导入与 Cookie 导入照常在本机完成，结果凭远程实例账户页“远程添加”生成的配对令牌逐个上传，隔离登录同时上传 Camoufox 指纹。远程账户使用远程实例的默认代理，`--proxy` 只用于本机导入与登录。来源带可续签 Chrome OAuth 材料时，上传完成后命令留在原电脑前台：立即并在每次会话签发 100 分钟后以本机 Chrome 来源与 OAuth 材料签发新会话，经 `PUT /api/pairing/accounts/{account}/cookies` 凭上传响应的 `renewal_token` 更新远程 Cookie，失败时 5 分钟后重试，沿用尚未送达且签发不到 100 分钟的会话；远程返回 401 `pairing_renewal_invalid` 或 404 `account_not_found` 时停止该账户并从记录中删除，其他失败照常重试，每次一行日志。OAuth 与 token 保存在原电脑的 `runtime/remote-renewals.json`（权限 0600），`--remote <origin> --renew` 读取该 origin 的记录恢复续签。服务端不信任上传邮箱、OAuth 或 localStorage，按安全 Cookie 解析和真实 HTTP 验证后提交，只在 `pairing-renewal.json` 保存 token 摘要；不能在服务器独立使用原电脑的设备材料续签。没有可续签 Chrome 来源的导入完成后退出。
 
 - `--proxy` 会同时固定到新账户的初始化、WAA 与业务请求，接受 HTTP、HTTPS 或 SOCKS5 URL，代理认证写在 URL 的 `user:password@` 部分；未指定时导入与登录使用 `PROXY` 中的第一个代理，新账户不设账户代理
 - `--locale` 和 `--timezone` 设置账户环境；Chrome 导入未显式指定语言时读取 Profile 的首选语言
@@ -495,7 +495,7 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。冷�
 
 模型目录通过 `PageCatalogProvider.PageCatalog(ctx, accountID, reload)` 读取账户页面载入的 `GetLoggingContext`、`GetAiStudioBenefitTier` 与 `ListModels` 响应。有可复用 Worker 时读取当前目录，显式刷新可重载页面；新建临时页、冷启动与重载共用 `MAX_ACTIVE_WORKERS` 和 `WARM_STARTUP_CONCURRENCY`，满载时等待、重试或安全回收，不另开预算外页面。HTTP Cookie 导入只提交认证，不触发这条目录路径。
 
-启动期同步对全部 enabled ready/busy 账户执行，缺少目录的账户可并发排队，已有目录的逐个读取，每项占用普通账户槽位并受上述页面预算约束。错误或空目录加入 generation 的 pending 集合；非空结果立即更新公共目录与账户状态，正数热池在 RUNNING 时继续预热。启动期结束后以单个 30 秒 ticker 重试 pending 账户，并从该轮开始每 24 小时逐个刷新全部可用账户，槽位已满的跳过。请求模型不在目录且距上轮开始超过 10 分钟时可触发一轮刷新，请求等待首个账户结果，其余在后台继续。冷却项到期再试，需要登录、停用、不可用或已删除的账户退出重试；失败记录原因，成功记录模型数量。`modelRevision` 确保服务接收请求前已应用当前账户和配置版本。
+启动期同步对全部 enabled ready/busy 账户执行，缺少目录的账户可并发排队，已有目录的按权益从高到低、同权益按账户 ID 逐个读取，每项占用普通账户槽位并受上述页面预算约束。错误或空目录加入 generation 的 pending 集合；非空结果立即更新公共目录与账户状态，正数热池在 RUNNING 时继续预热。启动期结束后以单个 30 秒 ticker 重试 pending 账户，并从该轮开始每 24 小时按同样的顺序逐个刷新全部可用账户，槽位已满的跳过。请求模型不在目录且距上轮开始超过 10 分钟时可触发一轮刷新，请求等待首个账户结果，其余在后台继续。冷却项到期再试，需要登录、停用、不可用或已删除的账户退出重试；失败记录原因，成功记录模型数量。`modelRevision` 确保服务接收请求前已应用当前账户和配置版本。
 
 认证状态包含长期凭证和设备绑定材料，保存在本机受控目录。提交、Issue、CI 和普通日志使用脱敏材料，保留字段形状并替换 Cookie、token、proof、邮箱、账户 ID、提示词、响应正文和完整原始帧。
 

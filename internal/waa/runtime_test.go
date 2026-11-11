@@ -3,6 +3,8 @@ package waa
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -168,6 +170,64 @@ func TestRuntimeProofClearsPrompt(t *testing.T) {
 	proof, err = vm.RefreshSnapshot(t.Context())
 	if err != nil || proof != "!" {
 		t.Fatalf("prompt was retained after proof: %q, %v", proof, err)
+	}
+}
+
+func TestRuntimeSettleWaitsForNestedResources(t *testing.T) {
+	first, second := make(chan struct{}), make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseFirst := sync.OnceFunc(func() { close(first) })
+	releaseSecond := sync.OnceFunc(func() { close(second) })
+	defer releaseFirst()
+	defer releaseSecond()
+	vm, err := NewRuntime(t.Context(), Options{
+		Challenge: Challenge{Program: "test", GlobalName: "fixture"},
+		Interpreter: `var fixture = {a(program, ready) {
+  const image = new Image();
+  image.onload = () => { const nested = new Image(); nested.src = '/second.png'; };
+  image.src = '/first.png';
+  ready(callback => callback('!test'), () => {});
+}};`,
+		Profile: Profile{Locale: "en-US", TimeZone: "UTC", PageURL: "https://aistudio.google.com/"},
+		LoadImage: func(address string) bool {
+			if strings.HasSuffix(address, "/first.png") {
+				<-first
+			} else if strings.HasSuffix(address, "/second.png") {
+				close(secondStarted)
+				<-second
+			}
+			return true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Close()
+	done := make(chan error, 1)
+	go func() { done <- vm.Settle(t.Context()) }()
+	releaseFirst()
+	select {
+	case <-secondStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resource callback did not start its nested request")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Settle returned before the nested request completed: %v", err)
+	default:
+	}
+	releaseSecond()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Settle did not finish after all resource callbacks")
+	}
+	vm.Close()
+	if err := vm.Settle(t.Context()); err == nil {
+		t.Fatal("Settle accepted a closed runtime")
 	}
 }
 
