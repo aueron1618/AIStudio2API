@@ -85,9 +85,11 @@ func TestWindowsFontconfigGroupedFonts(t *testing.T) {
 	for _, test := range []struct {
 		name, manifest, template string
 		missingGroup, emptyGroup string
+		onlyGroups               []string
 		wantError                bool
 	}{
 		{name: "grouped", manifest: manifest, template: template},
+		{name: "trimmed bundle", manifest: `{"readBy":{"win":["LMW","W"]}}`, template: template, onlyGroups: []string{"LMW", "W"}},
 		{name: "missing manifest", template: template, wantError: true},
 		{name: "invalid manifest", manifest: "{", template: template, wantError: true},
 		{name: "missing Windows groups", manifest: `{"readBy":{"lin":["L"]}}`, template: template, wantError: true},
@@ -101,7 +103,7 @@ func TestWindowsFontconfigGroupedFonts(t *testing.T) {
 			browser := filepath.Join(t.TempDir(), "browser & fonts")
 			profile := t.TempDir()
 			for _, group := range []string{"L", "LM", "LMW", "LW", "M", "MW", "W"} {
-				if group == test.missingGroup {
+				if group == test.missingGroup || len(test.onlyGroups) > 0 && !slices.Contains(test.onlyGroups, group) {
 					continue
 				}
 				directory := filepath.Join(browser, "fonts", group)
@@ -155,7 +157,11 @@ func TestWindowsFontconfigGroupedFonts(t *testing.T) {
 				t.Fatalf("font config is not valid XML: %v", err)
 			}
 			var expected []string
-			for _, group := range []string{"LMW", "LW", "MW", "W"} {
+			groups := []string{"LMW", "LW", "MW", "W"}
+			if len(test.onlyGroups) > 0 {
+				groups = test.onlyGroups
+			}
+			for _, group := range groups {
 				expected = append(expected, filepath.Join(browser, "fonts", group))
 			}
 			if !slices.Equal(config.Directories, expected) {

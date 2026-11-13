@@ -395,11 +395,19 @@ jobs:
                 test -x "$CAMOUFOX_PATH"
                 test -f /opt/camoufox/fontconfig/windows/fonts.conf
                 test -f /opt/camoufox/fonts/groups.json
-                for group in L LM LMW LW MW W; do
-                  test -d "/opt/camoufox/fonts/$group"
+                test -s /opt/camoufox/fonts.sha256
+                (cd /opt/camoufox && sha256sum --strict --check fonts.sha256)
+                for group in L LM M; do
+                  test ! -e "/opt/camoufox/fonts/$group"
                 done
-                test ! -e /opt/camoufox/fonts/M
+                test ! -e /opt/camoufox/fontconfig/linux
                 test ! -e /opt/camoufox/fontconfig/macos
+                du -sh /opt/camoufox
+                browser_mib=$(du -sm /opt/camoufox | cut -f1)
+                if [ "$browser_mib" -gt 800 ]; then
+                  echo "Bundled browser exceeds the 800 MiB size budget" >&2
+                  exit 1
+                fi
                 command -v Xvfb
                 ;;
               no-browser)
