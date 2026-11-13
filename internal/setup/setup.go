@@ -29,6 +29,7 @@ import (
 type setupStrings []string
 
 var verifySetupCookies = chromeauth.VerifyAuthUser
+var checkSetupAccess = chromeauth.CheckAccess
 
 func (values *setupStrings) String() string {
 	return strings.Join(*values, ",")
@@ -336,6 +337,9 @@ func importCookies(ctx context.Context, target accountTarget, options setupOptio
 	if err := setupAccountConfig(email, options).Validate(); err != nil {
 		return err
 	}
+	if err := checkAccess(ctx, email, &state, options.egress, options.authUser); err != nil {
+		return err
+	}
 	saved, err := target.Save(ctx, setupAccountConfig(email, options), state, "")
 	if err != nil {
 		return err
@@ -415,6 +419,9 @@ func importChromeAccounts(ctx context.Context, cfg config.Config, target account
 		}
 		if !strings.EqualFold(strings.TrimSpace(results[index].Email), strings.TrimSpace(verification.Email)) {
 			return fmt.Errorf("Chrome Cookie 登录邮箱与所选账户不一致")
+		}
+		if err := checkAccess(ctx, results[index].Email, &results[index].State, options.egress, 0); err != nil {
+			return err
 		}
 		modelCounts[index] = verification.ModelCount
 	}
@@ -631,4 +638,13 @@ func validateSetupRoot(root string) error {
 		return fmt.Errorf("setup 需要 AISTUDIO_AUTH_STATES 指向账户目录")
 	}
 	return nil
+}
+
+// checkAccess 在保存前确认 Google 没有拒绝该账户使用 AI Studio
+func checkAccess(ctx context.Context, email string, state *aistudio.StorageState, egress string, authUser int) error {
+	err := checkSetupAccess(ctx, state, egress, authUser)
+	if denial := aistudio.RestrictionDenial(err); denial != nil {
+		return fmt.Errorf("%s 服务受限，未导入：%v", email, denial)
+	}
+	return err
 }

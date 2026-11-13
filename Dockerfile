@@ -10,7 +10,7 @@ FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
 ARG TARGETARCH
 ARG VERSION=dev
 ARG ZIG=0.16.0
-ARG SPIDERMONKEY=v152.0.4-aistudio2api.1
+ARG SPIDERMONKEY=v158.0.1-aistudio2api.1
 ARG LIBWEBP=v1.6.0-aistudio2api.1
 RUN apt-get update && apt-get install -y --no-install-recommends xz-utils && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://ziglang.org/download/$ZIG/zig-$(uname -m)-linux-$ZIG.tar.xz | tar -xJ -C /opt \
@@ -56,8 +56,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 # Keep the bundled browser aligned with the version used by the Go downloader.
 COPY internal/camoufoxnative/download.go /tmp/camoufox-download.go
-# Drop macOS fonts/config before the final COPY, keeping Windows, Linux and shared emoji fonts.
-RUN set -eu; \
+# Drop only macOS-exclusive fonts/config, keeping groups shared with Windows or Linux.
+RUN set -eux; \
     version="$(sed -n 's/^const camoufoxRelease = "\([^"]*\)"$/\1/p' /tmp/camoufox-download.go)"; \
     test -n "$version"; \
     case "$TARGETARCH" in \
@@ -73,9 +73,12 @@ RUN set -eu; \
     test -f /opt/camoufox/camoufox-bin; \
     test -f /opt/camoufox/application.ini; \
     test -f /opt/camoufox/fontconfig/windows/fonts.conf; \
-    test -d /opt/camoufox/fonts/windows; \
+    test -f /opt/camoufox/fonts/groups.json; \
+    for group in L LM LMW LW MW W; do \
+        test -d "/opt/camoufox/fonts/$group"; \
+    done; \
     chmod 755 /opt/camoufox/camoufox-bin; \
-    rm -rf /opt/camoufox/fonts/macos /opt/camoufox/fontconfig/macos; \
+    rm -rf /opt/camoufox/fonts/M /opt/camoufox/fontconfig/macos; \
     rm /tmp/camoufox.zip /tmp/camoufox-download.go
 
 FROM runtime-base AS runtime-browser

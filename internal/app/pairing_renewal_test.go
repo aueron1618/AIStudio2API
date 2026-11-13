@@ -10,8 +10,62 @@ import (
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
+	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	"github.com/Mag1cFall/AIStudio2API/internal/chromeauth"
 )
+
+func TestRestrictedAccountSkipsRenewalAndInPlaceImport(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "enabled", true: "disabled"}[disabled], func(t *testing.T) {
+			admin := newAccountTestAdmin(t)
+			state, err := aistudio.ParseCookieImport("SAPISID=original; __Secure-1PAPISID=one; __Secure-3PAPISID=three")
+			if err != nil {
+				t.Fatal(err)
+			}
+			created, err := admin.addAccount(t.Context(), aistudio.DefaultAccountConfig("restricted@example.test"), state, "", "renewal-fixture")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := admin.pool.MarkRestricted(created.ID, &camoufoxnative.AccessDenial{Err: camoufoxnative.ErrServiceRestricted}); err != nil {
+				t.Fatal(err)
+			}
+			if disabled {
+				if _, err := admin.pool.SetEnabled(created.ID, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			admin.verifyCookies = func(context.Context, *aistudio.StorageState, string, int) (chromeauth.Verification, error) {
+				t.Fatal("restricted account attempted cookie verification")
+				return chromeauth.Verification{}, nil
+			}
+			_, renewErr := admin.RenewAccountCookies(t.Context(), created.ID, "renewal-fixture", state.Cookies)
+			_, importErr := admin.updateImportedAccount(t.Context(), created.ID, 0, state, "")
+			for _, err := range []error{renewErr, importErr} {
+				var operation *adminOperationError
+				if !errors.As(err, &operation) || operation.code != "account_restricted" {
+					t.Fatalf("restricted account was renewed or reimported: %v", err)
+				}
+			}
+			lease, err := admin.pool.AcquireAccount(t.Context(), created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Release()
+			refresher := &authRuntimeRefresher{pool: admin.pool, chromeHas: func(string) bool {
+				t.Fatal("restricted account inspected Chrome credentials")
+				return true
+			}}
+			ctx := aistudio.ContextWithAccountLease(t.Context(), lease)
+			if refresher.Available(ctx) || refresher.Refresh(ctx, lease.AuthGeneration()) == nil || refresher.ensureBound(ctx) == nil || refresher.Recover(ctx, camoufoxnative.ErrAuthenticationRequired, lease.AuthGeneration()) == nil {
+				t.Fatal("restricted account entered an OAuth or DBSC renewal path")
+			}
+			stored, err := aistudio.LoadStorageState(lease.Account().StoragePath)
+			if err != nil || stored.Cookies[0].Value != "original" || admin.pool.RestrictedReason(created.ID) == "" {
+				t.Fatal("blocked renewal changed credentials or cleared the restriction")
+			}
+		})
+	}
+}
 
 func TestPairingImportVerifiesIdentityAndKeepsOnlyTokenDigest(t *testing.T) {
 	for _, test := range []struct {

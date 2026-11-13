@@ -51,7 +51,7 @@ func (service *specializedModelService) snapshot() []specializedModelCall {
 
 func (*specializedModelService) Models(context.Context) ([]aistudio.Model, error) {
 	return []aistudio.Model{
-		{ID: "test", Methods: []string{"generateContent", "embedContent", "predict"}, Capabilities: map[string]bool{"image_route": true}},
+		{ID: "test", Methods: []string{"generateContent", "embedContent", "predict", "createDecision"}, Capabilities: map[string]bool{"image_route": true}},
 		{ID: "audio", Methods: []string{"transcribe"}, Capabilities: map[string]bool{"transcription_output": true}},
 	}, nil
 }
@@ -90,6 +90,11 @@ func (service *specializedModelService) GenerateImage(ctx context.Context, reque
 	return []aistudio.GeneratedImage{{MIMEType: "image/png", Data: base64.StdEncoding.EncodeToString(service.image)}}, nil
 }
 
+func (service *specializedModelService) CreateDecision(ctx context.Context, request aistudio.DecisionRequest) (aistudio.DecisionResult, error) {
+	service.record(ctx, specializedModelCall{kind: "decision", model: request.Model})
+	return aistudio.DecisionResult{InputTokens: 7, TotalTokens: 7}, nil
+}
+
 func (service *specializedModelService) GenerateVideo(ctx context.Context, request aistudio.VideoRequest) (aistudio.VideoOperation, error) {
 	service.record(ctx, specializedModelCall{kind: "video", model: request.Model})
 	return aistudio.VideoOperation{ID: "video-fixture", Model: request.Model, Prompt: request.Prompt, Seconds: "4", Size: "1280x720", CreatedAt: time.Unix(1, 0)}, nil
@@ -115,7 +120,7 @@ func TestSpecializedModelAliases(t *testing.T) {
 	if err := png.Encode(&picture, image.NewNRGBA(image.Rect(0, 0, 1, 1))); err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"embed", "gemini-embed", "gemini-batch", "image", "edit", "imagen", "speech", "speech-wav", "transcribe", "transcribe-stream", "translate", "translate-audio", "video", "gemini-video", "cache", "prefill"} {
+	for _, kind := range []string{"embed", "gemini-embed", "gemini-batch", "image", "edit", "imagen", "speech", "speech-wav", "transcribe", "transcribe-stream", "translate", "translate-audio", "video", "gemini-video", "cache", "prefill", "decision"} {
 		for _, mode := range []string{"normal", "alias", "disabled"} {
 			t.Run(kind+"/"+mode, func(t *testing.T) {
 				service := &specializedModelService{image: picture.Bytes()}
@@ -181,6 +186,9 @@ func TestSpecializedModelAliases(t *testing.T) {
 				case "prefill":
 					path, body["max_tokens"] = "/v1/messages", 0
 					body["messages"] = []any{map[string]any{"role": "user", "content": "hello"}}
+				case "decision":
+					path, expectedKind, body["input"] = "/v1beta/decisions", "decision", "hello"
+					body["questions"] = map[string]any{"q": map[string]any{"type": "noul", "instructions": "Is this useful?"}}
 				}
 				raw, err := json.Marshal(body)
 				if err != nil {

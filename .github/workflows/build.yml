@@ -394,8 +394,11 @@ jobs:
               browser)
                 test -x "$CAMOUFOX_PATH"
                 test -f /opt/camoufox/fontconfig/windows/fonts.conf
-                test -d /opt/camoufox/fonts/windows
-                test ! -e /opt/camoufox/fonts/macos
+                test -f /opt/camoufox/fonts/groups.json
+                for group in L LM LMW LW MW W; do
+                  test -d "/opt/camoufox/fonts/$group"
+                done
+                test ! -e /opt/camoufox/fonts/M
                 test ! -e /opt/camoufox/fontconfig/macos
                 command -v Xvfb
                 ;;

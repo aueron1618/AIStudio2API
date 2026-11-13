@@ -141,11 +141,6 @@ func (transport *authRetryTransport) DriveFileExists(ctx context.Context, accoun
 	return transport.transport.(aistudio.DriveFileChecker).DriveFileExists(ctx, accountID, token, fileID)
 }
 
-// UploadAssistantFile 将写代码助手附件上传委托给同一认证传输
-func (transport *authRetryTransport) UploadAssistantFile(ctx context.Context, accountID string, blob aistudio.Blob) (string, error) {
-	return transport.transport.(aistudio.AssistantUploader).UploadAssistantFile(ctx, accountID, blob)
-}
-
 // newAuthRuntimeRefresher 创建生产环境认证续签器
 func newAuthRuntimeRefresher(
 	workers *accountWorkerManager,
@@ -240,6 +235,14 @@ func authGeneration(ctx context.Context) uint64 {
 
 // Recover 为 generation 下失效的认证恢复一次登录并保留最终失败原因
 func (refresher *authRuntimeRefresher) Recover(ctx context.Context, cause error, generation uint64) error {
+	if lease, ok := aistudio.AccountLeaseFromContext(ctx); ok {
+		if denial := aistudio.RestrictionDenial(cause); denial != nil {
+			return errors.Join(cause, refresher.pool.MarkRestricted(lease.Account().ID, denial))
+		}
+		if reason := refresher.pool.RestrictedReason(lease.Account().ID); reason != "" {
+			return errors.Join(cause, accountRestricted(lease.Account().ID, reason))
+		}
+	}
 	var startup *accountWorkerInitError
 	if errors.As(cause, &startup) && startup.authHandled {
 		return cause
@@ -359,11 +362,25 @@ func (transport *authRetryProtectedTransport) DoProtectedImage(
 	})
 }
 
+// DoProtectedDecision 在认证失败后续签同一账户并重放 CreateDecision 请求
+func (transport *authRetryProtectedTransport) DoProtectedDecision(
+	ctx context.Context,
+	request aistudio.DecisionRequest,
+	rpc aistudio.RPCRequest,
+) (*aistudio.RPCResponse, error) {
+	return transport.refresher.do(ctx, rpc.Method, func() (*aistudio.RPCResponse, error) {
+		return transport.transport.(aistudio.DecisionProtectedTransport).DoProtectedDecision(ctx, request, rpc)
+	})
+}
+
 // Refresh 续签 generation 下失效的租约账户并保存新的 storage state，此后已有续签提交时直接复用
 func (refresher *authRuntimeRefresher) Refresh(ctx context.Context, generation uint64) error {
 	lease, ok := aistudio.AccountLeaseFromContext(ctx)
 	if !ok {
 		return fmt.Errorf("认证续签缺少账户租约")
+	}
+	if reason := refresher.pool.RestrictedReason(lease.Account().ID); reason != "" {
+		return accountRestricted(lease.Account().ID, reason)
 	}
 	endRefresh, ok := lease.BeginAuthRefresh()
 	if !ok {
@@ -457,6 +474,9 @@ func (refresher *authRuntimeRefresher) ensureBound(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
+	if reason := refresher.pool.RestrictedReason(lease.Account().ID); reason != "" {
+		return accountRestricted(lease.Account().ID, reason)
+	}
 	due := func() (aistudio.StorageState, aistudio.AuthExtension, bool, error) {
 		state, err := lease.ReloadStorageState()
 		if err != nil {
@@ -496,7 +516,7 @@ func (refresher *authRuntimeRefresher) ensureBound(ctx context.Context) error {
 // Available 返回当前租约账户能否续签：保存了 Chrome OAuth 续签材料，或本机 Chrome 登录着同一邮箱
 func (refresher *authRuntimeRefresher) Available(ctx context.Context) bool {
 	lease, ok := aistudio.AccountLeaseFromContext(ctx)
-	if !ok {
+	if !ok || refresher.pool.RestrictedReason(lease.Account().ID) != "" {
 		return false
 	}
 	state, err := lease.ReloadStorageState()

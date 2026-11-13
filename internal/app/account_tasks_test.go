@@ -50,7 +50,10 @@ func TestAccountTaskLifecycleInterruptsLockedLogin(t *testing.T) {
 			taskCtx := manager.AccountTaskContext()
 			loginDone := make(chan error, 1)
 			go func() {
-				_, err := manager.LoginAccount(taskCtx, account.ID, nil)
+				// Exercise the locked login stage without preparing a real browser.
+				manager.mu.RLock()
+				_, err := manager.current.admin.LoginAccount(taskCtx, account.ID, nil)
+				manager.mu.RUnlock()
 				loginDone <- err
 			}()
 			<-entered

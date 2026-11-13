@@ -2,12 +2,16 @@ package camoufoxnative
 
 import (
 	"bufio"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -72,5 +76,104 @@ func TestRemoveStaleProfilesEndsProfileProcesses(t *testing.T) {
 	}
 	if _, err := os.Stat(profile); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("profile 仍然存在: %v", err)
+	}
+}
+
+func TestWindowsFontconfigGroupedFonts(t *testing.T) {
+	const manifest = `{"readBy":{"win":["LMW","LW","MW","W"],"lin":["L","LM","LMW","LW"],"mac":["LM","LMW","M","MW"]}}`
+	const template = `<fontconfig><dir prefix="cwd">fonts</dir><match target="pattern"><edit name="hintstyle" mode="assign"><const>hintfull</const></edit></match></fontconfig>`
+	for _, test := range []struct {
+		name, manifest, template string
+		missingGroup, emptyGroup string
+		wantError                bool
+	}{
+		{name: "grouped", manifest: manifest, template: template},
+		{name: "missing manifest", template: template, wantError: true},
+		{name: "invalid manifest", manifest: "{", template: template, wantError: true},
+		{name: "missing Windows groups", manifest: `{"readBy":{"lin":["L"]}}`, template: template, wantError: true},
+		{name: "unsafe group", manifest: `{"readBy":{"win":["../M"]}}`, template: template, wantError: true},
+		{name: "missing group", manifest: manifest, template: template, missingGroup: "MW", wantError: true},
+		{name: "empty group", manifest: manifest, template: template, emptyGroup: "W", wantError: true},
+		{name: "missing template", manifest: manifest, wantError: true},
+		{name: "unsupported template", manifest: manifest, template: `<fontconfig><dir>/usr/share/fonts</dir></fontconfig>`, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			browser := filepath.Join(t.TempDir(), "browser & fonts")
+			profile := t.TempDir()
+			for _, group := range []string{"L", "LM", "LMW", "LW", "M", "MW", "W"} {
+				if group == test.missingGroup {
+					continue
+				}
+				directory := filepath.Join(browser, "fonts", group)
+				if err := os.MkdirAll(directory, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if group != test.emptyGroup {
+					if err := os.WriteFile(filepath.Join(directory, "fixture.ttf"), []byte("font fixture"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if test.manifest != "" {
+				if err := os.WriteFile(filepath.Join(browser, "fonts", "groups.json"), []byte(test.manifest), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			templatePath := filepath.Join(browser, "fontconfig", "windows", "fonts.conf")
+			if err := os.MkdirAll(filepath.Dir(templatePath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if test.template != "" {
+				if err := os.WriteFile(templatePath, []byte(test.template), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path, err := windowsFontconfig(filepath.Join(browser, "camoufox-bin"), profile)
+			if test.wantError {
+				if err == nil {
+					t.Fatal("invalid font resources were accepted")
+				}
+				if _, err := os.Stat(filepath.Join(profile, "fonts.conf")); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("failed preparation wrote a font config: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if path != filepath.Join(profile, "fonts.conf") {
+				t.Fatalf("configuration was written outside the profile: %s", path)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config struct {
+				Directories []string `xml:"dir"`
+			}
+			if err := xml.Unmarshal(data, &config); err != nil {
+				t.Fatalf("font config is not valid XML: %v", err)
+			}
+			var expected []string
+			for _, group := range []string{"LMW", "LW", "MW", "W"} {
+				expected = append(expected, filepath.Join(browser, "fonts", group))
+			}
+			if !slices.Equal(config.Directories, expected) {
+				t.Fatalf("font directories=%v, want only Windows groups %v", config.Directories, expected)
+			}
+			content := string(data)
+			if strings.Contains(content, `<const>hintfull</const>`) || !strings.Contains(content, `<const>hintslight</const>`) || !strings.Contains(content, `<family>fantasy</family><prefer><family>Arial</family>`) {
+				t.Fatal("Windows rendering preferences or fantasy alias were lost")
+			}
+			for alias, substitute := range windowsFontData.Substitutes {
+				if !strings.Contains(content, "<string>"+alias+"</string>") || !strings.Contains(content, "<string>"+substitute+"</string>") {
+					t.Fatalf("missing Windows font substitution: %s -> %s", alias, substitute)
+				}
+			}
+			original, err := os.ReadFile(templatePath)
+			if err != nil || string(original) != test.template {
+				t.Fatalf("bundled font config was modified: %v", err)
+			}
+		})
 	}
 }

@@ -78,6 +78,7 @@ const config: ServiceConfig = {
   fake_stream: false,
   youtube_links: false,
   search_model_aliases: false,
+  discover_hidden_models: false,
   google_search: false,
   anti_truncation: false,
   auto_continuation: true,
@@ -104,6 +105,7 @@ const config: ServiceConfig = {
   max_active_workers: 1,
   warm_startup_concurrency: 1,
   per_account_concurrency: 1,
+  max_account_switches: 3,
   routing_strategy: 'round-robin',
   account_order: '',
   upstream_channels: ['playground', 'build'],
@@ -167,6 +169,33 @@ describe('merged settings controls', () => {
     expect(html).toContain(
       messages['settings.environmentLocked'].replace('{key}', 'AUTO_CONTINUATION'),
     )
+  })
+
+  it('keeps hidden-model discovery and account-switch limits alongside local settings', async () => {
+    route.section = 'models'
+    const models = await render(SettingsPanel, {
+      config: { ...config, discover_hidden_models: true, environment: ['DISCOVER_HIDDEN_MODELS'] },
+      accounts: [],
+      models: [],
+      loading: false,
+      error: '',
+    })
+    expect(models).toMatch(/id="setting-discover-hidden-models"[^>]*aria-checked="true"/)
+    expect(models).toContain('id="setting-anti-truncation"')
+    expect(models).toContain('id="setting-auto-continuation"')
+    const locked = models.match(/<fieldset disabled[\s\S]*?<\/fieldset>/g) ?? []
+    expect(locked).toHaveLength(1)
+    expect(locked[0]).toContain('id="setting-discover-hidden-models"')
+    route.section = 'capacity'
+    const capacity = await render(SettingsPanel, {
+      config: { ...config, max_account_switches: 0 },
+      accounts: [],
+      models: [],
+      loading: false,
+      error: '',
+    })
+    expect(capacity).toMatch(/id="setting-max-account-switches"[^>]*value="0"[^>]*min="0"/)
+    expect(capacity).toMatch(/id="setting-warm_worker_limit"[^>]*value="0"[^>]*min="0"/)
   })
 
   it.each(['camoufox', 'spidermonkey'] as const)(

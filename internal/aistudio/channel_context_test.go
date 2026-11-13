@@ -39,11 +39,15 @@ func TestContextChannelLease(t *testing.T) {
 	}
 }
 
-func TestAssistantRouteKeepsURLChannelBoundary(t *testing.T) {
-	model := Model{ID: "shared-build", Methods: []string{"generateContent"}, Capabilities: map[string]bool{"assistant_route": true}}
-	account := &Account{ID: "account", Config: AccountConfig{Enabled: true}, State: AccountReady, Models: []Model{model}, modelAccessGeneration: 1}
+func TestBuildOnlyRouteKeepsURLChannelBoundary(t *testing.T) {
+	model := Model{ID: "build-only", Methods: []string{"generateContent"}}
+	account := &Account{ID: "account", Config: AccountConfig{Enabled: true}, State: AccountReady,
+		Models: []Model{{ID: "playground-only", Methods: []string{"generateContent"}}}, modelAccessGeneration: 1}
 	pool := NewAccountPool([]*Account{account}, 1)
 	pool.SetUpstreamChannels([]Channel{ChannelPlayground, ChannelBuild})
+	if err := pool.SetBuildCatalog(account.ID, []Model{model}); err != nil {
+		t.Fatal(err)
+	}
 	selection := AccountSelection{ModelID: model.ID, Method: "generateContent"}
 	for _, channel := range []Channel{"", ChannelBuild, ChannelPlayground} {
 		ctx, cancel := context.WithTimeout(ContextWithChannel(t.Context(), channel), time.Second)
@@ -51,11 +55,11 @@ func TestAssistantRouteKeepsURLChannelBoundary(t *testing.T) {
 		cancel()
 		if channel == ChannelPlayground {
 			if lease != nil || !errors.Is(err, ErrNoEligibleAccount) {
-				t.Fatalf("Playground crossed into assistant: lease=%v err=%v", lease, err)
+				t.Fatalf("Playground crossed into Build: lease=%v err=%v", lease, err)
 			}
 			continue
 		}
-		if err != nil || lease == nil || lease.Channel() != ChannelAssistant {
+		if err != nil || lease == nil || lease.Channel() != ChannelBuild {
 			t.Fatalf("channel=%q lease=%v err=%v", channel, lease, err)
 		}
 		if err := lease.Release(); err != nil {
@@ -64,14 +68,62 @@ func TestAssistantRouteKeepsURLChannelBoundary(t *testing.T) {
 	}
 	models := pool.EligibleModels([]Model{model})
 	if got := FilterModelsByChannel(models, ChannelPlayground); len(got) != 0 {
-		t.Fatalf("assistant listed on Playground: %+v", got)
+		t.Fatalf("Build-only model listed on Playground: %+v", got)
 	}
 	if got := FilterModelsByChannel(models, ChannelBuild); len(got) != 1 || !slices.Equal(got[0].Channels, []string{"build"}) {
-		t.Fatalf("assistant absent from Build: %+v", got)
+		t.Fatalf("Build-only model absent from Build: %+v", got)
 	}
 	pool.SetUpstreamChannels([]Channel{ChannelPlayground})
 	if got := pool.EligibleModels([]Model{model}); len(got) != 0 {
-		t.Fatalf("disabled Build still advertises assistant: %+v", got)
+		t.Fatalf("disabled Build still advertises a Build-only model: %+v", got)
+	}
+}
+
+func TestSelectionScopePreservesAdmittedAccountsAndChannel(t *testing.T) {
+	model := Model{ID: "shared", Methods: []string{"generateContent"}}
+	accounts := []*Account{
+		{ID: "a", Config: AccountConfig{Enabled: true}, State: AccountReady, Models: []Model{model}},
+		{ID: "b", Config: AccountConfig{Enabled: true}, State: AccountReady, Models: []Model{model}},
+		{ID: "c", Config: AccountConfig{Enabled: true}, State: AccountReady, Models: []Model{model}},
+	}
+	pool := NewAccountPool(accounts, 1)
+	pool.SetUpstreamChannels([]Channel{ChannelPlayground, ChannelBuild})
+	pool.SetAPIKeyAccounts(map[string][]string{"rotated": {"b", "c"}})
+	for _, account := range accounts {
+		if err := pool.SetBuildCatalog(account.ID, []Model{model}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := ContextWithAccountScope(ContextWithAPIKey(t.Context(), "rotated"), []string{"a", "b"})
+	source = ContextWithChannel(source, ChannelBuild)
+	for _, pinned := range []string{"", "b"} {
+		ctx := ContextWithSelectionScope(t.Context(), ContextWithAccount(source, pinned))
+		if ChannelFromContext(ctx) != ChannelBuild || contextAccount(ctx) != pinned {
+			t.Fatal("follow-up lost its URL channel or explicitly selected account")
+		}
+		selection := AccountSelection{ModelID: model.ID, Method: "generateContent", PreferredChannel: ChannelPlayground}
+		lease, _, err := pool.TryAcquireFor(ctx, selection)
+		if err != nil || lease == nil || lease.Account().ID != "b" || lease.Channel() != ChannelBuild {
+			t.Fatalf("follow-up escaped the admitted/current key intersection: lease=%v err=%v", lease, err)
+		}
+		if err := lease.Release(); err != nil {
+			t.Fatal(err)
+		}
+		selection.AccountID = "c"
+		if lease, _, err := pool.TryAcquireFor(ctx, selection); lease != nil || !errors.Is(err, ErrNoEligibleAccount) {
+			t.Fatalf("a pinned account escaped the original admission scope: lease=%v err=%v", lease, err)
+		}
+	}
+	pool.SetAPIKeyAccounts(nil)
+	ctx := ContextWithSelectionScope(t.Context(), source)
+	selection := AccountSelection{ModelID: model.ID, Method: "generateContent", AccountID: "c"}
+	if lease, _, err := pool.TryAcquireFor(ctx, selection); lease != nil || !errors.Is(err, ErrNoEligibleAccount) {
+		t.Fatalf("removing the old key expanded the admitted scope: lease=%v err=%v", lease, err)
+	}
+	ctx = ContextWithSelectionScope(t.Context(), ContextWithAccountScope(source, nil))
+	selection.AccountID = "a"
+	if lease, _, err := pool.TryAcquireFor(ctx, selection); lease != nil || !errors.Is(err, ErrNoEligibleAccount) {
+		t.Fatalf("an explicitly empty admission scope became unrestricted: lease=%v err=%v", lease, err)
 	}
 }
 

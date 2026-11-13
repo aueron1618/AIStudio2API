@@ -144,16 +144,20 @@ const pairingInsecure = computed(() => {
 // clipboardAvailable 表示页面处于可使用剪贴板 API 的安全上下文
 const clipboardAvailable = window.isSecureContext
 const selectedChromeProfiles = ref<string[]>([])
+// importableChromeProfiles 是没有服务受限、可以勾选的 Chrome 账户
+const importableChromeProfiles = computed(() =>
+  chromeProfiles.value.filter((profile) => profile.restricted === ''),
+)
 const allChromeProfilesSelected = computed(
   () =>
-    chromeProfiles.value.length > 0 &&
-    selectedChromeProfiles.value.length === chromeProfiles.value.length,
+    importableChromeProfiles.value.length > 0 &&
+    selectedChromeProfiles.value.length === importableChromeProfiles.value.length,
 )
 
 function toggleAllChromeProfiles(): void {
   selectedChromeProfiles.value = allChromeProfilesSelected.value
     ? []
-    : chromeProfiles.value.map((profile) => profile.id)
+    : importableChromeProfiles.value.map((profile) => profile.id)
 }
 const accountEnvironment = reactive({
   proxy: '',
@@ -203,6 +207,7 @@ const stateKeys: Record<AccountState, TranslationKey> = {
   busy: 'state.busy',
   cooldown: 'state.cooldown',
   auth_required: 'state.auth_required',
+  restricted: 'state.restricted',
   unavailable: 'state.unavailable',
   disabled: 'state.disabled',
 }
@@ -212,6 +217,7 @@ const stateTone: Record<AccountState, string> = {
   busy: 'bg-blue-400/10 text-blue-400',
   cooldown: 'bg-yellow-400/10 text-yellow-400',
   auth_required: 'bg-red-400/10 text-red-400',
+  restricted: 'bg-red-400/10 text-red-400',
   unavailable: 'bg-red-400/10 text-red-400',
   disabled: 'bg-gray-500/10 text-gray-500',
 }
@@ -334,6 +340,14 @@ function bulkRefresh(): void {
 function bulkDelete(): void {
   emit('delete', [...selectedAccounts.value])
   selected.clear()
+}
+
+// linkPieces 把原因文字按其中的 https 地址切分，地址片段标记为链接
+function linkPieces(text: string): { text: string; url: boolean }[] {
+  return text
+    .split(/(https:\/\/[^\s，。；）)]+)/)
+    .filter(Boolean)
+    .map((piece) => ({ text: piece, url: piece.startsWith('https://') }))
 }
 
 // reason 是悬窗中显示的账户或任务、原因类别与完整原因
@@ -607,13 +621,14 @@ function closeChromeImport(): void {
 
 // importChromeAccounts 在账户任务中导入选中的 Chrome 账户并关闭对话框
 async function importChromeAccounts(): Promise<void> {
+  if (pendingAction.value !== '') return
+  const chosen = new Set(selectedChromeProfiles.value)
+  const targets = importableChromeProfiles.value.filter((profile) => chosen.has(profile.id))
+  if (targets.length === 0) return
   pendingAction.value = 'chrome-import'
   try {
-    const chosen = new Set(selectedChromeProfiles.value)
     const task = await api.importChromeAccounts({
-      accounts: chromeProfiles.value
-        .filter((profile) => chosen.has(profile.id))
-        .map(({ id, email }) => ({ id, email })),
+      accounts: targets.map(({ id, email }) => ({ id, email })),
       ...accountEnvironment,
     })
     emit('task', task)
@@ -761,7 +776,7 @@ function cookieKey(candidate: CookieCandidate): string {
 
 // 原始 Cookie 导入不覆盖已有账户，与 Chrome 的原位重新导入不同。
 const importableCookieUsers = computed(() =>
-  cookieCandidates.value.filter((item) => !item.imported).map(cookieKey),
+  cookieCandidates.value.filter((item) => !item.imported && item.restricted === '').map(cookieKey),
 )
 
 const allCookieCandidatesSelected = computed(
@@ -795,7 +810,7 @@ function browserSummary(browser: CookieBrowser): string {
     [
       browser.browser,
       browser.address,
-      browser.email ? `u/${browser.auth_user}` : '',
+      browser.email || browser.restricted ? `u/${browser.auth_user}` : '',
       browser.locale,
       browser.timezone,
     ]
@@ -810,7 +825,13 @@ async function scanBrowsers(): Promise<void> {
   try {
     cookieBrowsers.value = await api.cookieBrowsers(accountEnvironment.proxy)
     selectedBrowsers.value = cookieBrowsers.value
-      .filter((browser) => browser.email !== '' && !browser.imported && browser.error === '')
+      .filter(
+        (browser) =>
+          browser.email !== '' &&
+          !browser.imported &&
+          browser.error === '' &&
+          browser.restricted === '',
+      )
       .map((browser) => browserKey(browser))
   } catch (error) {
     actionError(error)
@@ -837,7 +858,12 @@ async function importBrowserAccounts(): Promise<void> {
   if (pendingAction.value !== '') return
   const chosen = new Set(selectedBrowsers.value)
   const targets = cookieBrowsers.value.filter(
-    (browser) => !browser.imported && chosen.has(browserKey(browser)),
+    (browser) =>
+      browser.email !== '' &&
+      !browser.imported &&
+      browser.error === '' &&
+      browser.restricted === '' &&
+      chosen.has(browserKey(browser)),
   )
   if (targets.length === 0) return
   pendingAction.value = 'browser-import'
@@ -922,7 +948,9 @@ async function importCookieAccounts(direct = false): Promise<void> {
   const chosen = new Set(selectedCookieUsers.value)
   const targets = direct
     ? sources.map((_source, source) => ({ source, auth_user: 0, email: '' }))
-    : cookieCandidates.value.filter((item) => !item.imported && chosen.has(cookieKey(item)))
+    : cookieCandidates.value.filter(
+        (item) => !item.imported && item.restricted === '' && chosen.has(cookieKey(item)),
+      )
   if (targets.length === 0) return
   const version = cookieSourceVersion
   pendingAction.value = 'cookie-import'
@@ -1618,7 +1646,7 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
         <pre
           v-if="reason"
           class="rounded-md border border-line bg-canvas p-3 font-mono text-xs leading-5 whitespace-pre-wrap [overflow-wrap:anywhere] text-red-300"
-          >{{ logText(reason.text) }}</pre>
+        ><template v-for="(piece, index) in linkPieces(logText(reason.text))" :key="index"><a v-if="piece.url" :href="piece.text" target="_blank" rel="noreferrer" class="underline underline-offset-2 hover:text-red-200">{{ piece.text }}</a><template v-else>{{ piece.text }}</template></template></pre>
       </DetailDialog>
 
       <LoginViewer
@@ -1758,13 +1786,15 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
               <label
                 v-for="profile in chromeProfiles"
                 :key="profile.id"
-                class="flex cursor-pointer items-start gap-3 rounded border border-line bg-canvas p-3 transition hover:border-gray-600"
+                class="flex items-start gap-3 rounded border border-line bg-canvas p-3 transition"
+                :class="profile.restricted ? 'opacity-70' : 'cursor-pointer hover:border-gray-600'"
               >
                 <input
                   v-model="selectedChromeProfiles"
                   class="mt-1 h-4 w-4 shrink-0 accent-blue-600"
                   type="checkbox"
                   :value="profile.id"
+                  :disabled="profile.restricted !== ''"
                 />
                 <span class="min-w-0 flex-1">
                   <strong
@@ -1781,6 +1811,11 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                     v-tooltip.overflow="profile.profile"
                     class="block truncate font-mono text-xs text-gray-500"
                     >{{ profile.profile }}</span
+                  >
+                  <span
+                    v-if="profile.restricted"
+                    class="mt-1 block text-xs leading-5 [overflow-wrap:anywhere] text-red-300"
+                    >{{ t('state.restricted') }} · {{ logText(profile.restricted) }}</span
                   >
                 </span>
               </label>
@@ -1973,7 +2008,9 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                       :key="cookieKey(candidate)"
                       class="flex items-center gap-3 rounded border border-line bg-canvas p-3 transition"
                       :class="
-                        candidate.imported ? 'opacity-60' : 'cursor-pointer hover:border-gray-600'
+                        candidate.imported || candidate.restricted
+                          ? 'opacity-70'
+                          : 'cursor-pointer hover:border-gray-600'
                       "
                     >
                       <input
@@ -1981,14 +2018,19 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                         class="h-4 w-4 shrink-0 accent-blue-600"
                         type="checkbox"
                         :value="cookieKey(candidate)"
-                        :disabled="candidate.imported || pendingAction !== '' || cookieTaskRunning"
+                        :disabled="
+                          candidate.imported ||
+                          candidate.restricted !== '' ||
+                          pendingAction !== '' ||
+                          cookieTaskRunning
+                        "
                       />
                       <span class="min-w-0 flex-1">
                         <strong
                           v-tooltip.overflow="candidate.email"
                           class="block truncate text-sm text-white"
                         >
-                          {{ candidate.email }}
+                          {{ candidate.email || t('state.restricted') }}
                         </strong>
                         <span class="block truncate font-mono text-xs text-gray-400">
                           {{
@@ -2001,6 +2043,11 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                           v-if="candidate.device_bound"
                           class="mt-1 block text-xs leading-5 text-amber-200"
                           >{{ t('accounts.deviceBound') }}</span
+                        >
+                        <span
+                          v-if="candidate.restricted"
+                          class="mt-1 block text-xs leading-5 [overflow-wrap:anywhere] text-red-300"
+                          >{{ t('state.restricted') }} · {{ logText(candidate.restricted) }}</span
                         >
                       </span>
                       <span v-if="candidate.imported" class="shrink-0 text-xs text-gray-400">{{
@@ -2150,7 +2197,7 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                 :key="browserKey(browser)"
                 class="flex items-center gap-3 rounded border border-line bg-canvas p-3 transition"
                 :class="
-                  browser.email && !browser.imported && !browser.error
+                  browser.email && !browser.imported && !browser.error && !browser.restricted
                     ? 'cursor-pointer hover:border-gray-600'
                     : 'opacity-70'
                 "
@@ -2160,7 +2207,12 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                   class="h-4 w-4 shrink-0 accent-blue-600"
                   type="checkbox"
                   :value="browserKey(browser)"
-                  :disabled="!browser.email || browser.imported || browser.error !== ''"
+                  :disabled="
+                    !browser.email ||
+                    browser.imported ||
+                    browser.error !== '' ||
+                    browser.restricted !== ''
+                  "
                 />
                 <span class="min-w-0 flex-1">
                   <span
@@ -2177,6 +2229,11 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                     v-if="browser.device_bound"
                     class="mt-1 block text-xs leading-5 text-amber-200"
                     >{{ t('accounts.deviceBound') }}</span
+                  >
+                  <span
+                    v-if="browser.restricted"
+                    class="mt-1 block text-xs leading-5 [overflow-wrap:anywhere] text-red-300"
+                    >{{ t('state.restricted') }} · {{ logText(browser.restricted) }}</span
                   >
                 </span>
                 <span v-if="browser.imported" class="shrink-0 text-xs text-gray-400">{{

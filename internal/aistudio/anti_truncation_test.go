@@ -511,46 +511,37 @@ func TestAntiTruncationClientIncompleteAndUnsupportedRoutes(t *testing.T) {
 	}
 }
 
-func TestAntiTruncationAssistantRequiresCompletedFallback(t *testing.T) {
-	stream := func(status int) []byte {
-		step := make([]any, 13)
-		step[0] = []any{[]any{[]any{[]any{nil, "ordinary answer"}}, "model"}}
-		step[11], step[12] = 1, status
-		body, err := json.Marshal([]any{[]any{[]any{nil, nil, []any{step}}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return body
-	}
+func TestAntiTruncationBuildRequiresCompletedFallback(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
-		for _, status := range []int{1, 2} {
-			name := map[bool]string{false: "ordinary", true: "anti-truncation"}[enabled] + "/" + map[int]string{1: "completed", 2: "unfinished"}[status]
+		for _, completed := range []bool{false, true} {
+			name := map[bool]string{false: "ordinary", true: "anti-truncation"}[enabled] + "/" + map[bool]string{false: "unfinished", true: "completed"}[completed]
 			t.Run(name, func(t *testing.T) {
-				reopened := 0
-				decoder := &AssistantStreamDecoder{requireComplete: enabled, Reopen: func() (io.ReadCloser, error) {
-					reopened++
-					return io.NopCloser(bytes.NewReader(stream(status))), nil
-				}}
+				finish := ""
+				if completed {
+					finish = `,"finishReason":"STOP"`
+				}
+				chunk := `{"candidates":[{"content":{"role":"model","parts":[{"text":"ordinary answer"}]}` + finish + `}]}`
+				body, err := json.Marshal([]any{[]any{[]string{chunk}}})
+				if err != nil {
+					t.Fatal(err)
+				}
 				var got []Event
 				emit := func(event Event) error { got = append(got, event); return nil }
 				transport := &antiTruncationTransport{name: antiTruncationTestName}
 				if enabled {
 					emit = transport.emitter(emit)
 				}
-				err := DecodeAssistantStream(bytes.NewReader(stream(2)), decoder, emit)
+				err = DecodeBuildStream(bytes.NewReader(body), &BuildStreamDecoder{}, emit)
 				if enabled {
 					err = transport.complete(err)
 				}
-				if reopened != 1 {
-					t.Fatalf("unfinished task reopened %d times", reopened)
-				}
-				if enabled && status == 2 {
-					var protocol *ProtocolEvidenceError
-					if !errors.As(err, &protocol) || len(got) != 0 {
-						t.Fatalf("unfinished task leaked fallback or success: events=%+v err=%v", got, err)
+				if !completed {
+					var interrupted *StreamInterruptedError
+					if !errors.As(err, &interrupted) || enabled && len(got) != 0 || !enabled && (len(got) != 1 || got[0].Text != "ordinary answer") {
+						t.Fatalf("unfinished Build stream leaked fallback or success: events=%+v err=%v", got, err)
 					}
 				} else if err != nil || len(got) != 2 || got[0].Text != "ordinary answer" || got[1].Kind != EventFinish {
-					t.Fatalf("ordinary or completed task changed: events=%+v err=%v", got, err)
+					t.Fatalf("completed Build stream changed: events=%+v err=%v", got, err)
 				}
 			})
 		}
@@ -908,6 +899,55 @@ func TestAntiTruncationClientRegeneration(t *testing.T) {
 			}
 			if requests != test.wantRequests || calls != test.wantCalls || realCalls != test.wantRealCalls || text != test.wantText || (failures > 0) != test.wantError || !test.wantError && finishes != 1 {
 				t.Fatalf("requests=%d calls=%d real=%d text=%q errors=%d finishes=%d", requests, calls, realCalls, text, failures, finishes)
+			}
+		})
+	}
+}
+
+func TestOrdinaryGenerationRetainsUpstreamRecovery(t *testing.T) {
+	for _, functionCall := range []bool{false, true} {
+		t.Run(map[bool]string{false: "partial-text", true: "trailing-tool-error"}[functionCall], func(t *testing.T) {
+			requests := 0
+			client := NewClient(ClientOptions{Protected: ProtectedTransportFunc(func(_ context.Context, request GenerateRequest, _ RPCRequest) (*RPCResponse, error) {
+				requests++
+				if requests == 1 {
+					part := Part{Text: "prefix "}
+					if functionCall {
+						part = antiTruncationTestCall("lookup", "query").Part
+					}
+					return antiTruncationTestResponse(t, []Part{part}, nil), nil
+				}
+				if requests != 2 || len(request.Contents) != 3 || request.Contents[1].Role != RoleAssistant || request.Contents[1].Parts[0].Text != "prefix " || !strings.Contains(request.Contents[2].Parts[0].Text, "<partial_reply>") {
+					t.Fatalf("partial recovery replayed the original request: %+v", request.Contents)
+				}
+				return antiTruncationTestResponse(t, []Part{{Text: "prefix rest"}}, 1), nil
+			})})
+			model := Model{ID: "model", Capabilities: map[string]bool{"function_declarations": true}}
+			client.setModelCatalog("", modelCatalog{entries: map[string]modelEntry{model.ID: {model: model, defaults: GenerationDefaults{MaxOutputTokens: 1024}}}})
+			events, err := client.Generate(t.Context(), GenerateRequest{Model: model.ID, Contents: []Content{{Role: RoleUser, Parts: []Part{{Text: "question"}}}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := ""
+			tools, finishes := 0, 0
+			for event := range events {
+				switch event.Kind {
+				case EventText:
+					text += event.Text
+				case EventToolCall:
+					tools++
+				case EventError:
+					t.Fatal(event.Err)
+				case EventFinish:
+					finishes++
+					var interrupted *StreamInterruptedError
+					if functionCall != errors.As(event.TrailingError, &interrupted) {
+						t.Fatalf("trailing error metadata changed: %v", event.TrailingError)
+					}
+				}
+			}
+			if finishes != 1 || functionCall && (requests != 1 || tools != 1 || text != "") || !functionCall && (requests != 2 || tools != 0 || text != "prefix rest") {
+				t.Fatalf("ordinary recovery changed: requests=%d tools=%d finishes=%d text=%q", requests, tools, finishes, text)
 			}
 		})
 	}

@@ -1,4 +1,4 @@
-import { computed, reactive, ref, shallowRef } from 'vue'
+import { computed, reactive, ref, shallowRef, watch } from 'vue'
 import { api, openAdminEvents } from '@/api'
 import { useI18n } from '@/i18n'
 import type {
@@ -70,6 +70,7 @@ const serviceState = computed<'unavailable' | 'running' | 'launching' | 'stopped
 let eventConnection: EventSource | undefined
 // consoleGeneration 为 startConsole 与 stopConsole 的调用序号，离开后才完成的初始化据此不再订阅事件
 let consoleGeneration = 0
+const consoleActive = ref(false)
 let noticeTimer: number | undefined
 let pendingLogs: AdminLog[] = []
 let logFlushTimer: number | undefined
@@ -261,6 +262,26 @@ async function startService(): Promise<void> {
   }
 }
 
+// retryCamoufox 在后台重新下载 Camoufox，从已下载的部分继续
+async function retryCamoufox(): Promise<void> {
+  try {
+    status.value = await api.downloadCamoufox()
+  } catch (error) {
+    showNotice(errorText(error), 'error')
+  }
+}
+
+// camoufoxTimer 是 Camoufox 下载或解压期间每秒刷新服务状态的定时器
+let camoufoxTimer: number | undefined
+watch(
+  () => consoleActive.value && status.value?.camoufox.preparing === true,
+  (preparing) => {
+    window.clearInterval(camoufoxTimer)
+    camoufoxTimer = preparing ? window.setInterval(() => void loadStatus(), 1000) : undefined
+  },
+  { flush: 'sync' },
+)
+
 async function stopService(): Promise<void> {
   launchCancellationRequested.value = serviceState.value === 'launching'
   stopPending.value = true
@@ -358,6 +379,7 @@ function handleAdminEvent(event: AdminEvent): void {
 // startConsole 加载全部管理数据并订阅管理事件
 async function startConsole(): Promise<void> {
   const generation = ++consoleGeneration
+  consoleActive.value = true
   window.addEventListener('pagehide', flushDelete)
   await Promise.all([
     loadStatus(),
@@ -383,6 +405,7 @@ async function startConsole(): Promise<void> {
 // stopConsole 关闭事件订阅并提交等待中的删除
 function stopConsole(): void {
   consoleGeneration++
+  consoleActive.value = false
   eventConnection?.close()
   eventConnection = undefined
   window.clearTimeout(logFlushTimer)
@@ -424,6 +447,7 @@ export function useConsole() {
     commitDelete,
     startService,
     stopService,
+    retryCamoufox,
     clearLogs,
     waitForRestart,
     startConsole,

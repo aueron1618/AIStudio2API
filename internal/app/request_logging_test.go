@@ -31,7 +31,7 @@ func TestRequestRowModelFields(t *testing.T) {
 
 func TestRequestRowReusesAverageTokensPerSecond(t *testing.T) {
 	for _, latency := range []time.Duration{0, -time.Second, time.Second + 500*time.Microsecond} {
-		entry := api.AccessLog{Status: 200, Latency: latency, FirstEvent: 700 * time.Millisecond,
+		entry := api.AccessLog{Status: 200, Latency: latency, FirstEvent: 700 * time.Millisecond, FirstOutput: 10,
 			Usage: &aistudio.Usage{OutputTokens: 20, ReasoningTokens: 5}}
 		data := requestLogData(entry)
 		row := requestRow(entry, time.Now())
@@ -41,6 +41,20 @@ func TestRequestRowReusesAverageTokensPerSecond(t *testing.T) {
 		}
 		if row.AverageTokensPerSecond != data.Usage.AverageTokensPerSecond || row.AverageTokensPerSecond != want {
 			t.Fatalf("average changed between log and ledger: row=%v log=%v want=%v", row.AverageTokensPerSecond, data.Usage.AverageTokensPerSecond, want)
+		}
+	}
+}
+
+func TestRequestRowPreservesTrailingError(t *testing.T) {
+	for _, primary := range []string{"", "primary failure"} {
+		entry := api.AccessLog{Status: 200, Error: primary, TrailingError: "failure after tool call", ToolCalls: 1, FinishReason: "STOP"}
+		row := requestRow(entry, time.Now())
+		want, state := primary, "failed"
+		if primary == "" {
+			want, state = entry.TrailingError, "tool_calls"
+		}
+		if row.Error != want || row.State != state || row.ToolCalls != 1 {
+			t.Fatalf("trailing error changed request outcome: %+v", row)
 		}
 	}
 }

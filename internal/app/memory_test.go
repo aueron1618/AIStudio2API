@@ -3,10 +3,13 @@ package app
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
+	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
+	"github.com/Mag1cFall/AIStudio2API/internal/config"
 )
 
 func memoryTestManager(t *testing.T, warm, active int) *accountWorkerManager {
@@ -20,6 +23,46 @@ func memoryTestManager(t *testing.T, warm, active int) *accountWorkerManager {
 		}
 	})
 	return manager
+}
+
+func TestGoRuntimeDoesNotPrepareCamoufox(t *testing.T) {
+	directory := t.TempDir()
+	for _, key := range []string{"TMPDIR", "TEMP", "TMP"} {
+		t.Setenv(key, directory)
+	}
+	t.Setenv("CAMOUFOX_PATH", filepath.Join(directory, "not-installed"))
+	cfg := config.Default()
+	cfg.AuthStates = t.TempDir()
+	cfg.Proxy = "http://127.0.0.1:1"
+	service, admin, closeRuntime, err := newRuntime(t.Context(), t.Context(), cfg, newRequestRegistry(t.Context()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeRuntime()
+	if service.camoufoxWait != nil || service.workers.camoufox != "" {
+		t.Fatal("Go runtime acquired a Camoufox startup dependency")
+	}
+	if _, ok := admin.login.(aistudio.CookieLoginDriver); !ok {
+		t.Fatal("lazy browser Cookie import was lost")
+	}
+	if err := service.prepareCamoufox(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if state := camoufoxnative.PreparationState(); state.Preparing || state.Download != nil || state.Error != "" {
+		t.Fatalf("Go runtime started browser preparation: %+v", state)
+	}
+}
+
+func TestWaitLaunchReleasesRequestsDuringCamoufoxDownload(t *testing.T) {
+	t.Setenv("CAMOUFOX_PATH", filepath.Join(t.TempDir(), "not-installed"))
+	manager := &runtimeManager{launching: make(chan struct{}), launchReleased: make(chan struct{})}
+	close(manager.launchReleased)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	manager.WaitLaunch(ctx)
+	if ctx.Err() != nil {
+		t.Fatal("request waited for the full service startup while Camoufox was unavailable")
+	}
 }
 
 func TestZeroWarmPoolStartsWithoutWorker(t *testing.T) {

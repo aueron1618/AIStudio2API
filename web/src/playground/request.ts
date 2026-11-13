@@ -282,10 +282,9 @@ export function publicAPIBase(modelID: string, model?: Model): '/v1' | '/build/v
     model?.channels ??
     catalog.find((item) => item.id === id)?.channels ??
     catalog.find((item) => item.id === baseID)?.channels
-  if (channels?.includes('assistant')) return '/build/v1'
   if (channels?.includes('playground')) return '/v1'
   if (channels?.includes('build')) return '/build/v1'
-  return baseID.endsWith('-build') ? '/build/v1' : '/v1'
+  return '/v1'
 }
 
 // errorMessage 读取 Gemini API 错误正文中的说明
