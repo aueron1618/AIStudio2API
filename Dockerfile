@@ -49,6 +49,14 @@ FROM runtime-base AS release-no-browser
 ARG TARGETARCH
 COPY release/linux-$TARGETARCH/aistudio2api /usr/local/bin/aistudio2api
 
+# The font pruner runs on the build platform; it never enters the runtime image.
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS browser-tools
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY cmd/prune-camoufox/ ./cmd/prune-camoufox/
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/prune-camoufox ./cmd/prune-camoufox
+
 # Download on the build platform; select the browser archive for the target platform.
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS browser-download
 ARG TARGETARCH
@@ -56,7 +64,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 # Keep the bundled browser aligned with the version used by the Go downloader.
 COPY internal/camoufoxnative/download.go /tmp/camoufox-download.go
-# Drop only macOS-exclusive fonts/config, keeping groups shared with Windows or Linux.
+COPY internal/camoufoxnative/windows_profile.json internal/camoufoxnative/windows_fonts.json /tmp/
+COPY --from=browser-tools /out/prune-camoufox /usr/local/bin/prune-camoufox
+# Keep all fingerprint fonts, aliases and locale fallbacks without altering any glyphs.
 RUN set -eux; \
     version="$(sed -n 's/^const camoufoxRelease = "\([^"]*\)"$/\1/p' /tmp/camoufox-download.go)"; \
     test -n "$version"; \
@@ -74,12 +84,11 @@ RUN set -eux; \
     test -f /opt/camoufox/application.ini; \
     test -f /opt/camoufox/fontconfig/windows/fonts.conf; \
     test -f /opt/camoufox/fonts/groups.json; \
-    for group in L LM LMW LW MW W; do \
-        test -d "/opt/camoufox/fonts/$group"; \
-    done; \
+    prune-camoufox -root /opt/camoufox -profile /tmp/windows_profile.json -font-data /tmp/windows_fonts.json; \
+    test -s /opt/camoufox/fonts.sha256; \
+    du -sh /opt/camoufox; \
     chmod 755 /opt/camoufox/camoufox-bin; \
-    rm -rf /opt/camoufox/fonts/M /opt/camoufox/fontconfig/macos; \
-    rm /tmp/camoufox.zip /tmp/camoufox-download.go
+    rm /tmp/camoufox.zip /tmp/camoufox-download.go /tmp/windows_profile.json /tmp/windows_fonts.json
 
 FROM runtime-base AS runtime-browser
 RUN apt-get update && apt-get install -y --no-install-recommends \

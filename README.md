@@ -206,7 +206,9 @@ docker compose up -d
 | 内置浏览器（默认） | `latest` | `main-<6位SHA>` | `vX.Y.Z`、`X.Y.Z` |
 | 无浏览器 | `latest-no-browser` | `main-<6位SHA>-no-browser` | `vX.Y.Z-no-browser`、`X.Y.Z-no-browser` |
 
-内置浏览器版在构建时打包对应架构、版本匹配的 Camoufox，以及 Windows 字体、fontconfig、Xvfb 和软件 GL 运行库；移除未使用的 macOS 字体与 fontconfig。路径为 `/opt/camoufox/camoufox-bin`，通过镜像内 `CAMOUFOX_PATH` 指定；浏览器 Cookie 验证、登录及 Camoufox 后端无需运行时再下载，也不会因预装浏览器而常驻浏览器进程。该版本构建需要访问 GitHub Releases，镜像包含完整浏览器体积。
+内置浏览器版在构建时打包对应架构、版本匹配的 Camoufox，以及 Windows 字体、fontconfig、Xvfb 和软件 GL 运行库。构建工具按完整 Windows 指纹字体清单、字体族别名、替换表及语言回退配置筛选字体，保留命中的整份字体文件（含 TTC 全部字重与字形）和共享 emoji，不改写字体内容；移除未被托管 Windows 指纹使用的字体及 Linux/macOS 字体配置。语言包、音频与图形库保持不变，裁剪工具本身不进入最终镜像。CI 在断网只读环境校验保留字体的 SHA256，并限制浏览器目录不超过 800 MiB。路径为 `/opt/camoufox/camoufox-bin`，通过镜像内 `CAMOUFOX_PATH` 指定；浏览器 Cookie 验证、登录及 Camoufox 后端无需运行时再下载，也不会因预装浏览器而常驻浏览器进程。该版本构建需要访问 GitHub Releases。
+
+比较镜像大小时需统一口径：registry 下载层是压缩大小，展开后的镜像文件更大；containerd 镜像存储还可能同时保留压缩层与展开快照，Docker 显示的磁盘占用不等于下载大小。
 
 无浏览器版仅保留应用（含静态链接的 SpiderMonkey 与 libwebp）、系统证书与时区数据，不包含 Camoufox、配套字体或 GTK/Xvfb/GL 依赖，构建时也不下载浏览器。请保持 `WAA_BACKEND=spidermonkey`，通过 Cookie **HTTP 验证**、已有登录态文件或远程添加导入账户。浏览器登录、默认 Cookie 浏览器验证及 `WAA_BACKEND=camoufox` 需要内置浏览器版；无浏览器版没有改变应用的按需下载机制，不应在该版本触发这些浏览器功能。
 
