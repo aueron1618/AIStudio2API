@@ -256,6 +256,35 @@ func TestNativeGenerateUsesPageRunWithoutPrecomputedProof(t *testing.T) {
 	}
 }
 
+func TestNativeGenerateReusesContinuationProof(t *testing.T) {
+	runtime := &nativeGenerateFixture{nativeRuntimeFixture: &nativeRuntimeFixture{name: "continued"}}
+	worker := &NativeWorker{runtime: runtime}
+	defer worker.Close()
+	body, err := json.Marshal([]any{"model", []any{[]any{[]any{[]any{nil, "hi"}}, "user"}}, nil, nil, nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ProtectedRequest{URL: makerSuiteRPCURL + "GenerateContent", Body: body, ProofField: 5, Prompt: "binding", PagePrompt: "hi", Proof: "!first-round"}
+	prepared, err := worker.Prepare(t.Context(), request)
+	if err != nil || prepared.Proof != request.Proof || !strings.Contains(string(prepared.Body), `"!first-round"`) || runtime.digest != "" || runtime.run {
+		t.Fatalf("continuation generated a new proof: prepared=%+v err=%v", prepared, err)
+	}
+	request.Body, request.Headers, request.Proof = prepared.Body, prepared.Headers, prepared.Proof
+	response, err := worker.SendProtected(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Proof != request.Proof || len(runtime.turn.Body) != 0 {
+		t.Errorf("continuation reran the page or lost its proof: response=%+v turn=%+v", response, runtime.turn)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if use := worker.runtimeUses[runtime]; use == nil || use.requests != 0 || len(use.responses) != 0 {
+		t.Fatal("proof reuse bypassed native response lifetime tracking")
+	}
+}
+
 type nativeCanceledBody struct {
 	err       error
 	closing   chan struct{}

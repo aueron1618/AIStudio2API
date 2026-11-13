@@ -65,10 +65,9 @@ describe('fixed public channel URLs', () => {
     expect(publicAPIBase('unknown')).toBe('/v1')
     expect(publicAPIBase(buildModel.id, buildModel)).toBe('/build/v1')
     expect(publicAPIBase('build-only')).toBe('/build/v1')
-    expect(publicAPIBase('models/gemini-test-build(high)')).toBe('/build/v1')
-    expect(publicAPIBase('models/gemini-test-build-search(high)')).toBe('/build/v1')
-    expect(publicAPIBase('models/gemini-test-build(high)-search')).toBe('/build/v1')
-    expect(publicAPIBase('assistant', { ...model, channels: ['assistant'] })).toBe('/build/v1')
+    expect(publicAPIBase('models/gemini-test-build(high)')).toBe('/v1')
+    expect(publicAPIBase('models/gemini-test-build-search(high)')).toBe('/v1')
+    expect(publicAPIBase('models/gemini-test-build(high)-search')).toBe('/v1')
     expect(publicAPIBase('alias-build', { ...model, channels: ['playground'] })).toBe('/v1')
   })
 
@@ -308,7 +307,7 @@ describe('Interactions and current media capabilities', () => {
     expect(buildRequest(defaultSettings(model), model, [])).not.toHaveProperty('tools')
   })
 
-  it('keeps Antigravity model/token configuration separate from Build assistant routing', () => {
+  it('keeps Antigravity model/token configuration separate from Build proxy routing', () => {
     const settings = defaultSettings(agent)
     expect(agentFields(settings, agent)).toBeUndefined()
     settings.agentModel = 'gemini-chosen'
@@ -321,10 +320,10 @@ describe('Interactions and current media capabilities', () => {
       },
     })
     expect(protocolsFor(agent).map((item) => item.value)).toEqual(['interactions'])
-    const assistant: Model = { ...model, channels: ['assistant'], agent_model: 'not-an-agent' }
-    expect(agentFields(settings, assistant)).toBeUndefined()
-    expect(protocolsFor(assistant).some((item) => item.value === 'interactions')).toBe(false)
-    expect(publicAPIBase(assistant.id, assistant)).toBe('/build/v1')
+    const proxy: Model = { ...buildModel, agent_model: 'not-an-agent' }
+    expect(agentFields(settings, proxy)).toBeUndefined()
+    expect(protocolsFor(proxy).some((item) => item.value === 'interactions')).toBe(false)
+    expect(publicAPIBase(proxy.id, proxy)).toBe('/build/v1')
   })
 
   it('keeps Deep Research capability switches in its own configuration type', () => {

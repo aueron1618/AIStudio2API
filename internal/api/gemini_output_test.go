@@ -302,11 +302,11 @@ func TestGeminiCandidateEndHTTP(t *testing.T) {
 	}
 }
 
-func TestGeminiPromptFeedbackHTTP(t *testing.T) {
-	for _, stage := range []string{"generate", "first_event", "after_usage"} {
-		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/stream=%t", stage, stream), func(t *testing.T) {
-				failure := fmt.Errorf("wrapped: %w", &aistudio.PromptFeedbackError{Reason: " safety ", Message: "input blocked"})
+func TestGeminiContentPolicyHTTP(t *testing.T) {
+	for _, stage := range []string{"generate", "first_event", "after_usage", "after_text"} {
+		for _, mode := range []string{"unary", "sse", "json_stream"} {
+			t.Run(stage+"/"+mode, func(t *testing.T) {
+				failure := fmt.Errorf("wrapped: %w", &aistudio.ContentPolicyError{Reason: "SAFETY", Message: "input blocked"})
 				service := generationTestService{generate: func(context.Context, aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
 					if stage == "generate" {
 						return nil, failure
@@ -314,37 +314,54 @@ func TestGeminiPromptFeedbackHTTP(t *testing.T) {
 					var events []aistudio.Event
 					if stage == "after_usage" {
 						events = append(events, aistudio.Event{Kind: aistudio.EventUsage, Usage: &aistudio.Usage{InputTokens: 2}})
+					} else if stage == "after_text" {
+						events = append(events, aistudio.Event{Kind: aistudio.EventText, Text: "partial answer"})
 					}
 					return testEventStream(append(events, aistudio.Event{Kind: aistudio.EventError, Err: failure})...), nil
 				}}
 				path := "/v1beta/models/test:generateContent"
-				if stream {
-					path = "/v1beta/models/test:streamGenerateContent?alt=sse"
+				if mode != "unary" {
+					path = "/v1beta/models/test:streamGenerateContent"
+					if mode == "sse" {
+						path += "?alt=sse"
+					}
 				}
 				response, raw := protocolTestRequest(t, newProtocolTestServer(t, service), http.MethodPost, path, `{"contents":[{"parts":[{"text":"hi"}]}]}`, nil)
-				if response.StatusCode != http.StatusOK {
-					t.Fatalf("status=%d: %s", response.StatusCode, raw)
+				started := mode != "unary" && (stage == "after_usage" || stage == "after_text")
+				wantStatus := http.StatusBadGateway
+				if started {
+					wantStatus = http.StatusOK
+				}
+				if response.StatusCode != wantStatus {
+					t.Fatalf("status=%d, want %d: %s", response.StatusCode, wantStatus, raw)
 				}
 				var payload map[string]any
-				if stream {
-					frames := sseTestPayloads(t, raw)
-					if len(frames) != 1 {
-						t.Fatalf("blocked input must produce only one frame: %s", raw)
+				switch {
+				case started && mode == "json_stream":
+					var frames []map[string]any
+					if err := json.Unmarshal(raw, &frames); err != nil || len(frames) == 0 {
+						t.Fatalf("invalid JSON stream: %s (%v)", raw, err)
 					}
-					payload = frames[0]
-				} else if err := json.Unmarshal(raw, &payload); err != nil {
-					t.Fatal(err)
+					payload = frames[len(frames)-1]
+				case started && mode == "sse":
+					// The official Gemini SDK expects an unprefixed JSON error after SSE data.
+					for line := range strings.SplitSeq(string(raw), "\n") {
+						if strings.HasPrefix(line, `{"error":`) {
+							if err := json.Unmarshal([]byte(line), &payload); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+				default:
+					if err := json.Unmarshal(raw, &payload); err != nil {
+						t.Fatal(err)
+					}
 				}
-				if len(payload) != 3 || payload["modelVersion"] != "test" || payload["responseId"] == "" || !reflect.DeepEqual(payload["promptFeedback"], map[string]any{"blockReason": "SAFETY", "blockReasonMessage": "input blocked"}) {
-					t.Fatalf("invalid prompt feedback response: %+v", payload)
+				details, ok := payload["error"].(map[string]any)
+				if len(payload) != 1 || !ok || details["code"] != float64(http.StatusBadGateway) || details["status"] != "INTERNAL" || !strings.Contains(fmt.Sprint(details["message"]), "input blocked") {
+					t.Fatalf("content rejection must remain a retryable error: %s", raw)
 				}
 			})
-		}
-	}
-	for _, reason := range []string{"", " unspecified "} {
-		payload, ok := geminiPromptFeedback(aistudio.GenerateRequest{}, &aistudio.PromptFeedbackError{Reason: reason})
-		if !ok || !reflect.DeepEqual(payload["promptFeedback"], map[string]any{"blockReason": "BLOCK_REASON_UNSPECIFIED"}) {
-			t.Errorf("unspecified feedback=%+v", payload)
 		}
 	}
 }

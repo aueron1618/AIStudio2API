@@ -86,7 +86,7 @@ func TestTrackedAntiTruncationToolStatistics(t *testing.T) {
 					ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 					service.requests.start(request, cancel)
 					events := make(chan aistudio.Event)
-					acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool) (*aistudio.AccountLease, error) {
+					acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool, _ *int) (*aistudio.AccountLease, error) {
 						return service.pool.AcquireFor(ctx, selection)
 					}
 					go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
@@ -147,7 +147,7 @@ func TestStreamToolStatisticsPublishedBeforeSourceClose(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		service.requests.start(request, cancel)
 		events := make(chan aistudio.Event)
-		acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool) (*aistudio.AccountLease, error) {
+		acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool, _ *int) (*aistudio.AccountLease, error) {
 			return service.pool.AcquireFor(ctx, selection)
 		}
 		go func() {

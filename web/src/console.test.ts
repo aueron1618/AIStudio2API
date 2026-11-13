@@ -46,12 +46,16 @@ beforeEach(() => {
     },
     setTimeout,
     clearTimeout,
+    setInterval: vi.fn(() => 1),
+    clearInterval: vi.fn(),
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
   })
-  vi.mocked(api.status).mockResolvedValue({ state: 'STOPPED', version: 'fixture' } as Awaited<
-    ReturnType<typeof api.status>
-  >)
+  vi.mocked(api.status).mockResolvedValue({
+    state: 'STOPPED',
+    version: 'fixture',
+    camoufox: { ready: false, preparing: false },
+  } as Awaited<ReturnType<typeof api.status>>)
   vi.mocked(api.accounts).mockResolvedValue([])
   vi.mocked(api.models).mockResolvedValue([])
   vi.mocked(api.requests).mockResolvedValue([])
@@ -80,6 +84,24 @@ async function start() {
 }
 
 describe('shared account task recovery', () => {
+  it('polls Camoufox preparation only while the console is active', async () => {
+    const state = await start()
+    expect(window.setInterval).not.toHaveBeenCalled()
+    state.status.value = {
+      ...state.status.value!,
+      camoufox: { ready: false, preparing: true, download: { received: 1, total: 10 } },
+    }
+    expect(window.setInterval).toHaveBeenCalledTimes(1)
+    state.stopConsole()
+    expect(window.clearInterval).toHaveBeenLastCalledWith(1)
+    state.status.value = { ...state.status.value!, camoufox: { ready: true, preparing: false } }
+    state.status.value = { ...state.status.value!, camoufox: { ready: false, preparing: true } }
+    expect(window.setInterval).toHaveBeenCalledTimes(1)
+    await state.startConsole()
+    expect(window.setInterval).toHaveBeenCalledTimes(2)
+    expect(window.clearInterval).toHaveBeenLastCalledWith(1)
+  })
+
   it('loads accepted tasks without mounting the Accounts panel and reloads after reconnect', async () => {
     const state = await start()
     expect(state.accountTasks.value).toEqual([running])

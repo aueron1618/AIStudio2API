@@ -22,13 +22,21 @@ func TestReloadFailureReleasesPageSetupAndClosesInvalidRuntime(t *testing.T) {
 		defer cancel()
 		done := make(chan error, 1)
 		go func() { done <- worker.Reload(ctx) }()
-		setup := map[string]bool{}
-		for range 3 {
+		setup := map[string]int{}
+		for range 4 {
 			command := requireBiDiTestCommand(t, commands)
-			setup[command.Method] = true
+			setup[command.Method]++
 			result := map[string]any{}
 			switch command.Method {
 			case "session.subscribe":
+				events, ok := command.Params["events"].([]any)
+				if !ok || len(events) == 0 {
+					t.Fatalf("missing subscription events: %+v", command)
+				}
+				result["subscription"] = "page-events"
+				if events[0] == "network.beforeRequestSent" {
+					result["subscription"] = "catalog-network"
+				}
 			case "network.addDataCollector":
 				result["collector"] = "catalog"
 			case "script.addPreloadScript":
@@ -38,8 +46,8 @@ func TestReloadFailureReleasesPageSetupAndClosesInvalidRuntime(t *testing.T) {
 			}
 			writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": command.ID, "result": result})
 		}
-		if len(setup) != 3 {
-			t.Fatal("page setup did not install all three resources")
+		if setup["session.subscribe"] != 2 || setup["network.addDataCollector"] != 1 || setup["script.addPreloadScript"] != 1 {
+			t.Fatal("page setup did not install both subscriptions, collector and preload")
 		}
 		navigate := requireBiDiTestCommand(t, commands)
 		if navigate.Method != "browsingContext.navigate" || navigate.Params["url"] != aiStudioOrigin+"/prompts/new_chat?model=&temporary=true" {
@@ -50,6 +58,12 @@ func TestReloadFailureReleasesPageSetupAndClosesInvalidRuntime(t *testing.T) {
 		for range 3 {
 			command := requireBiDiTestCommand(t, commands)
 			removed[command.Method] = true
+			if command.Method == "session.unsubscribe" {
+				ids, ok := command.Params["subscriptions"].([]any)
+				if !ok || len(ids) != 1 || ids[0] != "catalog-network" {
+					t.Fatalf("cleanup did not target its network subscription: %+v", command)
+				}
+			}
 			writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": command.ID, "result": map[string]any{}})
 		}
 		for _, method := range []string{"session.unsubscribe", "network.removeDataCollector", "script.removePreloadScript"} {
@@ -228,7 +242,9 @@ func (fixture *workerPageFixture) reply(t *testing.T, command bidiTestCommand) {
 		result = map[string]any{"type": "success", "result": value}
 	case "session.end":
 		clear(fixture.live)
-	case "session.subscribe", "session.unsubscribe", "network.removeDataCollector", "script.removePreloadScript", "script.disown", "input.performActions":
+	case "session.subscribe":
+		result["subscription"] = fmt.Sprintf("subscription-%d", command.ID)
+	case "session.unsubscribe", "network.removeDataCollector", "script.removePreloadScript", "script.disown", "input.performActions":
 	default:
 		t.Fatalf("unexpected page fixture command: %+v", command)
 	}

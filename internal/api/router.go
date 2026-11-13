@@ -130,6 +130,7 @@ func NewHandler(service aistudio.Service, config Config) http.Handler {
 	public.HandleFunc("GET /v1beta/models/{model...}", s.handleGeminiModel)
 	public.HandleFunc("POST /v1beta/models/{action}", s.handleGeminiAction)
 	public.HandleFunc("GET /v1beta/operations/{operation}", s.handleGeminiVideoOperation)
+	public.HandleFunc("POST /v1beta/decisions", s.handleDecision)
 	public.HandleFunc("POST /upload/v1beta/files", s.handleGeminiFileUpload)
 	public.HandleFunc("GET /v1beta/files", s.handleGeminiFileList)
 	public.HandleFunc("GET /v1beta/files/{file}", s.handleGeminiFileGet)
@@ -152,7 +153,7 @@ func NewHandler(service aistudio.Service, config Config) http.Handler {
 
 	root := http.NewServeMux()
 	root.Handle("GET /health", corsMiddleware(http.HandlerFunc(s.handleHealth)))
-	publicHandler := bodyLimitMiddleware(apiKeyMiddleware(config, requestBodyMiddleware(config.Ledger, waitLaunchMiddleware(config.WaitLaunch, public))))
+	publicHandler := bodyLimitMiddleware(apiKeyMiddleware(config, accountContextMiddleware(requestBodyMiddleware(config.Ledger, waitLaunchMiddleware(config.WaitLaunch, public)))))
 	loggedHandler := requestLoggingMiddleware(config.Admin, corsMiddleware(publicHandler))
 	root.Handle("/v1/", channelMiddleware(aistudio.ChannelPlayground, loggedHandler))
 	root.Handle("/build/v1/", channelMiddleware(aistudio.ChannelBuild,

@@ -35,7 +35,7 @@ func FilterModelsByChannel(models []Model, channel Channel) []Model {
 	for _, model := range models {
 		matches := len(model.Channels) == 0 && channel == ChannelPlayground
 		for _, available := range model.Channels {
-			matches = matches || available == string(channel) || channel == ChannelBuild && available == string(ChannelAssistant)
+			matches = matches || available == string(channel)
 		}
 		if matches {
 			model.Channels = []string{string(channel)}

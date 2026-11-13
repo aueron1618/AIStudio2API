@@ -58,8 +58,9 @@ func (target setupTargetFunc) Save(ctx context.Context, cfg aistudio.AccountConf
 }
 
 func TestSetupCookieEmailCannotBypassVerification(t *testing.T) {
-	previous := verifySetupCookies
-	t.Cleanup(func() { verifySetupCookies = previous })
+	previous, previousAccess := verifySetupCookies, checkSetupAccess
+	t.Cleanup(func() { verifySetupCookies, checkSetupAccess = previous, previousAccess })
+	checkSetupAccess = func(context.Context, *aistudio.StorageState, string, int) error { return nil }
 	for _, test := range []struct {
 		name, requested string
 		canceled        bool

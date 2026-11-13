@@ -91,6 +91,57 @@ func newAccountTestAdmin(t *testing.T) *runtimeAdmin {
 	return &runtimeAdmin{
 		lifecycle: t.Context(), config: config.Default(), pool: pool, workers: workers, service: service,
 		store: aistudio.NewAccountStore(t.TempDir()), requests: registry,
+		checkAccess: func(context.Context, *aistudio.StorageState, string, int) error { return nil },
+	}
+}
+
+func TestRestrictedCookieImportPersistsAndRejectsReimport(t *testing.T) {
+	admin := newAccountTestAdmin(t)
+	checks := 0
+	admin.verifyCookies = func(context.Context, *aistudio.StorageState, string, int) (chromeauth.Verification, error) {
+		return chromeauth.Verification{Email: "restricted@example.test"}, nil
+	}
+	admin.checkAccess = func(context.Context, *aistudio.StorageState, string, int) error {
+		checks++
+		return &camoufoxnative.AccessDenial{Err: camoufoxnative.ErrServiceRestricted}
+	}
+	const cookies = "SAPISID=fixture; __Secure-1PAPISID=one; __Secure-3PAPISID=three"
+	_, err := admin.ImportCookieAccount(t.Context(), api.CookieImportInput{Cookies: cookies, Method: "http"})
+	var operation *adminOperationError
+	if !errors.As(err, &operation) || operation.code != "account_restricted" || checks != 1 {
+		t.Fatalf("restricted import was not rejected: %v, checks=%d", err, checks)
+	}
+	recorded, err := admin.store.RestrictedImports()
+	if err != nil || recorded["restricted@example.test"] == "" {
+		t.Fatalf("restriction was not persisted: %v, %v", recorded, err)
+	}
+	state, err := aistudio.ParseCookieImport(cookies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = admin.ImportAccountState(t.Context(), api.AccountStateInput{StorageState: state})
+	if !errors.As(err, &operation) || operation.code != "account_restricted" || checks != 1 {
+		t.Fatalf("recorded restriction was checked again or bypassed: %v, checks=%d", err, checks)
+	}
+	accounts, err := admin.store.Load()
+	if err != nil || len(accounts) != 0 || len(admin.pool.Status()) != 0 {
+		t.Fatal("restricted import published an account")
+	}
+	profiles := []chromeauth.Account{{ID: "chrome-id", Email: "Restricted@Example.Test", Importable: true}}
+	listed := chromeImportProfiles(profiles, nil, recorded)
+	if len(listed) != 1 || listed[0].Restricted == "" || restrictedChromeSelection(profiles, []string{"chrome-id"}, nil, recorded) == nil {
+		t.Fatal("Chrome import ignored a persisted restriction")
+	}
+}
+
+func TestCookieDiscoveryKeepsImportedAndRestrictedAccountsDistinct(t *testing.T) {
+	entries := cookieAccountEntries(api.CookieBrowser{DeviceBound: true}, []chromeauth.CookieAccount{
+		{Email: "Existing@Example.Test", AuthUser: 0},
+		{Email: "restricted@example.test", AuthUser: 1},
+		{AuthUser: 2, Restricted: "age requirement"},
+	}, map[string]string{"existing@example.test": ""}, map[string]string{"restricted@example.test": "service restricted"})
+	if len(entries) != 3 || !entries[0].Imported || entries[0].Restricted != "" || entries[1].Imported || entries[1].Restricted != "service restricted" || entries[2].Restricted != "age requirement" {
+		t.Fatalf("discovery lost import or restriction metadata: %+v", entries)
 	}
 }
 
@@ -134,7 +185,8 @@ func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 				workers: workers, timeout: time.Second, modelRetries: make(map[string]struct{}),
 			}
 			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), login: driver,
-				requests: registry, workers: workers, service: service}
+				requests: registry, workers: workers, service: service,
+				checkAccess: func(context.Context, *aistudio.StorageState, string, int) error { return nil }}
 			httpCalls := 0
 			admin.verifyCookies = func(ctx context.Context, pending *aistudio.StorageState, proxy string, authUser int) (chromeauth.Verification, error) {
 				httpCalls++
@@ -278,6 +330,10 @@ func TestAdminCookieImportValidation(t *testing.T) {
 			cfg := config.Default()
 			cfg.Proxy = "http://127.0.0.1:1234"
 			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), login: driver, requests: newRequestRegistry(ctx), config: cfg, globalProxy: cfg.Proxy}
+			admin.checkAccess = func(context.Context, *aistudio.StorageState, string, int) error {
+				t.Fatal("rejected browser import attempted a network access check")
+				return nil
+			}
 			admin.verifyCookies = func(context.Context, *aistudio.StorageState, string, int) (chromeauth.Verification, error) {
 				t.Fatal("browser import silently fell back to HTTP")
 				return chromeauth.Verification{}, nil
@@ -352,6 +408,10 @@ func TestAdminHTTPCookieImportValidation(t *testing.T) {
 				cfg.InitTimeout = time.Millisecond
 			}
 			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), requests: newRequestRegistry(ctx), config: cfg, globalProxy: "http://127.0.0.1:1234"}
+			admin.checkAccess = func(context.Context, *aistudio.StorageState, string, int) error {
+				t.Fatal("rejected HTTP import attempted a network access check")
+				return nil
+			}
 			calls := 0
 			admin.verifyCookies = func(ctx context.Context, pending *aistudio.StorageState, proxy string, _ int) (chromeauth.Verification, error) {
 				calls++
@@ -534,6 +594,9 @@ func TestChromeImportVerifiesBeforePublication(t *testing.T) {
 				OAuth:  &aistudio.ChromeOAuthMaterial{GaiaID: "fixture-gaia", RefreshToken: "fixture-oauth"},
 				Bound:  &aistudio.BoundSession{ID: "fixture-session"},
 			})
+			admin.discoverChrome = func(string) ([]chromeauth.Account, error) {
+				return []chromeauth.Account{{ID: "fixture-id", Email: "user@example.test", Importable: true}}, nil
+			}
 			admin.importChrome = func(_ context.Context, options chromeauth.ImportOptions) ([]chromeauth.ImportResult, error) {
 				if len(options.AccountIDs) != 1 || options.AccountIDs[0] != "fixture-id" || options.Proxy != "http://127.0.0.1:4321" {
 					t.Fatal("Chrome import lost selection or proxy")
@@ -580,7 +643,7 @@ func TestChromeImportVerifiesBeforePublication(t *testing.T) {
 			previous := lease.Account()
 			cfg := previous.Config
 			cfg.AuthUser, cfg.Proxy, cfg.Locale, cfg.Timezone = 2, "http://127.0.0.1:7777", "ja-JP", "Asia/Tokyo"
-			if err := errors.Join(lease.SaveConfig(cfg), lease.BindResource("files/reimport-fixture", "drive-file")); err != nil {
+			if err := errors.Join(lease.SaveConfig(cfg), admin.pool.BindResourceKind("files/reimport-fixture", previous.ID, "drive-file")); err != nil {
 				_ = lease.Release()
 				t.Fatal(err)
 			}
@@ -667,7 +730,11 @@ func TestAdminCookieCDPUsesSameVerification(t *testing.T) {
 			defer cancel()
 			driver := &cookieLoginStub{result: aistudio.IsolatedLoginResult{Email: "existing@example.com", StorageState: state}}
 			pool := aistudio.NewAccountPool([]*aistudio.Account{{ID: "existing@example.com", Config: aistudio.DefaultAccountConfig("existing@example.com")}}, 1)
-			admin := &runtimeAdmin{pool: pool, login: driver, requests: newRequestRegistry(ctx)}
+			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(t.TempDir()), login: driver, requests: newRequestRegistry(ctx)}
+			admin.checkAccess = func(context.Context, *aistudio.StorageState, string, int) error {
+				t.Fatal("duplicate CDP import attempted a network access check")
+				return nil
+			}
 			input := api.CookieImportInput{CDP: address}
 			if override {
 				input.Locale, input.Timezone = "zh-CN", "Asia/Shanghai"

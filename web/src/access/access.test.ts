@@ -103,10 +103,38 @@ describe('Access fixed-channel contracts', () => {
       'music',
       'video',
       'embedding',
+      'decision',
       'live',
       'agent',
       'files',
     ])
+  })
+
+  it('exposes Decision with its dedicated method, warning, and Gemini endpoint', () => {
+    const decision = capabilities.find((capability) => capability.id === 'decision')!
+    const model: Model = {
+      id: 'gemini-decision-1',
+      name: 'Decision',
+      methods: ['createDecision'],
+      channels: ['playground'],
+    }
+    expect(decision.matches(model)).toBe(true)
+    expect(decision.matches(normal)).toBe(false)
+    expect(decision.notice).toBe('models.frontendUncalledHelp')
+    expect(decision.endpoints).toEqual([['POST', '/v1beta/decisions']])
+    for (const language of decision.languages('')) {
+      const code = decision.code({
+        origin,
+        model,
+        modelID: model.id,
+        protocol: '',
+        language: language.value,
+      })
+      expect(code).toContain(model.id)
+      expect(code).toContain('questions')
+      expect(code).not.toContain('/build/v1')
+      expect(code).not.toContain('/chat/completions')
+    }
   })
 
   it.each(

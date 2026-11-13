@@ -3,8 +3,10 @@ package camoufoxnative
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"maps"
 	"net/url"
@@ -87,6 +89,8 @@ func launchBrowser(ctx context.Context, options Options, config map[string]any) 
 		_ = removeProfile(profile, profileLock)
 		return nil, "", err
 	}
+	// intl.locale.requested 选用 Camoufox 内置语言包，界面语言与 Intl 默认区域随指纹语言
+	prefs["intl.locale.requested"] = requestedLocale(config)
 	if options.Headless && !options.liveView {
 		for key, value := range headlessPreferences() {
 			prefs[key] = value
@@ -419,13 +423,13 @@ const windowsAudioChannels = 2
 const windowsAudioSampleRate = 48000
 
 // windowsChromeHeight 为 Windows 版 Camoufox 窗口中浏览器界面占用的高度
-const windowsChromeHeight = 57
+const windowsChromeHeight = 85
 
 // windowsStorageLimit 为使站点存储配额取 Firefox 上限 10 GiB 的全局存储上限，单位 KB
 const windowsStorageLimit = 50 << 20
 
 // hostChromeHeight 为 macOS 与 Linux 版 Camoufox 窗口中浏览器界面占用的高度
-const hostChromeHeight = 51
+var hostChromeHeight = map[string]int{"darwin": 85, "linux": 86}[runtime.GOOS]
 
 // windowsWindowPosition 为 Windows 版按 browser.xhtml 的 screenX、screenY 放置主窗口的坐标
 const windowsWindowPosition = 4
@@ -437,7 +441,40 @@ func windowsFontconfig(executablePath string, profile string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("读取 Camoufox Windows 字体配置: %w", err)
 	}
-	content := strings.ReplaceAll(string(data), `<dir prefix="cwd">fonts</dir>`, "<dir>"+filepath.Join(directory, "fonts", "windows")+"</dir>")
+	const directoryPlaceholder = `<dir prefix="cwd">fonts</dir>`
+	content := string(data)
+	if !strings.Contains(content, directoryPlaceholder) {
+		return "", fmt.Errorf("Camoufox Windows 字体配置缺少字体目录占位符")
+	}
+	data, err = os.ReadFile(filepath.Join(directory, "fonts", "groups.json"))
+	if err != nil {
+		return "", fmt.Errorf("读取 Camoufox 字体分组: %w", err)
+	}
+	var manifest struct {
+		ReadBy map[string][]string `json:"readBy"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return "", fmt.Errorf("解析 Camoufox 字体分组: %w", err)
+	}
+	if len(manifest.ReadBy["win"]) == 0 {
+		return "", fmt.Errorf("Camoufox 字体分组缺少 Windows 字体")
+	}
+	var directories strings.Builder
+	for _, group := range manifest.ReadBy["win"] {
+		if !filepath.IsLocal(group) || group == "." || strings.ContainsAny(group, `/\`) {
+			return "", fmt.Errorf("Camoufox Windows 字体分组无效: %q", group)
+		}
+		fontDirectory := filepath.Join(directory, "fonts", group)
+		entries, err := os.ReadDir(fontDirectory)
+		if err != nil {
+			return "", fmt.Errorf("读取 Camoufox Windows 字体目录: %w", err)
+		}
+		if len(entries) == 0 {
+			return "", fmt.Errorf("Camoufox Windows 字体目录为空: %s", fontDirectory)
+		}
+		fmt.Fprintf(&directories, "<dir>%s</dir>\n", html.EscapeString(fontDirectory))
+	}
+	content = strings.ReplaceAll(content, directoryPlaceholder, directories.String())
 	content = strings.ReplaceAll(content, "<const>hintfull</const>", "<const>hintslight</const>")
 	var substitutes strings.Builder
 	// fantasy 族取 Windows 版 Firefox 的平台默认字体 Arial
@@ -556,6 +593,15 @@ func browserProxy(value string) (*proxydial.Relay, string, error) {
 		return nil, "", err
 	}
 	return relay, "socks5://" + relay.Addr().String(), nil
+}
+
+// requestedLocale 返回指纹 locale:language 与 locale:region 组成的界面语言
+func requestedLocale(config map[string]any) string {
+	language, _ := config["locale:language"].(string)
+	if region, _ := config["locale:region"].(string); region != "" {
+		return language + "-" + region
+	}
+	return language
 }
 
 func firefoxPreferences(proxyValue, bypass string) (map[string]any, error) {

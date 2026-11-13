@@ -400,11 +400,11 @@ Bidi setup 成功使用 lease（本次会话持有的账户租约）的 `checked
 
 `runtime-state.json` 保存 `benefit_tier`、`catalog_fingerprint`、`model_access:{state,checked_at,reason?}`、`cooldowns:{until,reason?}` 与 `resources:{kind?,name?,mime?,size?,purpose?,created_at,video?:{model,seconds,size}}`。`video-operation` 绑定把公开 video object 的 model、seconds、size、UTC 创建时间和创建账户一并持久化；重新建立账户池后，operation 轮询仍从该绑定恢复元数据。活动请求使用账户租约；读取最新磁盘状态、合并目标字段和原子写回使用独立短事务锁。该锁每 25ms 尝试一次并在 2 秒后超时；调用方 context（Go 取消上下文）可以更早取消等待。取得锁后必须重读磁盘值，写回后再更新内存与资源索引。跨进程读取资源未命中时刷新磁盘状态，防止旧内存覆盖另一个进程已经写入的绑定。
 
-本段中的 generation 表示一次 Stop/Start 创建的生成服务实例。启动从与运行状态指纹一致的 `catalog.json` 恢复缓存，通过 `CachedModels` 建立公开目录；没有缓存时等待首个非空真实目录，有缓存时按启动策略后台刷新。`PageCatalogProvider` 取得账户页面的 `GetLoggingContext`、`GetAiStudioBenefitTier` 与 `ListModels` 响应；复用 Worker、新建临时页和重载均受活动与启动预算约束，不能在 Worker 满载时另开预算外页面。缺目录账户可并发排队，已有目录的逐个读取。非空结果立即合并并发布账户与模型事件，正数热池继续预热；默认 `0/1/1/1` 跳过常驻预热。全部同步结束后按认证变化补发快照，并记录成功数、非空数、公共模型数、待重试数与耗时。HTTP Cookie 导入只提交验证后的认证，不走 PageCatalog 路径，目录由后续显式启动或刷新取得。
+本段中的 generation 表示一次 Stop/Start 创建的生成服务实例。启动从与运行状态指纹一致的 `catalog.json` 恢复缓存，通过 `CachedModels` 建立公开目录；没有缓存时等待首个非空真实目录，有缓存时按启动策略后台刷新 enabled ready/busy 且目录缺失、最近同步已满 24 小时或隐藏模型发现设置与缓存不一致的账户，其余沿用缓存。`PageCatalogProvider` 取得账户页面的 `GetLoggingContext`、`GetAiStudioBenefitTier` 与 `ListModels` 响应；复用 Worker、新建临时页和重载均受活动与启动预算约束，不能在 Worker 满载时另开预算外页面。缺目录账户可并发排队，已有目录的逐个读取。非空结果立即合并并发布账户与模型事件，正数热池继续预热；默认 `0/1/1/1` 跳过常驻预热。全部同步结束后按认证变化补发快照，并记录沿用缓存数、成功数、非空数、公共模型数、待重试数与耗时。HTTP Cookie 导入只提交验证后的认证，不走 PageCatalog 路径，目录由后续显式启动或刷新取得。
 
 目录错误或空目录的账户 ID 保留在 pending set，非空结果或删除账户时移除。启动期结束后以单个 30 秒 ticker 重试排序后的 pending 账户，非空结果立即发布目录与管理事件；同一循环每 24 小时逐个刷新 enabled ready/busy 账户，普通账户槽位或页面预算不足时等待或跳过。权益或目录变化递增 `modelAccessGeneration`。请求模型不在目录时，可等待正在刷新的首个账户；没有进行中的一轮且距上轮开始超过 10 分钟时触发一轮，等待首个账户结果后继续查找，其余账户后台刷新。停止取消全部目录任务，对目录退出最多等待 2 秒，对生命周期切换最多等待 12 秒；超时与清理错误保留，失败清理的实体不提前释放预算。
 
-终态 Responses / Interactions 的续接节点写入 `runtime/states.db`，这与账户 PageCatalog 缓存、资源绑定和任务生命周期分开。进行中的生成任务、账户导入任务与内存 Build 会话不因终态持久化而获得重启恢复能力；旧未完 Veo 任务也不能在移除专用实现后继续执行。
+终态 Responses / Interactions 的续接节点写入 `runtime/states.db`，这与账户 PageCatalog 缓存、资源绑定和任务生命周期分开。进行中的生成任务与账户导入任务不因终态持久化而获得重启恢复能力；旧 `-build` 写代码助手及其会话映射已移除，旧未完 Veo 任务也不能在移除专用实现后继续执行。
 
 ## 6. 上游变化与恢复
 

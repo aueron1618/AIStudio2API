@@ -113,6 +113,9 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 	result.StorageState.SetAuthExtension(aistudio.AuthExtension{
 		Source: aistudio.AuthSource{Browser: "cookie", Email: accountConfig.Label},
 	})
+	if err := admin.rejectRestrictedAccount(accountConfig.Label); err != nil {
+		return api.AdminAccount{}, err
+	}
 	for _, status := range admin.pool.Status() {
 		if strings.EqualFold(status.ID, accountConfig.Label) {
 			return api.AdminAccount{}, &adminOperationError{
@@ -121,6 +124,9 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 		}
 	}
 	if err := ctx.Err(); err != nil {
+		return api.AdminAccount{}, err
+	}
+	if err := admin.checkAccountAccess(ctx, accountConfig.Label, &result.StorageState, admin.effectiveProxy(accountConfig.Proxy), input.AuthUser); err != nil {
 		return api.AdminAccount{}, err
 	}
 	account, err := admin.addAccount(ctx, accountConfig, result.StorageState, directory, "")
@@ -168,6 +174,9 @@ func importCookieState(cookies []aistudio.StateCookie) (aistudio.StorageState, e
 }
 
 func cookieVerificationError(err error, method string) error {
+	if denial := aistudio.RestrictionDenial(err); denial != nil {
+		return accountRestricted("账户", denial.Error())
+	}
 	switch {
 	case errors.Is(err, camoufoxnative.ErrAuthenticationRequired), errors.Is(err, chromeauth.ErrSignedOut):
 		return invalidAccount(fmt.Errorf("Cookie 登录已失效，请重新导出完整 Cookie"))

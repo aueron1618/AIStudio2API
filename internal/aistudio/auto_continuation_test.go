@@ -52,10 +52,13 @@ func TestAutoContinuationPolicy(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0
 			var client *Client
-			client = NewClient(ClientOptions{Protected: ProtectedTransportFunc(func(_ context.Context, _ GenerateRequest, rpc RPCRequest) (*RPCResponse, error) {
+			client = NewClient(ClientOptions{Protected: ProtectedTransportFunc(func(_ context.Context, request GenerateRequest, rpc RPCRequest) (*RPCResponse, error) {
 				calls++
 				if calls > 2 {
 					t.Fatal("unexpected additional upstream request")
+				}
+				if calls == 1 && request.continuationProof != "" || calls == 2 && request.continuationProof != "!first-round" {
+					t.Fatalf("continuation did not reuse its first-round proof: %q", request.continuationProof)
 				}
 				var wire []any
 				if err := json.Unmarshal(rpc.Body, &wire); err != nil {
@@ -91,7 +94,7 @@ func TestAutoContinuationPolicy(t *testing.T) {
 				if calls == 1 && (test.change == "disable" || test.change == "enable") {
 					reader = &continuationEOFReader{Reader: reader, atEOF: func() { client.SetAutoContinuation(test.change == "enable") }}
 				}
-				return &RPCResponse{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {JSONProtobufContentType}}, Body: io.NopCloser(reader)}, nil
+				return &RPCResponse{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {JSONProtobufContentType}}, Body: io.NopCloser(reader), Proof: "!first-round"}, nil
 			})})
 			if test.disabled {
 				NewPooledService(NewAccountPool(nil, 1), client).SetAutoContinuation(false)
@@ -106,7 +109,7 @@ func TestAutoContinuationPolicy(t *testing.T) {
 			if test.change == "observer" {
 				ctx = ContextWithContinuationObserver(ctx, func() { client.SetAutoContinuation(false) })
 			}
-			response, decode, err := client.sendPlayground(ctx, request, entry)
+			response, decode, err := client.sendPlayground(ctx, request, entry, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -144,7 +147,7 @@ func TestContinuationGuardRechecksAfterPreparation(t *testing.T) {
 		t.Fatalf("continuation guard did not survive preparation: %v", err)
 	}
 	ctx := context.WithValue(t.Context(), continuationPolicyContextKey{}, &client.autoContinuationDisabled)
-	_, err = (&WorkerProtectedTransport{}).doPrepared(ctx, "", "", 5, AccountSelection{}, RPCRequest{})
+	_, err = (&WorkerProtectedTransport{}).doPrepared(ctx, "", "", 5, "", AccountSelection{}, RPCRequest{})
 	if !errors.Is(err, errAutoContinuationDisabled) {
 		t.Fatalf("disabled continuation reached the worker: %v", err)
 	}
@@ -182,7 +185,7 @@ func TestContinuationDisablePreservesPriorUsage(t *testing.T) {
 			finish = event.FinishReason
 		}
 		return nil
-	})
+	}, nil)
 	if err != nil || calls != 1 || finish != "continuation" || usage == nil || usage.OutputTokens != 4 || usage.ReasoningTokens != 2 || usage.TotalTokens != 16 {
 		t.Fatalf("prior usage lost: calls=%d finish=%s usage=%+v error=%v", calls, finish, usage, err)
 	}
@@ -203,5 +206,81 @@ func TestSingleRoundEncodingDropsContinuationToken(t *testing.T) {
 	}
 	if len(wire) > 16 && wire[16] != nil {
 		t.Fatalf("single-round request leaked continuation token: %s", body)
+	}
+}
+
+func TestContinuationAccountSwitchResetsProofAndHonorsPolicy(t *testing.T) {
+	for _, disableOnSwitch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "continue", true: "disable-on-switch"}[disableOnSwitch], func(t *testing.T) {
+			frame := func(finish int, token string) []byte {
+				candidate := make([]any, 9)
+				candidate[1], candidate[8] = finish, token
+				body, err := json.Marshal([]any{[]any{[]any{[]any{candidate}, nil, []any{10, 4, 14}}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return body
+			}
+			calls := 0
+			client := NewClient(ClientOptions{Protected: ProtectedTransportFunc(func(_ context.Context, request GenerateRequest, _ RPCRequest) (*RPCResponse, error) {
+				calls++
+				switch calls {
+				case 1:
+					if request.AccountID != "a" || request.continuationProof != "!a" || request.continuationToken != "next" {
+						t.Fatalf("initial continuation lost account or proof: %+v", request)
+					}
+					return nil, &RPCError{StatusCode: http.StatusTooManyRequests}
+				case 2:
+					if request.AccountID != "b" || request.continuationProof != "" || request.continuationRound != 1 || request.continuationToken != "next" {
+						t.Fatalf("account switch reused another account's proof: %+v", request)
+					}
+				case 3:
+					if request.AccountID != "b" || request.continuationProof != "!b" || request.continuationToken != "last" {
+						t.Fatalf("replacement account did not retain its proof: %+v", request)
+					}
+				default:
+					t.Fatal("unexpected extra continuation request")
+				}
+				body := frame(22, "last")
+				if calls == 3 {
+					body = frame(1, "")
+				}
+				return &RPCResponse{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {JSONProtobufContentType}}, Body: io.NopCloser(bytes.NewReader(body)), Proof: "!b"}, nil
+			})})
+			pool := NewAccountPool([]*Account{{ID: "b", Config: AccountConfig{Enabled: true}, State: AccountReady}}, 1)
+			lease, err := pool.AcquireFor(t.Context(), AccountSelection{AccountID: "b"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Release()
+			switches := 0
+			ctx := ContextWithContinuationAccounts(t.Context(), func(ctx context.Context, _ error) (context.Context, error) {
+				if disableOnSwitch {
+					client.SetAutoContinuation(false)
+				}
+				return ContextWithAccountLease(ctx, lease), nil
+			})
+			request := GenerateRequest{Model: "model", AccountID: "a", continuationProof: "!a", Contents: []Content{{Role: RoleUser, Parts: []Part{{Text: "hello"}}}}}
+			defaults := GenerationDefaults{MaxOutputTokens: continuationRoundTokens, ContinuedOutputTokens: 3 * continuationRoundTokens}
+			finish := ""
+			err = client.decodePlaygroundRounds(ctx, request, defaults, RequestContext{}, bytes.NewReader(frame(22, "next")), func(event Event) error {
+				if event.Kind == EventFinish {
+					finish = event.FinishReason
+				}
+				return nil
+			}, func(_ context.Context, accountID string) {
+				switches++
+				if accountID != "b" {
+					t.Fatalf("switched to unexpected account %q", accountID)
+				}
+			})
+			wantCalls, wantFinish := 3, "stop"
+			if disableOnSwitch {
+				wantCalls, wantFinish = 1, "continuation"
+			}
+			if err != nil || calls != wantCalls || finish != wantFinish || switches != 1 {
+				t.Fatalf("account switch lost continuation policy: calls=%d finish=%q switches=%d err=%v", calls, finish, switches, err)
+			}
+		})
 	}
 }

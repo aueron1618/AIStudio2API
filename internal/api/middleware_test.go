@@ -117,6 +117,60 @@ func TestDynamicAPIKeysPreserveAdmittedScope(t *testing.T) {
 	}
 }
 
+func TestDynamicAPIKeysWithRequestedAccountAndChannel(t *testing.T) {
+	for _, route := range []struct {
+		prefix  string
+		channel aistudio.Channel
+	}{
+		{"/v1", aistudio.ChannelPlayground},
+		{"/build/v1", aistudio.ChannelBuild},
+	} {
+		t.Run(string(route.channel), func(t *testing.T) {
+			keys := "old-key"
+			bindings := map[string][]string{keys: {"a"}}
+			pool := aistudio.NewAccountPool([]*aistudio.Account{
+				{ID: "a", Config: aistudio.AccountConfig{Enabled: true}, State: aistudio.AccountReady},
+				{ID: "b", Config: aistudio.AccountConfig{Enabled: true}, State: aistudio.AccountReady},
+			}, 1)
+			pool.SetAPIKeyAccounts(bindings)
+			var selected []string
+			var channel aistudio.Channel
+			service := generationTestService{generate: func(ctx context.Context, _ aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
+				channel = aistudio.ChannelFromContext(ctx)
+				groups, err := pool.ClassifyCandidates(ctx, aistudio.AccountSelection{}, []string{"a", "b"})
+				selected = groups.WarmReady
+				if err != nil {
+					return nil, err
+				}
+				return testEventStream(aistudio.Event{Kind: aistudio.EventText, Text: "ok"}, aistudio.Event{Kind: aistudio.EventFinish, FinishReason: "stop"}), nil
+			}}
+			handler := NewHandler(service, Config{APIKeys: func() (string, map[string][]string) { return keys, bindings }})
+			request := func(key, account string, status int) {
+				t.Helper()
+				selected, channel = nil, ""
+				r := httptest.NewRequest(http.MethodPost, route.prefix+"/chat/completions", strings.NewReader(`{"model":"test","messages":[{"role":"user","content":"hi"}]}`))
+				r.Header.Set("Authorization", "Bearer "+key)
+				r.Header.Set("X-AIStudio-Account", account)
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, r)
+				if w.Code != status {
+					t.Fatalf("account=%q status=%d, want %d: %s", account, w.Code, status, w.Body)
+				}
+				if status == http.StatusOK && (!slices.Equal(selected, []string{strings.TrimSpace(account)}) || channel != route.channel) {
+					t.Fatalf("account header or fixed URL channel lost: accounts=%v channel=%s", selected, channel)
+				}
+			}
+			request("old-key", " a ", http.StatusOK)
+			request("old-key", "b", http.StatusBadRequest)
+			keys, bindings = "new-key", map[string][]string{"new-key": {"b"}}
+			pool.SetAPIKeyAccounts(bindings)
+			request("old-key", "a", http.StatusUnauthorized)
+			request("new-key", "a", http.StatusBadRequest)
+			request("new-key", "b", http.StatusOK)
+		})
+	}
+}
+
 type modelLogAdmin struct {
 	AdminService
 	entry AccessLog
@@ -159,6 +213,34 @@ func (service modelLogService) Generate(ctx context.Context, request aistudio.Ge
 	events <- aistudio.Event{Kind: aistudio.EventFinish, FinishReason: "stop", ProviderModel: "provider-model"}
 	close(events)
 	return events, nil
+}
+
+func (service modelLogService) CreateDecision(ctx context.Context, _ aistudio.DecisionRequest) (aistudio.DecisionResult, error) {
+	SetAccessLogTarget(ctx, "provider-decision", "account")
+	return aistudio.DecisionResult{InputTokens: 3, TotalTokens: 3}, service.err
+}
+
+func TestAccessLogDecisionModels(t *testing.T) {
+	for _, test := range []struct {
+		name, questions, model string
+		err                    error
+		status                 int
+	}{
+		{"success", `{"q":{"type":"noul","instructions":"Is this useful?"}}`, "provider-decision", nil, http.StatusOK},
+		{"upstream", `{"q":{"type":"noul","instructions":"Is this useful?"}}`, "provider-decision", errors.New("upstream unavailable"), http.StatusBadGateway},
+		{"validation", `{}`, "", nil, http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			admin := &modelLogAdmin{}
+			handler := NewHandler(modelLogService{err: test.err}, Config{Admin: admin})
+			r := httptest.NewRequest(http.MethodPost, "/v1beta/decisions", strings.NewReader(`{"model":"models/requested-decision","input":"hi","questions":`+test.questions+`}`))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if w.Code != test.status || admin.entry.RequestedModel != "models/requested-decision" || admin.entry.Model != test.model || admin.entry.ResponseModel != "" {
+				t.Fatalf("status=%d requested=%q target=%q response=%q: %s", w.Code, admin.entry.RequestedModel, admin.entry.Model, admin.entry.ResponseModel, w.Body)
+			}
+		})
+	}
 }
 
 func TestAccessLogModels(t *testing.T) {

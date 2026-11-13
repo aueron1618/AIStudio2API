@@ -228,7 +228,7 @@ func TestUpgradeEnvPreservesExplicitSettings(t *testing.T) {
 		t.Run(channels, func(t *testing.T) {
 			want := Default()
 			want.UpstreamChannels = parseUpstreamChannels(channels)
-			want.FirstEventHedge = FirstEventHedgeOff
+			want.FirstEventHedge = FirstEventHedgeAuto
 			want.RequestTimeout = 5 * time.Minute
 			want.AntiTruncation, want.AutoContinuation, want.ContinuationRewrite = true, false, false
 			want.ProxyAPIKey, want.APIKeyAccounts = "test-key", "test-key:a@example.com"

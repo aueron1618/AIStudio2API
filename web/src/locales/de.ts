@@ -40,7 +40,7 @@ export const messages: Record<TranslationKey, string> = {
   'usage.unauthorizedNotice':
     'Nicht autorisierte Anfragen zeigen keine Modelle, Konten, Inhalte oder ursprünglichen Pfade, um Zugangsdaten zu schützen.',
   'settings.fixedChannelHelp':
-    'Die URL hat Vorrang: /v1 nutzt Playground, /build/v1 nutzt Build (Code-Assistent für -build-Modelle), /v1beta wählt automatisch. Feste Routen wechseln nicht den Kanal.',
+    'Die URL hat Vorrang: /v1 nutzt Playground, /build/v1 nutzt den alten Build-Proxy, /v1beta wählt automatisch. Feste Routen wechseln nicht den Kanal.',
   'auth.username': 'Benutzername',
   'auth.password': 'Passwort',
   'auth.login': 'Anmelden',
@@ -56,6 +56,9 @@ export const messages: Record<TranslationKey, string> = {
   'settings.searchModelAliases': 'Suchmodell-Aliasse',
   'settings.searchModelAliasesHelp':
     'Bietet -search-Varianten für suchfähige Modelle an. Anfragen mit diesen Varianten aktivieren die Google-Suche.',
+  'settings.discoverHiddenModels': 'Verborgene Modelle erkennen',
+  'settings.discoverHiddenModelsHelp':
+    'Sucht beim Synchronisieren der Modellkataloge der Konten nach Modellen, auf die die AI-Studio-Website verweist, die aber noch nicht in der offiziellen Modellliste des Kontos stehen, und nimmt sie in den Katalog auf, sobald der Upstream ihre Verfügbarkeit bestätigt, sodass sie in Anfragen nutzbar sind. Offiziell gelistete Modelle verwenden ihren offiziellen Eintrag.',
   'settings.googleSearch': 'Google-Suche für alle Modelle',
   'settings.googleSearchHelp':
     'Aktiviert die Google-Suche für Generierungsanfragen, einschließlich gewöhnlicher Modellnamen und Funktionswerkzeuge.',
@@ -82,6 +85,10 @@ export const messages: Record<TranslationKey, string> = {
   'app.invalidConfig': 'Diese Einstellungen haben ungültige Werte und laufen mit dem Standardwert:',
   'app.listenReserved':
     'Der Port von {reserved} ist reserviert, der Dienst lauscht auf {active}. Clients müssen diese Adresse nutzen; die Listen-Adresse fixiert den Port',
+  'camoufox.downloading': 'Camoufox wird heruntergeladen',
+  'camoufox.preparing': 'Camoufox wird vorbereitet',
+  'camoufox.failed': 'Camoufox ist nicht verfügbar: {reason}',
+  'camoufox.retry': 'Erneut versuchen',
   'app.language': 'Sprache',
   'app.resizeSidebar': 'Seitenleistenbreite anpassen',
   'app.navigation': 'Hauptnavigation',
@@ -319,9 +326,17 @@ export const messages: Record<TranslationKey, string> = {
   'models.model': 'Modell',
   'models.count': '{count} Modelle',
   'models.context': 'Eingabelimit',
-  'models.continuation': 'Automatisch fortgesetzt in Teilen zu 32.768 Tokens',
   'models.output': 'Ausgabelimit',
+  'models.releaseDate': 'Veröffentlicht',
+  'models.knowledgeCutoff': 'Wissensstand',
+  'models.pricing': 'Preise',
   'models.paid': 'Kostenpflichtig',
+  'models.frontendUncalled': 'Nicht in AI Studio genutzt',
+  'models.frontendUncalledHelp':
+    'Die AI-Studio-Website ruft dieses Modell noch nicht auf. Der Dienst ruft es über die CreateDecision-Anfrage der Website auf, die AI-Studio-Seiten nicht senden.',
+  'models.hidden': 'In AI Studio verborgen',
+  'models.hiddenHelp':
+    'Die AI-Studio-Website verweist auf dieses Modell, die offizielle Modellliste des Kontos enthält es aber noch nicht. Der Dienst hat es in den Katalog aufgenommen, nachdem der Upstream seine Verfügbarkeit bestätigt hat, und verwendet den offiziellen Eintrag, sobald es gelistet ist.',
   'models.empty': 'Derzeit sind keine Modelle verfügbar',
   'requests.live': 'Laufend',
   'requests.history': 'Anfrageübersicht',
@@ -379,6 +394,9 @@ export const messages: Record<TranslationKey, string> = {
   'settings.accountOrderClear': 'Bevorzugte Konten leeren',
   'settings.accountOrderUnset': 'Nicht festgelegt; Konten werden in ID-Reihenfolge verwendet',
   'settings.accountOrderRest': 'Die übrigen {count} Konten folgen in ID-Reihenfolge',
+  'settings.maxAccountSwitches': 'Maximale Kontowechsel',
+  'settings.maxAccountSwitchesHelp':
+    'Wie oft eine Anfrage nach einem Upstream-Fehler ohne Kontingentbezug wie 403 oder 5xx zu einem anderen Konto wechselt; 0 deaktiviert den Wechsel, Kontingentfehler zählen nicht',
   'settings.authPathAdd': 'Pfad hinzufügen',
   'settings.authPathBrowse': 'Durchsuchen',
   'settings.authPathRemove': '{path} entfernen',
@@ -409,7 +427,6 @@ export const messages: Record<TranslationKey, string> = {
     'Modell auf einen Kanal beschränken; auch in den Modelldetails wählbar',
   'channel.playground': 'Playground',
   'channel.build': 'Build',
-  'channel.assistant': 'Build-Chat',
   'logs.channel': 'Kanal',
   'models.channels': 'Kanäle',
   'models.accounts': 'Konten',
@@ -627,6 +644,7 @@ export const messages: Record<TranslationKey, string> = {
   'pg.harassment': 'Belästigung',
   'pg.hate': 'Hass',
   'pg.high': 'Hoch',
+  'pg.extraHigh': 'Sehr hoch',
   'pg.insertMedia': '{types} einfügen',
   'pg.mediaImages': 'Bilder',
   'pg.mediaVideos': 'Videos',
@@ -1195,6 +1213,7 @@ export const messages: Record<TranslationKey, string> = {
   'pg.temporarySaved': 'Gespeicherte Unterhaltungen können nicht zu einem temporären Chat werden',
   'pg.thinking': 'Denkt nach',
   'pg.thinkingHighTip': '(Empfohlen) Maximale Denktiefe',
+  'pg.thinkingExtraHighTip': 'Noch mehr Denktiefe für komplexe Aufgaben',
   'pg.thinkingLevel': 'Denkstufe',
   'pg.thinkingLevelTip': 'Wie viel das Modell vor der Antwort nachdenkt',
   'pg.thinkingGroup': 'Denken',
@@ -1752,6 +1771,7 @@ export const messages: Record<TranslationKey, string> = {
   'state.busy': 'Ausgelastet',
   'state.cooldown': 'Im Cooldown',
   'state.auth_required': 'Anmeldung erforderlich',
+  'state.restricted': 'Dienst eingeschränkt',
   'state.unavailable': 'Nicht verfügbar',
   'state.disabled': 'Deaktiviert',
   'state.queued': 'In der Warteschlange',
@@ -1812,7 +1832,7 @@ export const messages: Record<TranslationKey, string> = {
   'settings.apiKeyHelp':
     'Mit Enter oder einem Komma einen Schlüssel hinzufügen; eingefügte, durch Kommas getrennte Schlüssel werden einzeln übernommen. Leer können nur Seiten auf diesem Rechner die API aufrufen',
   'settings.apiKeyPlaceholder': 'Schlüssel eingeben',
-  'settings.apiKeyMore': 'Weiteren Schlüssel hinzufügen',
+  'settings.apiKeyMore': 'Schlüssel hinzufügen',
   'settings.keyShow': 'Schlüssel {key} anzeigen',
   'settings.keyHide': 'Schlüssel {key} ausblenden',
   'settings.keyRemove': 'Schlüssel {key} entfernen',
@@ -2185,6 +2205,9 @@ export const messages: Record<TranslationKey, string> = {
     'Einen Videoauftrag einreichen und das Video nach Abschluss herunterladen',
   'access.cap.embedding': 'Embeddings',
   'access.cap.embeddingHelp': 'Text in Vektoren für Suche und Ähnlichkeit umwandeln',
+  'access.cap.decision': 'Entscheidungen',
+  'access.cap.decisionHelp':
+    'Beantwortet Ja/Nein-, Auswahl- und Bewertungsfragen zu einer Eingabe mit Wahrscheinlichkeiten und Konfidenz',
   'access.cap.live': 'Live',
   'access.cap.liveHelp': 'Text und Audio über WebSocket in beide Richtungen austauschen',
   'access.cap.agent': 'Agents',
@@ -2207,6 +2230,8 @@ export const messages: Record<TranslationKey, string> = {
     'Gemini-Generierung, Streaming-Generierung, Tokenzählung und Kontext-Caching',
   'access.endpoint.interactions':
     'Gemini Interactions: erstellen, abrufen, löschen und abbrechen; dieselben Pfade funktionieren auch unter /v1',
+  'access.endpoint.decisions':
+    'Gemini Decisions: eine Reihe von Fragen in einem Aufruf mit dem Entscheidungsmodell beantworten',
   'access.endpoint.embeddings': 'Text-Embeddings im OpenAI- und Gemini-Format',
   'access.endpoint.images': 'OpenAI-Bildgenerierung und -bearbeitung sowie Gemini-Imagen-predict',
   'access.endpoint.audio': 'Sprachausgabe, Transkription und Übersetzung',
@@ -2254,6 +2279,7 @@ export const messages: Record<TranslationKey, string> = {
   'access.ep.interactionGet': 'Status und Ergebnis einer Interaktion abrufen',
   'access.ep.interactionDelete': 'Interaktion löschen',
   'access.ep.interactionCancel': 'Laufende Interaktion abbrechen',
+  'access.ep.decisionCreate': 'Eine Reihe von Entscheidungsfragen beantworten',
   'access.ep.embeddings': 'Embeddings erzeugen',
   'access.ep.embedContent': 'Embedding für einen Inhalt erzeugen',
   'access.ep.batchEmbed': 'Embeddings für mehrere Inhalte in einer Anfrage erzeugen',

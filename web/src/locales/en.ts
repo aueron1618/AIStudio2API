@@ -39,7 +39,7 @@ export const messages: Record<TranslationKey, string> = {
   'usage.unauthorizedNotice':
     'Unauthorized requests do not display models, accounts, bodies or raw paths, to avoid exposing request credentials.',
   'settings.fixedChannelHelp':
-    'URL routing takes priority: /v1 uses Playground; /build/v1 uses Build (the coding assistant for -build models); /v1beta routes automatically. Fixed routes never fall back across channels.',
+    'URL routing takes priority: /v1 uses Playground; /build/v1 uses the legacy Build proxy; /v1beta routes automatically. Fixed routes never fall back across channels.',
   'auth.username': 'Username',
   'auth.password': 'Password',
   'auth.login': 'Sign in',
@@ -55,6 +55,9 @@ export const messages: Record<TranslationKey, string> = {
   'settings.searchModelAliases': 'Search model aliases',
   'settings.searchModelAliasesHelp':
     'Offer -search variants of search-capable models. Requests using these variants enable Google Search.',
+  'settings.discoverHiddenModels': 'Discover hidden models',
+  'settings.discoverHiddenModelsHelp':
+    'When syncing account model catalogs, find models that the AI Studio website references but the account’s model list doesn’t include yet, and add them to the catalog once the upstream confirms they work, so they can be used in requests. Officially listed models use their official entries.',
   'settings.googleSearch': 'Google Search for all models',
   'settings.googleSearchHelp':
     'Enable Google Search for generation requests, including ordinary model IDs and requests with function tools.',
@@ -81,6 +84,10 @@ export const messages: Record<TranslationKey, string> = {
   'app.invalidConfig': 'These settings have invalid values and are running with their defaults:',
   'app.listenReserved':
     'The port of {reserved} is reserved by Windows, so the service listens on {active}; clients must use it. Set the Listen address to fix the port',
+  'camoufox.downloading': 'Downloading Camoufox',
+  'camoufox.preparing': 'Preparing Camoufox',
+  'camoufox.failed': 'Camoufox is unavailable: {reason}',
+  'camoufox.retry': 'Retry',
   'app.language': 'Language',
   'app.resizeSidebar': 'Resize sidebar',
   'app.navigation': 'Main navigation',
@@ -315,9 +322,17 @@ export const messages: Record<TranslationKey, string> = {
   'models.model': 'Model',
   'models.count': '{count} models',
   'models.context': 'Input limit',
-  'models.continuation': 'Auto-continued in 32,768-token parts',
   'models.output': 'Output limit',
+  'models.releaseDate': 'Release date',
+  'models.knowledgeCutoff': 'Knowledge cutoff',
+  'models.pricing': 'Pricing',
   'models.paid': 'Paid',
+  'models.frontendUncalled': 'Not used by AI Studio',
+  'models.frontendUncalledHelp':
+    'The AI Studio website does not call this model yet. The service calls it with the website’s CreateDecision request, which AI Studio pages do not send.',
+  'models.hidden': 'Hidden in AI Studio',
+  'models.hiddenHelp':
+    'The AI Studio website references this model, but the account’s model list doesn’t include it yet. The service added it to the catalog after the upstream confirmed it works, and uses the official entry once the model is listed.',
   'models.empty': 'No models are currently available',
   'requests.live': 'In progress',
   'requests.history': 'Request summary',
@@ -375,6 +390,9 @@ export const messages: Record<TranslationKey, string> = {
   'settings.accountOrderClear': 'Clear priority accounts',
   'settings.accountOrderUnset': 'Not set; accounts are used in ID order',
   'settings.accountOrderRest': 'The other {count} accounts follow in ID order',
+  'settings.maxAccountSwitches': 'Max account switches',
+  'settings.maxAccountSwitchesHelp':
+    'How many times a request moves to another account after a non-quota upstream error such as 403 or 5xx; 0 disables switching, and quota errors do not count',
   'settings.authPathAdd': 'Add path',
   'settings.authPathBrowse': 'Browse',
   'settings.authPathRemove': 'Remove {path}',
@@ -404,7 +422,6 @@ export const messages: Record<TranslationKey, string> = {
   'settings.modelChannelsHelp': 'Limit a model to one channel; also selectable in model details',
   'channel.playground': 'Playground',
   'channel.build': 'Build',
-  'channel.assistant': 'Build chat',
   'logs.channel': 'Channel',
   'models.channels': 'Channels',
   'models.accounts': 'Accounts',
@@ -618,6 +635,7 @@ export const messages: Record<TranslationKey, string> = {
   'pg.harassment': 'Harassment',
   'pg.hate': 'Hate',
   'pg.high': 'High',
+  'pg.extraHigh': 'Extra High',
   'pg.insertMedia': 'Insert {types}',
   'pg.mediaImages': 'images',
   'pg.mediaVideos': 'videos',
@@ -1166,6 +1184,7 @@ export const messages: Record<TranslationKey, string> = {
   'pg.temporarySaved': 'Saved conversations can’t be switched to Temporary chat',
   'pg.thinking': 'Thinking',
   'pg.thinkingHighTip': '(Recommended) Maximizes reasoning depth',
+  'pg.thinkingExtraHighTip': 'Even more reasoning depth for complex tasks',
   'pg.thinkingLevel': 'Thinking level',
   'pg.thinkingLevelTip': 'How much the model thinks before responding',
   'pg.thinkingGroup': 'Thinking',
@@ -1720,6 +1739,7 @@ export const messages: Record<TranslationKey, string> = {
   'state.busy': 'Busy',
   'state.cooldown': 'Cooldown',
   'state.auth_required': 'Sign-in required',
+  'state.restricted': 'Service restricted',
   'state.unavailable': 'Unavailable',
   'state.disabled': 'Disabled',
   'state.queued': 'Queued',
@@ -2137,6 +2157,9 @@ export const messages: Record<TranslationKey, string> = {
   'access.cap.videoHelp': 'Submit a video generation job and download the video when it finishes',
   'access.cap.embedding': 'Embeddings',
   'access.cap.embeddingHelp': 'Turn text into vectors for search and similarity',
+  'access.cap.decision': 'Decisions',
+  'access.cap.decisionHelp':
+    'Answer yes/no, choice, and score questions about one input with probabilities and confidence',
   'access.cap.live': 'Live',
   'access.cap.liveHelp': 'Stream text and audio both ways over a WebSocket',
   'access.cap.agent': 'Agents',
@@ -2159,6 +2182,8 @@ export const messages: Record<TranslationKey, string> = {
     'Gemini generation, streaming generation, token counting, and context caching',
   'access.endpoint.interactions':
     'Gemini Interactions: create, read, delete, and cancel; the same paths also work under /v1',
+  'access.endpoint.decisions':
+    'Gemini Decisions: answer a set of questions with the decision model in one call',
   'access.endpoint.embeddings': 'Text embeddings in OpenAI and Gemini formats',
   'access.endpoint.images': 'OpenAI image generation and editing, and Gemini Imagen predict',
   'access.endpoint.audio': 'Speech, transcription, and translation',
@@ -2207,6 +2232,7 @@ export const messages: Record<TranslationKey, string> = {
   'access.ep.interactionGet': 'Get an interaction’s status and output',
   'access.ep.interactionDelete': 'Delete an interaction',
   'access.ep.interactionCancel': 'Cancel a running interaction',
+  'access.ep.decisionCreate': 'Answer a set of decision questions',
   'access.ep.embeddings': 'Create embeddings',
   'access.ep.embedContent': 'Embed one piece of content',
   'access.ep.batchEmbed': 'Embed several pieces of content in one request',

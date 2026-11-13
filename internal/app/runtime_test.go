@@ -8,10 +8,12 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
+	"github.com/Mag1cFall/AIStudio2API/internal/config"
 )
 
 type retryTestService struct {
@@ -54,6 +56,7 @@ func retryTestRuntime(t *testing.T, generate func(context.Context, aistudio.Gene
 	return &trackedService{
 		lifecycle: t.Context(), service: retryTestService{generate: generate}, pool: pool,
 		requests: newRequestRegistry(t.Context()), workers: &accountWorkerManager{},
+		maxAccountSwitches: config.DefaultMaxAccountSwitches,
 	}
 }
 
@@ -72,6 +75,44 @@ func assertRetryLeasesReleased(t *testing.T, service *trackedService) {
 		if err := lease.Release(); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestGenerateWithRetryHonorsAccountSwitchBudget(t *testing.T) {
+	for _, test := range []struct {
+		name                       string
+		limit, coldFailures, calls int
+	}{
+		{name: "disabled", limit: 0, calls: 1},
+		{name: "one switch", limit: 1, calls: 2},
+		{name: "cold start used budget", limit: 1, coldFailures: 1, calls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			service := retryTestRuntime(t, func(context.Context, aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
+				calls++
+				return nil, &url.Error{Op: "Post", URL: "https://example.test", Err: io.ErrUnexpectedEOF}
+			})
+			service.maxAccountSwitches = test.limit
+			ctx, cancel := context.WithTimeout(aistudio.ContextWithChannel(t.Context(), aistudio.ChannelPlayground), 5*time.Second)
+			defer cancel()
+			request := aistudio.GenerateRequest{ID: "switch-budget", Model: "shared"}
+			service.requests.start(request, cancel)
+			acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool, failures *int) (*aistudio.AccountLease, error) {
+				if calls == 0 {
+					*failures += test.coldFailures
+				}
+				return service.pool.AcquireFor(ctx, selection)
+			}
+			events := make(chan aistudio.Event)
+			go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
+			for range events {
+			}
+			if calls != test.calls {
+				t.Fatalf("switch budget allowed %d attempts, want %d", calls, test.calls)
+			}
+			assertRetryLeasesReleased(t, service)
+		})
 	}
 }
 
@@ -130,7 +171,7 @@ func TestGenerateWithRetryStreamInterruption(t *testing.T) {
 				}
 				service.requests.start(request, cancel)
 				events := make(chan aistudio.Event)
-				acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool) (*aistudio.AccountLease, error) {
+				acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool, _ *int) (*aistudio.AccountLease, error) {
 					return service.pool.AcquireFor(ctx, selection)
 				}
 				go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
@@ -186,7 +227,7 @@ func TestGenerateWithRetryCancellation(t *testing.T) {
 			request := aistudio.GenerateRequest{ID: "cancel-test", Model: "shared", Unary: unary}
 			service.requests.start(request, cancel)
 			events := make(chan aistudio.Event)
-			acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool) (*aistudio.AccountLease, error) {
+			acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool, _ *int) (*aistudio.AccountLease, error) {
 				return service.pool.AcquireFor(ctx, selection)
 			}
 			go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
@@ -234,7 +275,7 @@ func TestCollectGenerateEventsCancellationDuringDrain(t *testing.T) {
 	}
 }
 
-func TestGenerateWithRetryQuotaFallbackOnce(t *testing.T) {
+func TestGenerateWithRetryQuotaFallbackKeepsChannel(t *testing.T) {
 	for _, channel := range []aistudio.Channel{aistudio.ChannelPlayground, aistudio.ChannelBuild} {
 		for name, message := range map[string]string{
 			"plan":  "You have reached your usage limit, resets in 1 hour",
@@ -245,12 +286,13 @@ func TestGenerateWithRetryQuotaFallbackOnce(t *testing.T) {
 				service := retryTestRuntime(t, func(context.Context, aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
 					return nil, limit
 				})
+				service.maxAccountSwitches = 0 // Quota failures do not consume the non-quota switch budget.
 				ctx, cancel := context.WithTimeout(aistudio.ContextWithChannel(t.Context(), channel), 5*time.Second)
 				defer cancel()
 				request := aistudio.GenerateRequest{ID: "quota-limit-test", Model: "shared"}
 				service.requests.start(request, cancel)
 				var fallbacks []bool
-				acquire := func(ctx context.Context, selection aistudio.AccountSelection, quotaFallback bool) (*aistudio.AccountLease, error) {
+				acquire := func(ctx context.Context, selection aistudio.AccountSelection, quotaFallback bool, _ *int) (*aistudio.AccountLease, error) {
 					fallbacks = append(fallbacks, quotaFallback)
 					if selection.Channel != channel {
 						return nil, errors.New("quota fallback lost the fixed URL channel")
@@ -261,8 +303,8 @@ func TestGenerateWithRetryQuotaFallbackOnce(t *testing.T) {
 				go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
 				for range events {
 				}
-				if !slices.Equal(fallbacks, []bool{true, false}) {
-					t.Fatalf("quota failure enabled another fallback or changed channels: %v", fallbacks)
+				if !slices.Equal(fallbacks, []bool{true, true}) {
+					t.Fatalf("quota failure did not try each candidate on the fixed channel: %v", fallbacks)
 				}
 				assertRetryLeasesReleased(t, service)
 			})
@@ -283,8 +325,10 @@ func TestForwardTerminalErrorFinishesRequestBeforeDrain(t *testing.T) {
 	source := make(chan aistudio.Event, 1)
 	source <- aistudio.Event{Kind: aistudio.EventError, Err: errors.New("offline terminal error"), AntiTruncationToolCalls: 2}
 	destination := make(chan aistudio.Event)
+	var serving atomic.Pointer[aistudio.AccountLease]
+	serving.Store(lease)
 	go service.forwardEvents(ctx, ctx, cancel, request.ID,
-		aistudio.Event{Kind: aistudio.EventText, Text: "partial"}, source, destination, lease, nil, &upstreamActivity{}, request.Model)
+		aistudio.Event{Kind: aistudio.EventText, Text: "partial"}, source, destination, &serving, nil, &upstreamActivity{}, request.Model)
 	if event := <-destination; event.Kind != aistudio.EventText {
 		t.Fatalf("first event=%+v", event)
 	}

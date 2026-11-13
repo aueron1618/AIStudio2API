@@ -96,6 +96,7 @@ const candidate = (source: number, imported = false): Candidate => ({
   signed_out: false,
   device_bound: false,
   error: '',
+  restricted: '',
 })
 const queued = (count = 1): AccountTask => ({
   id: 'fixture-task',
@@ -458,6 +459,48 @@ describe('background Cookie account tasks', () => {
     expect(api.importCookieAccounts).not.toHaveBeenCalled()
   })
 
+  it('excludes restricted Cookie identities from discovery selection and submission', async () => {
+    const { state } = mount()
+    state.cookieText = 'fixture-cookie=offline'
+    vi.mocked(api.discoverCookieAccounts).mockResolvedValue([
+      { ...candidate(0), restricted: 'Service restricted' },
+      { ...candidate(1), auth_user: 1 },
+      { ...candidate(2, true), auth_user: 2 },
+    ])
+    await state.discoverCookieAccounts()
+    expect(state.selectedCookieUsers).toEqual(['0:1'])
+    state.toggleAllCookieCandidates()
+    expect(state.selectedCookieUsers).toEqual([])
+    state.toggleAllCookieCandidates()
+    expect(state.selectedCookieUsers).toEqual(['0:1'])
+    state.selectedCookieUsers = ['0:0', '0:1', '0:2']
+    vi.mocked(api.importCookieAccounts).mockResolvedValue(queued())
+    await state.importCookieAccounts()
+    expect(vi.mocked(api.importCookieAccounts).mock.calls[0]![0].items).toEqual([
+      {
+        email: 'fixture-1@example.test',
+        cookies: 'fixture-cookie=offline',
+        cdp: '',
+        auth_user: 1,
+        method: 'browser',
+      },
+    ])
+  })
+
+  it('never submits restricted CDP identities even if they remain selected', async () => {
+    const { state } = mount()
+    state.cookieBrowsers = [
+      {
+        ...candidate(0),
+        address: 'http://browser.example.test:9222',
+        restricted: 'Service restricted',
+      },
+    ]
+    state.selectedBrowsers = ['http://browser.example.test:9222#0']
+    await state.importBrowserAccounts()
+    expect(api.importCookieAccounts).not.toHaveBeenCalled()
+  })
+
   it('allows Chrome reimport selection while preserving source ID and task acceptance', async () => {
     const { state, taskEvents, refresh } = mount()
     const profile: ChromeImportProfile = {
@@ -466,12 +509,17 @@ describe('background Cookie account tasks', () => {
       profile: 'Default',
       display_name: 'Existing account',
       locale: 'en',
+      restricted: '',
     }
-    vi.mocked(api.chromeImportProfiles).mockResolvedValue([profile])
+    vi.mocked(api.chromeImportProfiles).mockResolvedValue([
+      profile,
+      { ...profile, id: 'restricted-source', restricted: 'Service restricted' },
+    ])
     vi.mocked(api.importChromeAccounts).mockResolvedValue({ ...queued(), kind: 'chrome' })
     await state.openChromeImport()
     state.toggleAllChromeProfiles()
     expect(state.selectedChromeProfiles).toEqual([profile.id])
+    state.selectedChromeProfiles.push('restricted-source')
     await state.importChromeAccounts()
     expect(api.importChromeAccounts).toHaveBeenCalledWith({
       accounts: [{ id: profile.id, email: profile.email }],
@@ -482,6 +530,9 @@ describe('background Cookie account tasks', () => {
     expect(state.showChromeImport).toBe(false)
     expect(taskEvents).toHaveBeenCalledWith({ ...queued(), kind: 'chrome' })
     expect(refresh).toHaveBeenCalled()
+    state.selectedChromeProfiles = ['restricted-source']
+    await state.importChromeAccounts()
+    expect(api.importChromeAccounts).toHaveBeenCalledTimes(1)
   })
 
   it('shows asynchronous transitions and keeps batch deletion separate from refreshing', async () => {

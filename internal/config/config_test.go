@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -30,6 +31,37 @@ func TestAutoContinuationConfiguration(t *testing.T) {
 	loaded, err = Load(path)
 	if err != nil || !loaded.AutoContinuation || len(loaded.Invalid) != 1 || loaded.Invalid[0].Key != "AUTO_CONTINUATION" {
 		t.Fatalf("invalid auto-continuation must use the default and report the key: %+v, %v", loaded, err)
+	}
+}
+
+func TestAccountSwitchesAndHiddenModelsConfiguration(t *testing.T) {
+	cfg := Default()
+	if cfg.MaxAccountSwitches != 3 || cfg.DiscoverHiddenModels || cfg.FirstEventHedge != FirstEventHedgeOff {
+		t.Fatalf("upstream defaults were not merged: %+v", cfg)
+	}
+	path := filepath.Join(t.TempDir(), ".env")
+	for _, switches := range []int{0, 1, 7} {
+		cfg.MaxAccountSwitches, cfg.DiscoverHiddenModels = switches, true
+		if err := cfg.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := Load(path)
+		if err != nil || loaded.MaxAccountSwitches != switches || !loaded.DiscoverHiddenModels {
+			t.Fatalf("new settings did not round trip: %+v, %v", loaded, err)
+		}
+	}
+	t.Setenv("DISCOVER_HIDDEN_MODELS", "false")
+	t.Setenv("MAX_ACCOUNT_SWITCHES", "0")
+	loaded, err := Load(path)
+	if err != nil || loaded.DiscoverHiddenModels || loaded.MaxAccountSwitches != 0 || !slices.Contains(loaded.Environment, "MAX_ACCOUNT_SWITCHES") {
+		t.Fatalf("new settings ignored environment overrides: %+v, %v", loaded, err)
+	}
+	for _, value := range []string{"-1", "invalid"} {
+		t.Setenv("MAX_ACCOUNT_SWITCHES", value)
+		loaded, err = Load(path)
+		if err != nil || loaded.MaxAccountSwitches != DefaultMaxAccountSwitches || len(loaded.Invalid) != 1 || loaded.Invalid[0].Key != "MAX_ACCOUNT_SWITCHES" {
+			t.Fatalf("invalid switch count did not use the default: %+v, %v", loaded, err)
+		}
 	}
 }
 
