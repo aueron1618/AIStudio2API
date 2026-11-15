@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -176,6 +177,103 @@ func NewProxyHTTPClient(proxyURL string) (*http.Client, error) {
 	return &http.Client{Transport: roundTripper}, nil
 }
 
+// UploadAssistantFile 以账户身份按官网对话面板的 /_/upload 可续传协议上传附件，返回上传路径
+func (t *MakerSuiteHTTPTransport) UploadAssistantFile(ctx context.Context, accountID string, blob Blob) (string, error) {
+	lease, owned, err := resolveAccountLease(ctx, t.pool, AccountSelection{AccountID: accountID})
+	if err != nil {
+		return "", err
+	}
+	if owned {
+		defer lease.Release()
+	}
+	account := lease.Account()
+	public, err := t.headers.ProtocolHeaders(ctx, account.ID)
+	if err != nil {
+		return "", fmt.Errorf("读取账户动态公共头: %w", err)
+	}
+	client, err := t.clientForProxy(account.EffectiveProxy(t.globalProxy))
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(blob.Data)
+	hash := "sha256=" + base64.StdEncoding.EncodeToString(digest[:])
+	send := func(address string, header http.Header, body []byte) (http.Header, []byte, error) {
+		state, err := lease.ReloadStorageState()
+		if err != nil {
+			return nil, nil, fmt.Errorf("读取账户 storage state: %w", err)
+		}
+		cookie, err := state.CookieHeader(address, t.now())
+		if err != nil {
+			return nil, nil, err
+		}
+		header.Set("User-Agent", public.Get("User-Agent"))
+		header.Set("Accept", "*/*")
+		header.Set("Origin", aiStudioOrigin)
+		header.Set("Referer", aiStudioOrigin+"/")
+		header.Set("Sec-Fetch-Dest", "empty")
+		header.Set("Sec-Fetch-Mode", "cors")
+		header.Set("Sec-Fetch-Site", "same-origin")
+		if account.Config.AuthUser > 0 {
+			header.Set("X-Goog-Authuser", strconv.Itoa(account.Config.AuthUser))
+		}
+		if language := account.AcceptLanguage(); language != "" {
+			header.Set("Accept-Language", language)
+		}
+		header.Set("Cookie", cookie)
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, address, bytes.NewReader(body))
+		if err != nil {
+			return nil, nil, fmt.Errorf("创建写代码助手附件上传请求: %w", err)
+		}
+		request.Header = header
+		response, err := sendHTTP(client, request)
+		if err != nil {
+			return nil, nil, fmt.Errorf("执行写代码助手附件上传: %w", err)
+		}
+		defer response.Body.Close()
+		if setCookies := response.Header.Values("Set-Cookie"); len(setCookies) > 0 {
+			if err := lease.MergeSetCookieHeaders(setCookies, address, t.now()); err != nil {
+				return nil, nil, fmt.Errorf("合并写代码助手附件上传响应 Cookie: %w", err)
+			}
+		}
+		raw, err := io.ReadAll(response.Body)
+		if err != nil {
+			return nil, nil, fmt.Errorf("读取写代码助手附件上传响应: %w", err)
+		}
+		if response.StatusCode != http.StatusOK {
+			return nil, nil, DecodeRPCError(assistantUploadMethod, response.StatusCode, raw)
+		}
+		return response.Header, raw, nil
+	}
+	header, _, err := send(aiStudioOrigin+"/_/upload", http.Header{
+		"X-Goog-Upload-Header-Content-Length": {strconv.Itoa(len(blob.Data))},
+		"X-Goog-Upload-Header-Content-Type":   {blob.MIME},
+		"X-Goog-Hash":                         {hash},
+		"X-Goog-Upload-Protocol":              {"resumable"},
+		"X-Goog-Upload-Command":               {"start"},
+	}, nil)
+	if err != nil {
+		return "", err
+	}
+	address := header.Get("X-Goog-Upload-URL")
+	if address == "" {
+		return "", fmt.Errorf("写代码助手附件上传响应缺少 X-Goog-Upload-URL")
+	}
+	_, raw, err := send(address, http.Header{
+		"Content-Type":          {blob.MIME},
+		"X-Goog-Hash":           {hash},
+		"X-Goog-Upload-Command": {"upload, finalize"},
+		"X-Goog-Upload-Offset":  {"0"},
+	}, blob.Data)
+	if err != nil {
+		return "", err
+	}
+	path := strings.TrimSpace(string(raw))
+	if path == "" {
+		return "", fmt.Errorf("写代码助手附件上传响应缺少上传路径")
+	}
+	return path, nil
+}
+
 // Do 发送普通 MakerSuite RPC 并让响应 body 持有租约
 func (t *MakerSuiteHTTPTransport) Do(ctx context.Context, rpc RPCRequest) (*RPCResponse, error) {
 	lease, owned, err := resolveAccountLease(ctx, t.pool, AccountSelection{AccountID: rpc.AccountID})
@@ -334,6 +432,56 @@ func prepareProtocolHeaders(
 	return state, headers, nil
 }
 
+// CooldownQueueLimit 为全部候选账户冷却时一个请求排队等待恢复的累计上限，覆盖分钟限额窗口
+const CooldownQueueLimit = time.Minute
+
+// QueuedCoolingError 返回全部候选账户冷却时的排队结果：最早恢复的冷却在已排队 queued 之后的上限内且不是权限拒绝冷却时为 nil，否则为 AllCoolingError
+func QueuedCoolingError(modelID string, cooldown CooldownState, queued time.Duration) error {
+	if time.Until(cooldown.Until) <= CooldownQueueLimit-queued && !strings.HasPrefix(cooldown.Reason, AccountRejectionKind) {
+		return nil
+	}
+	return &AllCoolingError{ModelID: modelID, Until: cooldown.Until, Reason: cooldown.Reason}
+}
+
+// resourceOwnerError 返回资源 resourceID 属于账户 owner、与指定的账户 accountID 不同时的错误
+func resourceOwnerError(resourceID, owner, accountID string) error {
+	return fmt.Errorf("%w：资源 %s 属于账户 %s，与指定的账户 %s 不同", ErrNoEligibleAccount, resourceID, owner, accountID)
+}
+
+// queueRecheck 是排队取得租约时重新判断候选账户是否全部冷却的间隔
+const queueRecheck = time.Second
+
+// acquireQueuedLease 与 resolveAccountLease 一样取得租约，每隔 queueRecheck 重新判断候选账户，全部冷却时累计排队时间，超过 QueuedCoolingError 的上限时返回它的错误
+func acquireQueuedLease(ctx context.Context, pool *AccountPool, selection AccountSelection) (*AccountLease, bool, error) {
+	if _, ok := AccountLeaseFromContext(ctx); ok {
+		return resolveAccountLease(ctx, pool, selection)
+	}
+	var cooled time.Duration
+	for {
+		groups, err := pool.ClassifyCandidates(ctx, selection, nil)
+		if err != nil {
+			return nil, false, err
+		}
+		available := len(groups.WarmReady) + len(groups.WarmAvailable) + len(groups.WarmBusy) + len(groups.StandbyReady) + len(groups.StandbyBusy)
+		cooling := available == 0 && !groups.EarliestCooldown.Until.IsZero()
+		if cooling {
+			if err := QueuedCoolingError(selection.ModelID, groups.EarliestCooldown, cooled); err != nil {
+				return nil, false, err
+			}
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, queueRecheck)
+		started := time.Now()
+		lease, owned, err := resolveAccountLease(waitCtx, pool, selection)
+		cancel()
+		if cooling {
+			cooled += time.Since(started)
+		}
+		if err == nil || ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
+			return lease, owned, err
+		}
+	}
+}
+
 func resolveAccountLease(ctx context.Context, pool *AccountPool, selection AccountSelection) (*AccountLease, bool, error) {
 	selection = selectionWithChannel(ctx, selection)
 	if lease, ok := AccountLeaseFromContext(ctx); ok {
@@ -379,10 +527,14 @@ func validateLeaseSelection(lease *AccountLease, selection AccountSelection) err
 			return ErrResourceNotFound
 		}
 		if owner != account.ID {
-			return fmt.Errorf("资源 %s 绑定账户 %s", resourceID, owner)
+			return resourceOwnerError(resourceID, owner, account.ID)
 		}
 	}
-	if selection.Channel != "" && lease.Channel() != selection.Channel {
+	channel := selection.Channel
+	if channel == ChannelBuild && lease.pool.assistantModelLocked(selection.ModelID) {
+		channel = ChannelAssistant
+	}
+	if channel != "" && lease.Channel() != channel {
 		return fmt.Errorf("context 租约账户 %s 的 %s 通道不满足请求要求的 %s 通道", account.ID, lease.Channel(), selection.Channel)
 	}
 	modelID := strings.TrimPrefix(strings.TrimSpace(selection.ModelID), "models/")

@@ -57,6 +57,56 @@ func configTestGeneration(ctx context.Context, path string, cfg config.Config) *
 	}
 }
 
+func TestInitialRuntimeReuseAndReplacement(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "reuse", true: "replace"}[changed], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".env")
+			cfg := config.Default()
+			if err := cfg.Save(path); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial := configTestGeneration(t.Context(), path, cfg)
+			built, closed := 0, 0
+			initial.closeRuntime = func() error { closed++; return nil }
+			manager := &runtimeManager{
+				lifecycle: t.Context(), configPath: path, current: initial, initial: initial,
+				activeManagement: cfg, requests: initial.service.(*configTestService).requests,
+				factory: func(_ context.Context, lifecycle context.Context, cfg config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
+					built++
+					return configTestGeneration(lifecycle, path, cfg), nil
+				},
+			}
+			if changed {
+				cfg.AutoContinuation = !cfg.AutoContinuation
+				if err := cfg.Save(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			status, err := manager.StartService(t.Context())
+			if err != nil || !status.Running || manager.initial != nil {
+				t.Fatalf("initial start: %+v, %v", status, err)
+			}
+			if changed && (built != 1 || closed != 1 || manager.current == initial) || !changed && (built != 0 || closed != 0 || manager.current != initial) {
+				t.Fatalf("initial generation was incorrectly reused or rebuilt: built=%d closed=%d", built, closed)
+			}
+			if _, err := manager.StopService(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			previousBuilds := built
+			if _, err := manager.StartService(t.Context()); err != nil || built != previousBuilds+1 {
+				t.Fatalf("subsequent start reused the initial exception: built=%d err=%v", built, err)
+			}
+			if err := manager.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // TestAdminConfig 验证凭据保存、密码保留与管理重启标记
 func TestAdminConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")

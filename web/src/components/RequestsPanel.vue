@@ -7,7 +7,7 @@ import type { Account, Cooldown, RequestState, RequestSummary } from '@/types'
 import DetailDialog from './DetailDialog.vue'
 import UiIcon from './UiIcon.vue'
 import UiPager from './UiPager.vue'
-import UiSelect from './UiSelect.vue'
+import UiSelect, { keepSelected } from './UiSelect.vue'
 
 const props = defineProps<{
   accounts: Account[]
@@ -29,8 +29,12 @@ const refreshing = ref(false)
 const selectedCategory = ref('')
 const cooldownModel = ref('')
 const requestModel = ref('')
-const cooldownModels = computed(() => [...new Set(props.cooldowns.map((item) => item.model_id))])
-const requestModels = computed(() => [...new Set(props.requests.map((item) => item.model))])
+const cooldownModels = computed(() =>
+  keepSelected([...new Set(props.cooldowns.map((item) => item.model_id))], cooldownModel.value, ''),
+)
+const requestModels = computed(() =>
+  keepSelected([...new Set(props.requests.map((item) => item.model))], requestModel.value, ''),
+)
 const modelCooldowns = computed(() =>
   props.cooldowns.filter(
     (item) => cooldownModel.value === '' || item.model_id === cooldownModel.value,
@@ -131,15 +135,21 @@ function accountLabel(id: string, label: string): string {
   return label || accountLabels.value.get(id) || '—'
 }
 
+// timeFormat 是当前语言的请求时间格式
+const timeFormat = computed(
+  () =>
+    new Intl.DateTimeFormat(locale.value, {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    }),
+)
+
 // formatTime 根据当前语言显示请求时间
 function formatTime(value: string): string {
-  return new Intl.DateTimeFormat(locale.value, {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).format(new Date(value))
+  return timeFormat.value.format(new Date(value))
 }
 
 // refresh 请求刷新数据，图标短暂旋转确认点击

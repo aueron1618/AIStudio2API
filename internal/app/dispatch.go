@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"slices"
 	"strconv"
 	"strings"
@@ -9,20 +10,24 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 )
 
-// dispatchQueue 按账户选择条件分组，先到先唤醒等待账户槽位的请求
+// dispatchQueue 按账户选择条件分组，同条件的请求按到达先后取号
 type dispatchQueue struct {
-	mu     sync.Mutex
-	queues map[string][]*dispatchWaiter
+	mu      sync.Mutex
+	pool    *aistudio.AccountPool
+	waiters []*dispatchWaiter
 }
 
-// dispatchWaiter 表示一个等待账户槽位的请求
+// dispatchWaiter 表示一个正在取号的请求
 type dispatchWaiter struct {
-	key  string
-	wake chan struct{}
+	ctx       context.Context
+	selection aistudio.AccountSelection
+	wake      chan struct{}
+	// starting 表示请求已取得账户、正在等它的 Worker 启动，排在后面的请求不必等它
+	starting bool
 }
 
-func newDispatchQueue() *dispatchQueue {
-	return &dispatchQueue{queues: make(map[string][]*dispatchWaiter)}
+func newDispatchQueue(pool *aistudio.AccountPool) *dispatchQueue {
+	return &dispatchQueue{pool: pool}
 }
 
 // dispatchKey 返回可互相替代的请求共用的队列键
@@ -30,47 +35,87 @@ func dispatchKey(selection aistudio.AccountSelection) string {
 	allowed := slices.Clone(selection.AllowedAccountIDs)
 	slices.Sort(allowed)
 	return strings.Join([]string{
-		selection.ModelID, selection.Method, selection.Capability, selection.AccountID, selection.ResourceID,
-		strings.Join(allowed, ","), strconv.FormatBool(selection.PlaygroundOnly), string(selection.Channel),
+		selection.ModelID, selection.ModelAccessScope, selection.Method, selection.Capability, selection.AccountID, selection.ResourceID,
+		strings.Join(allowed, ","), strconv.FormatBool(selection.AllowedAccountIDs != nil),
+		strconv.FormatBool(selection.PlaygroundOnly), string(selection.Channel), strconv.FormatBool(selection.IgnoreQuotaCooldown),
 	}, "\x00")
 }
 
-// join 把请求排到同条件队列末尾，队列原本非空时唤醒队首
-func (queue *dispatchQueue) join(key string) *dispatchWaiter {
-	waiter := &dispatchWaiter{key: key, wake: make(chan struct{}, 1)}
+// join 把请求排到同条件队列末尾
+func (queue *dispatchQueue) join(ctx context.Context, selection aistudio.AccountSelection) *dispatchWaiter {
+	selection.AllowedAccountIDs = slices.Clone(selection.AllowedAccountIDs)
+	waiter := &dispatchWaiter{ctx: ctx, selection: selection, wake: make(chan struct{}, 1)}
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
-	queue.queues[key] = append(queue.queues[key], waiter)
-	queue.queues[key][0].signal()
+	queue.waiters = append(queue.waiters, waiter)
 	return waiter
 }
 
-// leave 移除请求并在其位于队首时唤醒下一个请求
-func (queue *dispatchQueue) leave(waiter *dispatchWaiter) {
-	if waiter == nil {
-		return
-	}
+// turn compares current scopes in arrival order, including after live key updates.
+func (queue *dispatchQueue) turn(waiter *dispatchWaiter, selection aistudio.AccountSelection) bool {
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
-	waiters := queue.queues[waiter.key]
-	index := slices.Index(waiters, waiter)
-	waiters = slices.Delete(waiters, index, index+1)
-	if len(waiters) == 0 {
-		delete(queue.queues, waiter.key)
-		return
+	selection.AllowedAccountIDs = slices.Clone(selection.AllowedAccountIDs)
+	waiter.selection = selection
+	keyFor := queue.keySnapshot()
+	key := keyFor(waiter)
+	for _, ahead := range queue.waiters {
+		if ahead == waiter {
+			return true
+		}
+		if !ahead.starting && keyFor(ahead) == key {
+			return false
+		}
 	}
-	queue.queues[waiter.key] = waiters
-	if index == 0 {
-		waiters[0].signal()
-	}
+	return false
 }
 
-// wakeHeads 在账户或 Worker 状态变化后唤醒每个队列的队首
+// setStarting 记录请求是否在等 Worker 启动并唤醒随之轮到取号的请求
+func (queue *dispatchQueue) setStarting(waiter *dispatchWaiter, starting bool) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	waiter.starting = starting
+	queue.wakeHeadsLocked()
+}
+
+// leave 移除请求并唤醒随之轮到取号的请求
+func (queue *dispatchQueue) leave(waiter *dispatchWaiter) {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	index := slices.Index(queue.waiters, waiter)
+	queue.waiters = slices.Delete(queue.waiters, index, index+1)
+	queue.wakeHeadsLocked()
+}
+
+// wakeHeads 在账户或 Worker 状态变化后唤醒每个队列中轮到取号的请求
 func (queue *dispatchQueue) wakeHeads() {
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
-	for _, waiters := range queue.queues {
-		waiters[0].signal()
+	queue.wakeHeadsLocked()
+}
+
+func (queue *dispatchQueue) keySnapshot() func(*dispatchWaiter) string {
+	scope := queue.pool.ScopedSelectionSnapshot()
+	return func(waiter *dispatchWaiter) string {
+		return dispatchKey(scope(waiter.ctx, waiter.selection))
+	}
+}
+
+// wakeHeadsLocked wakes the first request in each current scope without reordering.
+func (queue *dispatchQueue) wakeHeadsLocked() {
+	if len(queue.waiters) == 0 {
+		return
+	}
+	keyFor := queue.keySnapshot()
+	seen := make(map[string]struct{})
+	for _, waiter := range queue.waiters {
+		if !waiter.starting {
+			key := keyFor(waiter)
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				waiter.signal()
+			}
+		}
 	}
 }
 

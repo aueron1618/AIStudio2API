@@ -55,6 +55,7 @@ beforeEach(() => {
     state: 'STOPPED',
     version: 'fixture',
     camoufox: { ready: false, preparing: false },
+    geoip: { ready: false, preparing: false },
   } as Awaited<ReturnType<typeof api.status>>)
   vi.mocked(api.accounts).mockResolvedValue([])
   vi.mocked(api.models).mockResolvedValue([])
@@ -85,6 +86,7 @@ async function start() {
 
 describe('shared account task recovery', () => {
   it('polls Camoufox preparation only while the console is active', async () => {
+    vi.mocked(api.accountTasks).mockResolvedValue([])
     const state = await start()
     expect(window.setInterval).not.toHaveBeenCalled()
     state.status.value = {
@@ -109,6 +111,24 @@ describe('shared account task recovery', () => {
     vi.mocked(openAdminEvents).mock.calls[0]![1]()
     await nextTick()
     expect(state.accountTasks.value[0]!.id).toBe('accepted-after-abort')
+  })
+
+  it('shares one active-only poller for account tasks, exit lookups and GeoIP preparation', async () => {
+    const state = await start()
+    expect(window.setInterval).toHaveBeenCalledTimes(1)
+    state.exitLookups.value++
+    state.status.value = { ...state.status.value!, geoip: { ready: false, preparing: true } }
+    expect(window.setInterval).toHaveBeenCalledTimes(1)
+    state.accountTasks.value = []
+    state.exitLookups.value--
+    expect(window.setInterval).toHaveBeenCalledTimes(1)
+    state.status.value = { ...state.status.value!, geoip: { ready: true, preparing: false } }
+    expect(window.clearInterval).toHaveBeenLastCalledWith(1)
+    state.stopConsole()
+    state.exitLookups.value++
+    state.accountTasks.value = [running]
+    expect(window.setInterval).toHaveBeenCalledTimes(1)
+    state.exitLookups.value = 0
   })
 
   it('tracks a 202 task immediately but never overwrites a newer SSE terminal result', async () => {

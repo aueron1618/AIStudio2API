@@ -31,7 +31,7 @@ func TestPageCacheRevalidationAndNoStore(t *testing.T) {
 	response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{
 		"Cache-Control": {"max-age=60"}, "Date": {now.Format(http.TimeFormat)}, "Age": {"10"}, "Etag": {`"old"`},
 	}}
-	if err := cache.store("https://fixture.test/app.js", response, now); err != nil {
+	if err := cache.store("https://fixture.test/app.js", response, now, pageCacheNotes{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, fresh := cache.lookup("https://fixture.test/app.js", now.Add(49*time.Second)); !fresh {
@@ -42,14 +42,14 @@ func TestPageCacheRevalidationAndNoStore(t *testing.T) {
 	}
 	response.StatusCode = http.StatusNotModified
 	response.Header = http.Header{"Etag": {`"new"`}, "Date": {now.Add(time.Minute).Format(http.TimeFormat)}}
-	if err := cache.store("https://fixture.test/app.js", response, now.Add(time.Minute)); err != nil {
+	if err := cache.store("https://fixture.test/app.js", response, now.Add(time.Minute), pageCacheNotes{}); err != nil {
 		t.Fatal(err)
 	}
 	if entry, fresh := cache.lookup("https://fixture.test/app.js", now.Add(61*time.Second)); !fresh || entry.ETag != `"new"` {
 		t.Fatalf("304 did not update validators/freshness: %+v, %v", entry, fresh)
 	}
 	response.Header.Set("Cache-Control", "no-store")
-	if err := cache.store("https://fixture.test/app.js", response, now); err != nil {
+	if err := cache.store("https://fixture.test/app.js", response, now, pageCacheNotes{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, present := cache.entries["https://fixture.test/app.js"]; present {

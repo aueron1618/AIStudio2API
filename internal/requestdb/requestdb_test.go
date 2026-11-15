@@ -19,7 +19,7 @@ import (
 // TestLedgerUsageAndBodies 验证关闭前排队的记录落盘、当前与上一周期分开汇总、正文只保留最近条数
 func TestLedgerUsageAndBodies(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "requests.db")
-	logs := func(level, message string) { t.Errorf("%s %s", level, message) }
+	logs := func(level, message string, attrs ...any) { t.Errorf("%s %s %v", level, message, attrs) }
 	store, err := Open(path, logs)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +133,7 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			logs := func(level, message string) { t.Errorf("%s %s", level, message) }
+			logs := func(level, message string, attrs ...any) { t.Errorf("%s %s %v", level, message, attrs) }
 			store, err := Open(path, logs)
 			if err != nil {
 				t.Fatal(err)
@@ -207,7 +207,7 @@ func TestLedgerSchemaDropsLegacyBodies(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		store, err := Open(path, func(string, string) {})
+		store, err := Open(path, func(string, string, ...any) {})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -230,7 +230,7 @@ func TestLedgerSchemaDropsLegacyBodies(t *testing.T) {
 }
 
 func TestExportRecordsModelColumns(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "requests.db"), func(level, message string) { t.Errorf("%s %s", level, message) })
+	store, err := Open(filepath.Join(t.TempDir(), "requests.db"), func(level, message string, attrs ...any) { t.Errorf("%s %s %v", level, message, attrs) })
 	if err != nil {
 		t.Fatal(err)
 	}

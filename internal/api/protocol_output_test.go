@@ -103,6 +103,24 @@ func TestResponseStatePersistenceBoundaries(t *testing.T) {
 	}
 }
 
+func TestResponsesPersistsRewrittenMCPApprovalInput(t *testing.T) {
+	s := &server{responseStates: newResponseStateStore(nil)}
+	request := responsesRequest{Model: "test", Input: json.RawMessage(`[
+		{"type":"mcp_approval_request","id":"mcpr_call","server_label":"fixture","name":"lookup","arguments":"{}"},
+		{"type":"mcp_approval_response","approval_request_id":"mcpr_call","approve":false,"reason":"not allowed"}
+	]`)}
+	prepared, err := s.prepareResponses(t.Context(), &request, "response", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.input) != 2 || responsesItemType(prepared.input[0].Raw) != "function_call" || responsesItemType(prepared.input[1].Raw) != "function_call_output" {
+		t.Fatalf("saved input did not follow the rewritten generation history: %+v", prepared.input)
+	}
+	if !bytes.Contains(prepared.input[1].Raw, []byte("not allowed")) {
+		t.Fatal("saved input dropped the approval result")
+	}
+}
+
 func newProtocolTestServer(t *testing.T, service aistudio.Service) *httptest.Server {
 	t.Helper()
 	s := httptest.NewServer(NewHandler(service, Config{}))

@@ -7,7 +7,7 @@ import {
   DropdownMenuRoot,
   DropdownMenuTrigger,
 } from 'reka-ui'
-import { useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useConsole } from '@/console'
 import { useI18n } from '@/i18n'
 import UiDialog from '@/playground/ui/UiDialog.vue'
@@ -28,9 +28,7 @@ import { dataURL } from '../protocols'
 import { mediaCodeOptions, videoCode, type MediaCodeLanguage } from './code'
 import { maxReferences, useVideo, type VideoData, type VideoFrame } from './video'
 import { useMediaQuery } from '../media-query'
-import perfumePreview from './assets/perfume_animated_v2_opt_288x162.webp'
-import leopardPreview from './assets/snow_leopard_animated_opt_288x162.webp'
-import vegetablesPreview from './assets/stir_fry_vegetables_animated_opt_288x162.webp'
+import { modelMatches } from '../catalog'
 
 const props = defineProps<{
   promptId?: string
@@ -38,54 +36,52 @@ const props = defineProps<{
 }>()
 const route = useRoute()
 const router = useRouter()
-const { t, logText } = useI18n()
+const { t, logText, errorText } = useI18n()
 const store = useConsole()
 const video = useVideo()
 const { state, currentModel } = video
 const codeOpen = ref(false)
 const editing = ref(false)
 const confirmDelete = ref(false)
-// handset 与官网一致，768 px 及以下 Tools 只显示图标
 const handset = useMediaQuery('(max-width: 768px)')
+const omniModel = computed(() =>
+  store.models.value.find((model) => modelMatches(model, 'omni-featured')),
+)
 
-// zeroState 是官网空态示例图片所在目录
+// Keep the usable example inputs without bundling the removed animated previews.
 const zeroState = 'https://www.gstatic.com/aistudio/zero-state/'
-
-// suggestions 是当前界面语言的官网视频页空态三张示例卡片，reference 为作为起始图发送的图片
 const suggestions = computed<Suggestion[]>(() => [
   {
     label: t('zero.video.example1'),
     caption: t('zero.video.example1'),
     prompt: '',
-    image: perfumePreview,
+    image: `${zeroState}perfume_v2.png`,
     reference: `${zeroState}perfume_v2.png`,
   },
   {
     label: t('zero.video.example2'),
     caption: t('zero.video.example2'),
     prompt: t('zero.video.example2Prompt'),
-    image: leopardPreview,
+    image: `${zeroState}snow_leopard.png`,
     reference: `${zeroState}snow_leopard.png`,
   },
   {
     label: t('zero.video.example3'),
     caption: t('zero.video.example3'),
     prompt: t('zero.video.example3Prompt'),
-    image: vegetablesPreview,
+    image: '',
   },
 ])
 
-// referenceInputs 表示模型接受参考图，参考图最多 3 张且与首尾帧互斥
 const referenceInputs = computed(() => video.videoInputs.value.references)
-// frameInputs 表示显示帧按钮：模型接受尾帧，或同时接受起始图与参考图，且没有参考图
 const frameInputs = computed(
   () =>
     (video.videoInputs.value.last || (video.videoInputs.value.start && referenceInputs.value)) &&
     state.references.length === 0,
 )
-// imageDisabled 表示不能再加图片：没有模型或模型不接受图片，或参考图已满或已有帧
 const imageDisabled = computed(
   () =>
+    state.running ||
     currentModel.value === undefined ||
     (!referenceInputs.value && !video.videoInputs.value.start) ||
     (referenceInputs.value &&
@@ -94,34 +90,29 @@ const imageDisabled = computed(
         state.last !== undefined)),
 )
 
-// now 在生成期间每 100 ms 刷新，用于显示已用时间
 const now = useRunningClock(() => state.running)
 
-// elapsed 返回模型轮次的耗时文字
 function elapsed(index: number, duration: number | undefined): string {
   const running = state.running && index === state.turns.length - 1
   const milliseconds = running ? now.value - state.started : (duration ?? 0)
   return `${(milliseconds / 1000).toFixed(1)}s`
 }
 
-// toFrame 把图片文件读为帧
 async function toFrame(file: Blob, name: string): Promise<VideoFrame> {
   return { ...(await readImage(file)), name }
 }
 
-// setStart 设置起始帧
 async function setStart(file: File): Promise<void> {
   state.start = await toFrame(file, file.name)
 }
 
-// setLastFrame 设置尾帧
 async function setLastFrame(file: File): Promise<void> {
   video.setLast(await toFrame(file, file.name))
 }
 
-// addImages 按模型能力加入图片：接受参考图时加为参考图，否则第一张作为起始图
 async function addImages(files: File[]): Promise<void> {
-  if (imageDisabled.value) return
+  files = files.filter((file) => file.type.startsWith('image/'))
+  if (imageDisabled.value || files.length === 0) return
   if (!referenceInputs.value) {
     await setStart(files[0]!)
     return
@@ -130,28 +121,30 @@ async function addImages(files: File[]): Promise<void> {
     state.references.push(await toFrame(file, file.name))
 }
 
-// suggestionPick 是最近一次点击示例的序号
 let suggestionPick = 0
 
-// useSuggestion 与官网一样以示例的提示词与图片直接生成，图片作为起始图；没有模型时提示生成失败，示例图片读取完成前又点了其他示例时放弃这次点击
 async function useSuggestion(item: Suggestion): Promise<void> {
+  if (state.running) return
   const pick = ++suggestionPick
   if (currentModel.value === undefined) {
     store.showNotice(t('pg.videoFailed').replace('{error}', t('pg.selectModel')), 'error')
     return
   }
-  const start = item.reference
-    ? await toFrame(await (await fetch(item.reference)).blob(), item.reference.split('/').at(-1)!)
-    : undefined
-  if (pick !== suggestionPick) return
-  state.draft = item.prompt
-  state.references = []
-  video.setLast(undefined)
-  state.start = start
-  void video.run()
+  try {
+    const start = item.reference
+      ? await toFrame(await (await fetch(item.reference)).blob(), item.reference.split('/').at(-1)!)
+      : undefined
+    if (pick !== suggestionPick) return
+    state.draft = item.prompt
+    state.references = []
+    video.setLast(undefined)
+    state.start = start
+    void video.run()
+  } catch (error) {
+    if (pick === suggestionPick) store.showNotice(errorText(error), 'error')
+  }
 }
 
-// code 按语言生成当前输入与设置的视频示例代码
 function code(language: MediaCodeLanguage): string {
   return videoCode(language, {
     baseURL: window.location.origin,
@@ -166,13 +159,11 @@ function code(language: MediaCodeLanguage): string {
   })
 }
 
-// newChat 打开新的视频会话
 function newChat(): void {
   video.newSession()
   void router.push('/prompts/new_video')
 }
 
-// removePrompt 删除当前视频会话并回到新会话
 async function removePrompt(): Promise<void> {
   confirmDelete.value = false
   await video.remove()
@@ -188,7 +179,7 @@ watch(
   { immediate: true },
 )
 watch(
-  () => store.models.value,
+  () => [store.models.value, route.query.model],
   () => video.ensureModel(typeof route.query.model === 'string' ? route.query.model : undefined),
   { immediate: true },
 )
@@ -215,6 +206,16 @@ watch(
       </button>
     </template>
     <template #actions>
+      <RouterLink
+        v-if="omniModel"
+        to="/prompts/new_omni"
+        ms-button
+        class="ms-button-borderless"
+        :aria-label="omniModel.name"
+      >
+        <UiIcon name="spark" :size="20" />
+        <span v-if="!handset">{{ omniModel.name }}</span>
+      </RouterLink>
       <button
         v-tooltip.below="state.turns.length === 0 ? t('pg.alreadyNewChat') : t('pg.newChat')"
         type="button"
@@ -268,9 +269,8 @@ watch(
 
     <PaidUsageZeroState
       v-if="state.turns.length === 0"
-      :title="t('pg.videoEmptyTitle').replace('{model}', currentModel?.name ?? 'Gemini Omni')"
+      :title="t('pg.videoEmptyTitle').replace('{model}', currentModel?.name ?? 'Video')"
       :subtitle="t('pg.videoEmptyDescription')"
-      layout="single-row"
       icon="modelVideo"
       :suggestions="suggestions"
       @select="useSuggestion"
@@ -297,7 +297,7 @@ watch(
               </div>
             </template>
             <template v-else>
-              <span class="turn-role">{{ turn.model }} • {{ elapsed(index, turn.duration) }}</span>
+              <span class="turn-role">{{ turn.model }} · {{ elapsed(index, turn.duration) }}</span>
               <p v-if="turn.stopped" class="turn-error">{{ t('pg.generationStopped') }}</p>
               <p v-else-if="turn.error" class="turn-error">{{ logText(turn.error) }}</p>
               <div v-else class="gallery-container">
@@ -323,6 +323,7 @@ watch(
         :running="state.running"
         :can-run="video.canRun.value"
         :run-tooltip="video.openAIFrames.value ? t('pg.openAIVideoStartOnly') : ''"
+        accept-files
         @run="video.run()"
         @stop="video.stop()"
         @files="addImages"
@@ -377,10 +378,14 @@ watch(
         <template #left>
           <AddImageButton
             icon="addCircle"
-            chip
             :multiple="referenceInputs"
-            :label="referenceInputs ? t('pg.addReferenceImages') : t('pg.addImageToPrompt')"
-            :tooltip="currentModel === undefined ? t('pg.imagesCannotBeAdded') : undefined"
+            :label="
+              currentModel === undefined
+                ? t('pg.imagesCannotBeAdded')
+                : referenceInputs
+                  ? t('pg.addReferenceImages')
+                  : t('pg.addImageToPrompt')
+            "
             :disabled="imageDisabled"
             @images="addImages"
           />
@@ -542,6 +547,11 @@ watch(
 @media screen and (max-width: 600px) {
   .prompt-input-container {
     margin-bottom: 8px;
+  }
+
+  .gallery-container,
+  .image-container {
+    max-width: calc(100% - 24px);
   }
 }
 

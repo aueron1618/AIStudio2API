@@ -120,7 +120,9 @@ describe('Access fixed-channel contracts', () => {
     }
     expect(decision.matches(model)).toBe(true)
     expect(decision.matches(normal)).toBe(false)
-    expect(decision.notice).toBe('models.frontendUncalledHelp')
+    expect(decision.notice).toBe('models.decisionHiddenHelp')
+    expect(messages[decision.notice!]).toContain('sample apps')
+    expect(messages[decision.notice!]).toContain('directly')
     expect(decision.endpoints).toEqual([['POST', '/v1beta/decisions']])
     for (const language of decision.languages('')) {
       const code = decision.code({

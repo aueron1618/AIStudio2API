@@ -6,13 +6,13 @@ import RunKeyHint from '../RunKeyHint.vue'
 import { submits, useRunTooltip } from '../run-keys'
 
 const draft = defineModel<string>({ required: true })
-// runTooltip 是页面给出的运行按钮提示，为空时显示发送快捷键
 const props = defineProps<{
   placeholder: string
   label: string
   running: boolean
   canRun: boolean
   runTooltip?: string
+  acceptFiles?: boolean
 }>()
 const emit = defineEmits<{ run: []; stop: []; files: [files: File[]] }>()
 const { t } = useI18n()
@@ -50,17 +50,17 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
-// onDrop 把拖入的文件交给页面
 function onDrop(event: DragEvent): void {
   dragging.value = false
-  const files = [...event.dataTransfer!.files]
-  if (files.length > 0) emit('files', files)
+  const files = [...(event.dataTransfer?.files ?? [])]
+  if (files.length > 0 && !props.running) emit('files', files)
 }
 </script>
 
 <template>
-  <div class="ms-prompt-box" @dragenter.prevent="dragging = true">
+  <div class="ms-prompt-box" @dragenter.prevent="dragging = acceptFiles && !running">
     <div
+      v-if="acceptFiles"
       class="dragging-overlay"
       :class="{ dragging }"
       @dragover.prevent
@@ -130,6 +130,19 @@ function onDrop(event: DragEvent): void {
   margin: 0 auto;
 }
 
+.prompt-box-container {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 12px 12px;
+  padding: 12px;
+  border: 1px solid var(--color-v3-outline-var);
+  border-radius: 12px;
+  background-color: var(--color-v3-surface-container-high);
+  box-shadow: var(--shadow-v3-md);
+}
+
 .dragging-overlay {
   position: absolute;
   z-index: 10;
@@ -159,22 +172,9 @@ function onDrop(event: DragEvent): void {
   visibility: visible;
 }
 
-.prompt-box-container {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 0 12px 12px;
-  padding: 12px;
-  border: 1px solid var(--color-v3-outline-var);
-  border-radius: 12px;
-  background-color: var(--color-v3-surface-container-high);
-  box-shadow: var(--shadow-v3-md);
-}
-
 .augmentation {
   display: flex;
-  flex-direction: row;
+  flex-flow: row wrap;
   align-items: center;
   gap: 12px;
 }

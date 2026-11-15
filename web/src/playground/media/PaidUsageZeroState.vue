@@ -4,7 +4,7 @@ import { useI18n } from '@/i18n'
 import type { IconName } from '@/playground/ui/icons'
 import UiIcon from '@/playground/ui/UiIcon.vue'
 
-// Suggestion 是空态中的一张示例卡片：image 为卡片图，reference 为叠在左下角的参考图，caption 为卡片下方文字
+// Suggestion 是空态中的一张示例卡片：image 为卡片图
 export interface Suggestion {
   image: string
   label: string
@@ -13,11 +13,10 @@ export interface Suggestion {
   reference?: string
 }
 
-// layout 与官网 ms-suggestion-gallery 一致：mosaic 为两列拼贴，single-row 为单行横向滚动；600 px 以下都为单行
+// 示例卡片与官网 ms-suggestion-gallery 的 mosaic 布局一致：两列拼贴，600 px 以下为单行横向滚动
 defineProps<{
   title: string
   subtitle?: string
-  layout: 'mosaic' | 'single-row'
   icon: IconName
   suggestions: readonly Suggestion[]
 }>()
@@ -46,7 +45,7 @@ onUnmounted(() => observer.disconnect())
 </script>
 
 <template>
-  <div class="zero-state-content" :data-layout="layout">
+  <div class="zero-state-content">
     <div class="paid-usage-zero-state">
       <div class="left-container">
         <div class="title-content-container">
@@ -54,11 +53,11 @@ onUnmounted(() => observer.disconnect())
           <span v-if="subtitle" class="subtitle-container">{{ subtitle }}</span>
         </div>
       </div>
-      <div class="suggestion-gallery-host" :data-layout="layout">
+      <div class="suggestion-gallery-host">
         <div ref="gallery" class="suggestion-gallery" @scroll="updateScroll">
           <button
             v-for="item in suggestions"
-            :key="item.image"
+            :key="item.label"
             v-tooltip="item.label"
             type="button"
             class="suggestion-card"
@@ -66,9 +65,17 @@ onUnmounted(() => observer.disconnect())
             @click="emit('select', item)"
           >
             <span class="display-media-container">
-              <img class="display-media" :src="item.image" alt="" @load="updateScroll" />
+              <img
+                v-if="item.image"
+                class="display-media"
+                :src="item.image"
+                alt=""
+                @load="updateScroll"
+              />
+              <span v-else class="display-media example-placeholder"
+                ><UiIcon :name="icon" :size="48"
+              /></span>
               <span class="media-type-icon"><UiIcon :name="icon" :size="18" /></span>
-              <img v-if="item.reference" class="reference-image" :src="item.reference" alt="" />
             </span>
             <span v-if="item.caption" class="content-text">{{ item.caption }}</span>
           </button>
@@ -158,6 +165,12 @@ onUnmounted(() => observer.disconnect())
   color: #fcfcfc;
 }
 
+.suggestion-gallery-host {
+  position: relative;
+  width: 100%;
+  margin: 32px 0 16px;
+}
+
 .title-content-container > .subtitle-container {
   max-width: 68ch;
   margin: 0;
@@ -165,10 +178,20 @@ onUnmounted(() => observer.disconnect())
   line-height: 21px;
 }
 
-.suggestion-gallery-host {
-  position: relative;
-  width: 100%;
-  margin: 32px 0 16px;
+.content-text {
+  margin: 8px 0 12px;
+  color: var(--color-on-surface-variant);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.example-placeholder {
+  display: grid;
+  place-items: center;
+  width: 160px;
+  height: 100px;
+  background-color: var(--color-v3-surface-container);
+  color: var(--color-on-surface-variant);
 }
 
 .gallery-overlay {
@@ -178,7 +201,9 @@ onUnmounted(() => observer.disconnect())
 .suggestion-card {
   position: relative;
   display: flex;
+  grid-column: span 3;
   flex-direction: column;
+  align-self: start;
   align-items: flex-start;
   margin: 8px;
   padding: 0;
@@ -220,51 +245,25 @@ onUnmounted(() => observer.disconnect())
   color: var(--color-on-surface);
 }
 
-.reference-image {
-  position: absolute;
-  bottom: 8px;
-  left: 8px;
-  width: 48px;
-  height: 48px;
-  border-radius: 8px;
-  box-shadow:
-    0 1px 3px 1px rgb(0 0 0 / 15%),
-    0 1px 2px 0 rgb(0 0 0 / 30%);
-  object-fit: cover;
-}
-
-.content-text {
-  width: 100%;
-  margin: 8px 0 12px 8px;
-  color: var(--color-on-surface-variant);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-[data-layout='mosaic'] .suggestion-gallery {
+.suggestion-gallery {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
   gap: 8px;
   width: 100%;
 }
 
-[data-layout='mosaic'] .suggestion-card {
-  grid-column: span 3;
-  align-self: start;
-}
-
-[data-layout='mosaic'] .suggestion-card:nth-child(1),
-[data-layout='mosaic'] .suggestion-card:nth-child(3) {
+.suggestion-card:nth-child(1),
+.suggestion-card:nth-child(3) {
   justify-self: end;
 }
 
-[data-layout='mosaic'] .suggestion-card:nth-child(1),
-[data-layout='mosaic'] .suggestion-card:nth-child(2) {
+.suggestion-card:nth-child(1),
+.suggestion-card:nth-child(2) {
   align-self: end;
 }
 
-[data-layout='mosaic'] .suggestion-card:nth-child(2),
-[data-layout='mosaic'] .suggestion-card:nth-child(4) {
+.suggestion-card:nth-child(2),
+.suggestion-card:nth-child(4) {
   justify-self: start;
 }
 
@@ -291,42 +290,10 @@ onUnmounted(() => observer.disconnect())
   right: 0;
 }
 
-[data-layout='single-row'] .gallery-overlay {
-  position: absolute;
-  top: 0;
-  display: flex;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-
-[data-layout='single-row'] .suggestion-gallery {
-  display: flex;
-  gap: 8px;
-  margin-top: -4px;
-  padding-top: 4px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-[data-layout='single-row'] .suggestion-card {
-  flex: 0 0 auto;
-  box-sizing: border-box;
-  width: 304px;
-  height: 240px;
-  margin: 0;
-  padding: 8px;
-  border-radius: 12px;
-}
-
 @media screen and (max-width: 600px) {
   .zero-state-content {
     justify-content: flex-start;
-    padding: 16px 0 0;
-  }
-
-  .zero-state-content[data-layout='mosaic'] {
-    padding-inline: 16px;
+    padding: 16px 16px 0;
   }
 
   .paid-usage-zero-state {
@@ -344,7 +311,7 @@ onUnmounted(() => observer.disconnect())
     pointer-events: none;
   }
 
-  [data-layout='mosaic'] .suggestion-gallery {
+  .suggestion-gallery {
     display: flex;
     overflow-x: auto;
     scrollbar-width: none;

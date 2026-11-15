@@ -36,17 +36,17 @@ func (runtime *goWAARuntime) schedule(delay time.Duration, task func(context.Con
 	if runtime.closed {
 		return nil
 	}
+	runtime.pending.Add(1)
 	var timer *time.Timer
 	timer = time.AfterFunc(delay, func() {
+		defer runtime.pending.Done()
 		runtime.lifecycleMu.Lock()
 		delete(runtime.timers, timer)
 		if runtime.closed {
 			runtime.lifecycleMu.Unlock()
 			return
 		}
-		runtime.pending.Add(1)
 		runtime.lifecycleMu.Unlock()
-		defer runtime.pending.Done()
 		ctx, cancel := context.WithTimeout(runtime.ctx, 2*time.Minute)
 		defer cancel()
 		task(ctx)
@@ -57,9 +57,15 @@ func (runtime *goWAARuntime) schedule(delay time.Duration, task func(context.Con
 
 func (runtime *goWAARuntime) stopTimer(timer *time.Timer) {
 	runtime.lifecycleMu.Lock()
-	timer.Stop()
+	if _, owned := runtime.timers[timer]; owned && timer.Stop() {
+		runtime.pending.Done()
+	}
 	delete(runtime.timers, timer)
 	runtime.lifecycleMu.Unlock()
+}
+
+func (runtime *goWAARuntime) after(delay time.Duration, task func()) *time.Timer {
+	return runtime.schedule(delay, func(context.Context) { task() })
 }
 
 type pageResponseBody struct {

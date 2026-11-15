@@ -26,7 +26,18 @@ type PromptFeedbackError struct {
 	Reason        string
 	Message       string
 	SafetyRatings []SafetyRating
-	Raw           json.RawMessage
+	// Usage 是拦截帧中上游计入的输入用量
+	Usage *Usage
+	Raw   json.RawMessage
+}
+
+// InputBlocked 表示上游按输入本身（安全设置、屏蔽词、禁止内容）拦截请求，同一输入重发仍被拦截
+func (e *PromptFeedbackError) InputBlocked() bool {
+	switch e.Reason {
+	case "safety", "blocklist", "prohibited_content":
+		return true
+	}
+	return false
 }
 
 // ContentPolicyError 表示上游以内容策略类原因结束生成
@@ -35,6 +46,22 @@ type ContentPolicyError struct {
 	Message string
 	// Usage 是下游还没有收到事件就结束时上游给出的用量
 	Usage *Usage
+}
+
+// AbnormalFinishError 表示上游以格式错误的函数调用、意外的工具调用或格式错误的响应结束且这次生成没有任何输出
+type AbnormalFinishError struct {
+	Reason  string
+	Message string
+	// Usage 是上游最后给出的用量
+	Usage *Usage
+}
+
+// Error 返回上游异常结束生成的原因
+func (e *AbnormalFinishError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("AI Studio 异常结束生成且没有输出: %s: %s", strings.ToUpper(e.Reason), e.Message)
+	}
+	return fmt.Sprintf("AI Studio 异常结束生成且没有输出: %s", strings.ToUpper(e.Reason))
 }
 
 // Error 返回上游结束生成的内容策略原因
@@ -281,9 +308,7 @@ func trailerError(method string, raw json.RawMessage) error {
 
 func rawArray(raw json.RawMessage, path string, evidence json.RawMessage) ([]json.RawMessage, error) {
 	var values []json.RawMessage
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&values); err != nil {
+	if err := json.Unmarshal(raw, &values); err != nil {
 		return nil, &ProtocolEvidenceError{Path: path, Detail: "期望数组", Raw: cloneEvidence(raw, evidence)}
 	}
 	return values, nil
@@ -299,9 +324,7 @@ func rawString(raw json.RawMessage, path string, evidence json.RawMessage) (stri
 
 func rawInt64(raw json.RawMessage, path string, evidence json.RawMessage) (int64, error) {
 	var number json.Number
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&number); err != nil {
+	if err := json.Unmarshal(raw, &number); err != nil {
 		return 0, &ProtocolEvidenceError{Path: path, Detail: "期望整数", Raw: cloneEvidence(raw, evidence)}
 	}
 	value, err := strconv.ParseInt(number.String(), 10, 64)
@@ -313,9 +336,7 @@ func rawInt64(raw json.RawMessage, path string, evidence json.RawMessage) (int64
 
 func rawFloat64(raw json.RawMessage, path string, evidence json.RawMessage) (float64, error) {
 	var number json.Number
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&number); err != nil {
+	if err := json.Unmarshal(raw, &number); err != nil {
 		return 0, &ProtocolEvidenceError{Path: path, Detail: "期望数字", Raw: cloneEvidence(raw, evidence)}
 	}
 	value, err := strconv.ParseFloat(number.String(), 64)

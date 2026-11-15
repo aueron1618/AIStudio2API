@@ -9,6 +9,7 @@ import {
   DropdownMenuTrigger,
 } from 'reka-ui'
 import { api, ApiError } from '@/api'
+import { useDownloadProgress, waitsForCamoufox } from '@/camoufox'
 import { useI18n, type TranslationKey } from '@/i18n'
 import { usePaged } from '@/paging'
 import { readPreference, writePreference } from '@/preference'
@@ -20,20 +21,24 @@ import type {
   AccountState,
   AccountTask,
   AccountTaskItem,
+  PreparationStatus,
   ChromeImportProfile,
   CookieBrowser,
   PairingToken,
 } from '@/types'
 import type { IconName } from '@/icons'
 import AccountEnvironmentFields from './AccountEnvironmentFields.vue'
+import AccountExits from './AccountExits.vue'
+import CamoufoxProgressBar from './CamoufoxProgressBar.vue'
 import DetailDialog from './DetailDialog.vue'
 import DisclosureChevron from './DisclosureChevron.vue'
+import LinkedText from './LinkedText.vue'
 import LoginViewer from './LoginViewer.vue'
 import StagedRefreshIcon from './StagedRefreshIcon.vue'
 import UiCollapse from './UiCollapse.vue'
 import UiIcon from './UiIcon.vue'
 import UiPager from './UiPager.vue'
-import UiSelect from './UiSelect.vue'
+import UiSelect, { keepSelected } from './UiSelect.vue'
 
 // CookieCandidate 是 Cookie 中识别出的账户，source 为所在 Cookie 来源的序号
 type CookieCandidate = CookieBrowser & { source: number }
@@ -46,6 +51,10 @@ const props = defineProps<{
   error: string
   // chromeImport 表示服务所在平台能从 Chrome 导入账户
   chromeImport: boolean
+  // camoufox 是 Camoufox 的准备状态，浏览器登录等待下载时在任务行显示进度
+  camoufox: PreparationStatus | undefined
+  // geoip 是出口 IP 库的准备状态，下载期间在出口区块与进行中的任务行显示进度
+  geoip: PreparationStatus | undefined
 }>()
 
 const emit = defineEmits<{
@@ -159,9 +168,10 @@ function toggleAllChromeProfiles(): void {
     ? []
     : importableChromeProfiles.value.map((profile) => profile.id)
 }
+// accountEnvironment 是添加账户时的代理、语言与时区，语言与时区留空时按出口位置填写
 const accountEnvironment = reactive({
   proxy: '',
-  locale: defaultAccountLocale,
+  locale: '',
   timezone: '',
 })
 const cookieEnvironment = reactive({ proxy: '', locale: '', timezone: '' })
@@ -236,7 +246,7 @@ const transitionKeys: TranslationKey[] = [
 // reasonKeys 是状态旁说明按钮的文字，宽屏下各行按最长的一项留出位置，按钮出现时状态列宽度不变
 const reasonKeys: TranslationKey[] = ['accounts.reason', 'accounts.refreshFailed']
 
-// transitionText 返回账户启停收尾阶段的文字，没有收尾时返回空串
+// transitionText 返回账户启停收尾阶段的文字：停用时等待在途请求与 Worker 启动等占用结束，没有收尾时返回空串
 function transitionText(account: Account): string {
   if (account.transition === 'syncing') return t('accounts.syncing')
   if (account.transition !== 'draining') return ''
@@ -249,9 +259,27 @@ const search = ref('')
 const selectedState = ref('')
 const selectedTier = ref('')
 const selectedEgress = ref('*')
-const states = computed(() => [...new Set(props.accounts.map((account) => account.state))])
-const tiers = computed(() => [...new Set(props.accounts.map((account) => account.benefit_tier))])
-const egresses = computed(() => [...new Set(props.accounts.map((account) => account.egress))])
+const states = computed(() =>
+  keepSelected(
+    [...new Set(props.accounts.map((account) => account.state))],
+    selectedState.value,
+    '',
+  ),
+)
+const tiers = computed(() =>
+  keepSelected(
+    [...new Set(props.accounts.map((account) => account.benefit_tier))],
+    selectedTier.value,
+    '',
+  ),
+)
+const egresses = computed(() =>
+  keepSelected(
+    [...new Set(props.accounts.map((account) => account.egress))],
+    selectedEgress.value,
+    '*',
+  ),
+)
 
 // visibleAccounts 是邮箱检索与账户属性筛选的交集
 const visibleAccounts = computed(() => {
@@ -296,7 +324,8 @@ function toggleAccountSelected(accountID: string): void {
 
 // toggleRowSelected 点击账户行时勾选或取消该账户，点击行内控件与拖选文字时不切换
 function toggleRowSelected(account: Account, event: MouseEvent): void {
-  if ((event.target as Element).closest('button, a, input')) return
+  const path = event.composedPath()
+  if (path.some((node) => node instanceof Element && node.matches('button, a, input'))) return
   if (!getSelection()!.isCollapsed) return
   toggleAccountSelected(account.id)
 }
@@ -340,14 +369,6 @@ function bulkRefresh(): void {
 function bulkDelete(): void {
   emit('delete', [...selectedAccounts.value])
   selected.clear()
-}
-
-// linkPieces 把原因文字按其中的 https 地址切分，地址片段标记为链接
-function linkPieces(text: string): { text: string; url: boolean }[] {
-  return text
-    .split(/(https:\/\/[^\s，。；）)]+)/)
-    .filter(Boolean)
-    .map((piece) => ({ text: piece, url: piece.startsWith('https://') }))
 }
 
 // reason 是悬窗中显示的账户或任务、原因类别与完整原因
@@ -406,6 +427,18 @@ function closeBrowserLogin(): void {
   showBrowserLogin.value = false
 }
 
+// camoufoxPercent 与 camoufoxSize 是浏览器登录任务行显示的 Camoufox 下载进度
+const { percent: camoufoxPercent, sizeText: camoufoxSize } = useDownloadProgress(
+  () => props.camoufox,
+)
+// geoipPercent 与 geoipSize 是进行中的任务行显示的出口 IP 库下载进度
+const { percent: geoipPercent, sizeText: geoipSize } = useDownloadProgress(() => props.geoip)
+
+// downloadText 是等待 Camoufox 下载的任务行文字，重新登录时带上账户
+function downloadText(task: AccountTask): string {
+  return [task.items[0]!.label, t('accounts.downloadingBrowser')].filter(Boolean).join(' · ')
+}
+
 // taskTitles 是各类账户任务的标题
 const taskTitles: Record<AccountTask['kind'], TranslationKey> = {
   login: 'accounts.browserLogin',
@@ -457,6 +490,16 @@ async function dismissTask(task: AccountTask): Promise<void> {
     emit('refresh-tasks')
   }
 }
+
+// downloadingRelogins 是重新登录正在等待 Camoufox 下载的账户，账户行显示下载进度
+const downloadingRelogins = computed(
+  () =>
+    new Set(
+      props.tasks
+        .filter((task) => task.kind === 'relogin' && waitsForCamoufox(task, props.camoufox))
+        .map((task) => task.items[0]!.label),
+    ),
+)
 
 // reloggingAccounts 是有进行中重新登录任务的账户
 const reloggingAccounts = computed(
@@ -802,7 +845,7 @@ function browserKey(browser: CookieBrowser): string {
   return `${browser.address}#${browser.auth_user}`
 }
 
-// browserSummary 返回浏览器条目第二行：未登录提示、读取错误或浏览器名、地址、u/N、语言与时区
+// browserSummary includes the CDP environment inherited when no explicit region is supplied.
 function browserSummary(browser: CookieBrowser): string {
   if (browser.signed_out) return t('accounts.browserSignedOut')
   return (
@@ -853,7 +896,7 @@ function switchToCookiePaste(): void {
   showCookieImport.value = true
 }
 
-// importBrowserAccounts 在账户任务中导入勾选的调试浏览器账户并关闭对话框，账户沿用浏览器的语言与时区
+// importBrowserAccounts keeps CDP region inheritance separate from saved Cookie form preferences.
 async function importBrowserAccounts(): Promise<void> {
   if (pendingAction.value !== '') return
   const chosen = new Set(selectedBrowsers.value)
@@ -1101,7 +1144,7 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
   emit('refresh')
   emit(
     'notice',
-    t('accounts.refreshedAll')
+    t(total - failed === 1 ? 'accounts.refreshedAllOne' : 'accounts.refreshedAll')
       .replace('{count}', String(total - failed))
       .replace('{failed}', String(failed)),
     failed === 0 ? 'success' : 'error',
@@ -1223,6 +1266,32 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
               <span v-if="task.items.length > 1" class="shrink-0 text-xs text-gray-500 tabular-nums"
                 >{{ taskFinished(task) }}/{{ task.items.length }}</span
               >
+              <template v-else-if="waitsForCamoufox(task, camoufox)">
+                <span
+                  v-tooltip.overflow="downloadText(task)"
+                  class="min-w-0 truncate text-xs text-gray-400"
+                  >{{ downloadText(task) }}</span
+                >
+                <span
+                  v-if="camoufoxSize"
+                  class="shrink-0 font-mono text-xs text-gray-500 tabular-nums"
+                  >{{ camoufoxSize
+                  }}<template v-if="camoufoxPercent !== null">
+                    · {{ camoufoxPercent }}%</template
+                  ></span
+                >
+              </template>
+              <template v-else-if="task.state === 'running' && geoip?.preparing">
+                <span
+                  v-tooltip.overflow="t('accounts.downloadingGeoip')"
+                  class="min-w-0 truncate text-xs text-gray-400"
+                  >{{ t('accounts.downloadingGeoip') }}</span
+                >
+                <span v-if="geoipSize" class="shrink-0 font-mono text-xs text-gray-500 tabular-nums"
+                  >{{ geoipSize
+                  }}<template v-if="geoipPercent !== null"> · {{ geoipPercent }}%</template></span
+                >
+              </template>
               <template v-else>
                 <span
                   v-tooltip.overflow="task.items[0]!.label || t('accounts.liveWaiting')"
@@ -1272,6 +1341,20 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
               </button>
             </div>
           </div>
+          <CamoufoxProgressBar
+            v-if="waitsForCamoufox(task, camoufox)"
+            class="mt-2"
+            :label="t('accounts.downloadingBrowser')"
+            :percent="camoufoxPercent"
+            :size-text="camoufoxSize"
+          />
+          <CamoufoxProgressBar
+            v-else-if="task.state === 'running' && geoip?.preparing"
+            class="mt-2"
+            :label="t('accounts.downloadingGeoip')"
+            :percent="geoipPercent"
+            :size-text="geoipSize"
+          />
           <ul
             v-if="task.items.length > 1"
             class="mt-2 max-h-40 space-y-1 overflow-y-auto border-t border-line/60 pt-2"
@@ -1349,6 +1432,7 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
           </option>
         </UiSelect>
       </div>
+      <AccountExits v-if="accounts.length > 0" :accounts="accounts" :geoip="geoip" />
       <p v-if="error" class="flex items-center gap-2 text-sm text-red-300">
         <UiIcon name="warning" :size="15" class="shrink-0" />{{ error }}
       </p>
@@ -1385,7 +1469,9 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
             <span class="text-gray-400 tabular-nums">{{
               selectedAccounts.length > 0
                 ? t('accounts.selectedCount').replace('{count}', String(selectedAccounts.length))
-                : t('accounts.totalCount').replace('{count}', String(visibleAccounts.length))
+                : t(
+                    visibleAccounts.length === 1 ? 'accounts.totalCountOne' : 'accounts.totalCount',
+                  ).replace('{count}', String(visibleAccounts.length))
             }}</span>
           </label>
           <DropdownMenuRoot v-if="selectedAccounts.length > 0" :modal="false">
@@ -1467,6 +1553,23 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                   class="block truncate text-xs text-gray-500"
                   >{{ accountSummary(account) }}</span
                 >
+                <template v-if="downloadingRelogins.has(account.id)">
+                  <span class="mt-1 flex flex-wrap gap-x-2 text-xs text-gray-400"
+                    >{{ t('accounts.downloadingBrowser') }}
+                    <span v-if="camoufoxSize" class="font-mono text-gray-500 tabular-nums"
+                      >{{ camoufoxSize
+                      }}<template v-if="camoufoxPercent !== null">
+                        · {{ camoufoxPercent }}%</template
+                      ></span
+                    ></span
+                  >
+                  <CamoufoxProgressBar
+                    class="mt-1.5"
+                    :label="t('accounts.downloadingBrowser')"
+                    :percent="camoufoxPercent"
+                    :size-text="camoufoxSize"
+                  />
+                </template>
               </div>
             </div>
             <span class="shrink-0 text-xs text-gray-500 md:w-20"
@@ -1482,14 +1585,14 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                   :key="state"
                   class="invisible border px-1.5 [grid-area:1/1] max-md:hidden"
                   aria-hidden="true"
-                  >{{ t(key) }}</span
+                  >{{ t(key).replace('{count}', '1') }}</span
                 >
                 <span
                   v-for="key in transitionKeys"
                   :key="key"
                   class="invisible pl-[19px] [grid-area:1/1] max-lg:hidden"
                   aria-hidden="true"
-                  >{{ t(key).replace('{count}', '1') }}</span
+                  >{{ t(key) }}</span
                 >
                 <span
                   v-if="account.transition"
@@ -1646,7 +1749,7 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
         <pre
           v-if="reason"
           class="rounded-md border border-line bg-canvas p-3 font-mono text-xs leading-5 whitespace-pre-wrap [overflow-wrap:anywhere] text-red-300"
-        ><template v-for="(piece, index) in linkPieces(logText(reason.text))" :key="index"><a v-if="piece.url" :href="piece.text" target="_blank" rel="noreferrer" class="underline underline-offset-2 hover:text-red-200">{{ piece.text }}</a><template v-else>{{ piece.text }}</template></template></pre>
+        ><LinkedText :text="logText(reason.text)" /></pre>
       </DetailDialog>
 
       <LoginViewer
@@ -1654,6 +1757,7 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
         :key="viewerTask.view"
         :view="viewerTask.view"
         :error="viewerTask.state === 'failed' ? taskError(viewerTask.items[0]!) : ''"
+        :camoufox="camoufox"
         @unavailable="viewerUnavailable"
         @cancel="cancelViewerTask"
         @hide="viewerTaskID = ''"
@@ -1815,8 +1919,9 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                   <span
                     v-if="profile.restricted"
                     class="mt-1 block text-xs leading-5 [overflow-wrap:anywhere] text-red-300"
-                    >{{ t('state.restricted') }} · {{ logText(profile.restricted) }}</span
-                  >
+                    >{{ t('state.restricted') }} ·
+                    <LinkedText :text="logText(profile.restricted)" compact
+                  /></span>
                 </span>
               </label>
             </div>
@@ -2047,8 +2152,9 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                         <span
                           v-if="candidate.restricted"
                           class="mt-1 block text-xs leading-5 [overflow-wrap:anywhere] text-red-300"
-                          >{{ t('state.restricted') }} · {{ logText(candidate.restricted) }}</span
-                        >
+                          ><template v-if="candidate.email">{{ t('state.restricted') }} · </template
+                          ><LinkedText :text="logText(candidate.restricted)" compact
+                        /></span>
                       </span>
                       <span v-if="candidate.imported" class="shrink-0 text-xs text-gray-400">{{
                         t('accounts.alreadyImported')
@@ -2077,7 +2183,7 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                     {{ t('accounts.moreSettings') }}
                   </h4>
                   <div class="space-y-3 border-t border-line p-3 text-sm">
-                    <AccountEnvironmentFields :model-value="cookieEnvironment" optional />
+                    <AccountEnvironmentFields :model-value="cookieEnvironment" />
                   </div>
                 </section>
                 <p v-if="cookieImportError" role="alert" class="text-sm break-words text-red-300">
@@ -2233,8 +2339,9 @@ async function refreshAccounts(accounts: Account[]): Promise<void> {
                   <span
                     v-if="browser.restricted"
                     class="mt-1 block text-xs leading-5 [overflow-wrap:anywhere] text-red-300"
-                    >{{ t('state.restricted') }} · {{ logText(browser.restricted) }}</span
-                  >
+                    >{{ t('state.restricted') }} ·
+                    <LinkedText :text="logText(browser.restricted)" compact
+                  /></span>
                 </span>
                 <span v-if="browser.imported" class="shrink-0 text-xs text-gray-400">{{
                   t('accounts.alreadyImported')

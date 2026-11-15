@@ -26,16 +26,13 @@ import {
   DropdownMenuRoot,
   DropdownMenuTrigger,
 } from 'reka-ui'
+import { waitsForCamoufox } from '@/camoufox'
 import { useConsole } from '@/console'
 import { useI18n, type TranslationKey } from '@/i18n'
 import type { TabID } from '@/types'
-import AccountsPanel from '@/components/AccountsPanel.vue'
 import CamoufoxBanner from '@/components/CamoufoxBanner.vue'
 import UiDisclosure from '@/components/UiDisclosure.vue'
 import LogsPanel from '@/components/LogsPanel.vue'
-import ModelsTable from '@/components/ModelsTable.vue'
-import RequestsPanel from '@/components/RequestsPanel.vue'
-import SettingsPanel from '@/components/SettingsPanel.vue'
 import ThemeToggle from '@/components/ThemeToggle.vue'
 import UiIcon from '@/components/UiIcon.vue'
 import { useClampToggle } from '@/clamp'
@@ -64,6 +61,10 @@ function lazyPanel(loader: AsyncComponentLoader) {
 const UsagePanel = lazyPanel(() => import('@/components/UsagePanel.vue'))
 const VersionPanel = lazyPanel(() => import('@/components/VersionPanel.vue'))
 const AccessPanel = lazyPanel(() => import('@/components/AccessPanel.vue'))
+const AccountsPanel = lazyPanel(() => import('@/components/AccountsPanel.vue'))
+const ModelsTable = lazyPanel(() => import('@/components/ModelsTable.vue'))
+const RequestsPanel = lazyPanel(() => import('@/components/RequestsPanel.vue'))
+const SettingsPanel = lazyPanel(() => import('@/components/SettingsPanel.vue'))
 const validTabs: TabID[] = [
   'logs',
   'accounts',
@@ -232,6 +233,13 @@ const navigation: { id: TabID; label: TranslationKey; icon: IconName }[] = [
   { id: 'access', label: 'nav.access', icon: 'access' },
   { id: 'logs', label: 'nav.logs', icon: 'logs' },
 ]
+
+// camoufoxInTask 表示账户页的浏览器登录任务行正在显示 Camoufox 下载进度，此时不再显示顶部横幅
+const camoufoxInTask = computed(
+  () =>
+    currentTab.value === 'accounts' &&
+    accountTasks.value.some((task) => waitsForCamoufox(task, status.value?.camoufox)),
+)
 
 const statusColor = computed(() => {
   if (serviceState.value === 'running') return 'bg-green-500'
@@ -504,7 +512,11 @@ async function logout(): Promise<void> {
             .replace('{active}', config.active_listen_addr)
         }}
       </div>
-      <CamoufoxBanner v-if="status" :camoufox="status.camoufox" @retry="retryCamoufox" />
+      <CamoufoxBanner
+        v-if="status && !camoufoxInTask"
+        :camoufox="status.camoufox"
+        @retry="retryCamoufox"
+      />
       <div
         v-if="config?.invalid.length"
         role="alert"
@@ -527,6 +539,8 @@ async function logout(): Promise<void> {
           :loading="loading.accounts"
           :error="errors.accounts"
           :chrome-import="status?.chrome_import ?? false"
+          :camoufox="status?.camoufox"
+          :geoip="status?.geoip"
           @refresh="loadAccountData"
           @refresh-tasks="loadAccountTasks"
           @task="rememberAccountTask"

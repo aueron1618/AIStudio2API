@@ -329,7 +329,7 @@ function stateClass(record: UsageRecord): string {
                   {{ dateTime(record.time, true) }}
                 </button>
               </td>
-              <td class="px-4 py-2">
+              <td class="px-4 py-2 whitespace-nowrap">
                 <span class="inline-block rounded px-1.5 py-0.5" :class="stateClass(record)">
                   {{ dimensionLabel('state', record.state) }}
                   <span v-if="record.state === 'tool_calls'" class="ml-1 tabular-nums">{{

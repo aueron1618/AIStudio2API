@@ -19,7 +19,6 @@ interface GenerateResponse {
   promptFeedback?: { blockReason?: string }
 }
 
-// VideoOperation 是 Gemini 视频长任务的状态
 interface VideoOperation {
   name: string
   done?: boolean
@@ -98,25 +97,30 @@ interface OpenAIVideo {
   id: string
   model: string
   status: string
+  base?: '/v1' | '/build/v1'
   error?: { message?: string } | null
 }
 
 // createOpenAIVideo 以 multipart 调用 /v1/videos 创建视频任务
 export async function createOpenAIVideo(form: FormData, signal: AbortSignal): Promise<OpenAIVideo> {
   const model = form.get('model')
-  const response = await fetch(`${publicAPIBase(typeof model === 'string' ? model : '')}/videos`, {
+  const modelID = typeof model === 'string' ? model : ''
+  const base = publicAPIBase(modelID)
+  const response = await fetch(`${base}/videos`, {
     method: 'POST',
     headers: headers(false),
     body: form,
     signal,
   })
   if (!response.ok) throw new Error(await errorMessage(response))
-  return (await response.json()) as OpenAIVideo
+  const video = (await response.json()) as OpenAIVideo
+  return { ...video, model: video.model || modelID, base }
 }
 
 // pollDelay 等待一个视频轮询间隔，signal 取消时以 AbortError 结束，到时与取消后都移除取消监听
 function pollDelay(signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
+    signal.throwIfAborted()
     const abort = () => {
       window.clearTimeout(timer)
       reject(new DOMException('Aborted', 'AbortError'))
@@ -132,7 +136,7 @@ function pollDelay(signal: AbortSignal): Promise<void> {
 // waitOpenAIVideo 每 5 秒轮询 OpenAI 视频对象直到完成，返回结果视频地址
 export async function waitOpenAIVideo(video: OpenAIVideo, signal: AbortSignal): Promise<string> {
   let current = video
-  const base = publicAPIBase(video.model)
+  const base = video.base ?? publicAPIBase(video.model)
   while (current.status !== 'completed' && current.status !== 'failed') {
     await pollDelay(signal)
     const response = await fetch(`${base}/videos/${encodeURIComponent(video.id)}`, {

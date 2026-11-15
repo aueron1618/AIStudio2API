@@ -48,6 +48,18 @@ describe('merged translation catalogs', () => {
       'settings.unitMinutes',
       'usage.requestedModel',
       'usage.responseModel',
+      'accounts.byExit',
+      'accounts.geoipFailed',
+      'channel.assistant',
+      'models.accountRiskHelp',
+      'logs.field.continuation',
+      'logs.event.thought_signature',
+      'pg.videoUnreachable',
+      'pg.videoGenerationFailed',
+      'pg.generationStopped',
+      'pg.videoEmptyDescription',
+      'pg.tabGenerating',
+      'pg.tokenUsage',
     ]) {
       expect(catalog.messages[key]?.trim(), key).toBeTruthy()
     }
@@ -74,6 +86,14 @@ describe('merged translation catalogs', () => {
         expect(catalog[key + suffix]).toContain(key)
       }
       expect(catalog['%s' + suffix]).toContain('{0}')
+      for (const key of [
+        '\u8bfb\u53d6\u6d4f\u89c8\u5668\u8bed\u8a00\u4e0e\u65f6\u533a: %w',
+        '\u751f\u6210\u670d\u52a1\u542f\u52a8 | 1/2 | \u51c6\u5907\u6a21\u578b\u76ee\u5f55 | \u7f13\u5b58=%d',
+        '\u7f3a\u5c11 trajectory ID',
+        '\u4e0b\u8f7d IP \u5e93\u5931\u8d25',
+      ]) {
+        expect(catalog[key]?.trim(), key).toBeTruthy()
+      }
     },
   )
 })

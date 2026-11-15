@@ -62,6 +62,12 @@ type Profile struct {
 	TrustedTypes bool
 	// NavigationStart 是页面导航开始的时间，为零时页面时间起点取宿主安装时刻
 	NavigationStart time.Time
+	// Navigation 是顶层页面 PerformanceNavigationTiming 的取值，以导航开始为零点的毫秒数
+	Navigation map[string]any
+	// DOMLoading 是顶层页面旧版 performance.timing.domLoading 相对导航开始的毫秒数
+	DOMLoading int
+	// MediaInputs 是页面未授权时 enumerateDevices 列出的输入设备种类，按 audioinput、videoinput 顺序
+	MediaInputs []string
 }
 
 // closureListenerMapPattern 匹配 Closure 事件库在页面载入时以随机数命名的监听表全局名
@@ -177,6 +183,9 @@ type agent struct {
 	shared          mozjs.Handle
 	track           mozjs.Handle
 	notify          mozjs.Handle
+	activate        mozjs.Handle
+	mouseInput      mozjs.Handle
+	keyInput        mozjs.Handle
 	array           mozjs.Handle
 	top             *realmHost
 	realms          []*realmHost
@@ -398,6 +407,15 @@ func (state *agent) installAgent(result mozjs.Handle) error {
 	if state.notify, err = handleOf(cx.Get(result, "notify")); err != nil {
 		return err
 	}
+	if state.activate, err = handleOf(cx.Get(result, "activate")); err != nil {
+		return err
+	}
+	if state.mouseInput, err = handleOf(cx.Get(result, "mouseInput")); err != nil {
+		return err
+	}
+	if state.keyInput, err = handleOf(cx.Get(result, "keyInput")); err != nil {
+		return err
+	}
 	reporter, err := handleOf(cx.Get(result, "reportMicrotask"))
 	if err != nil {
 		return err
@@ -546,6 +564,9 @@ func (state *agent) realmProfile(realm string) map[string]any {
 		if width, ok := profile.Window["innerWidth"]; ok {
 			values["visualViewport"] = map[string]any{"width": width, "height": profile.Window["innerHeight"]}
 		}
+		if len(profile.Navigation) > 0 {
+			values["performance.navigationEntry"] = profile.Navigation
+		}
 	} else {
 		for _, name := range frameWindowNames {
 			if value, ok := profile.Window[name]; ok {
@@ -562,7 +583,10 @@ func (state *agent) realmProfile(realm string) map[string]any {
 			values["document"] = document
 		}
 	}
-	result := map[string]any{"hasFocus": profile.HasFocus, "window": window, "values": values}
+	result := map[string]any{"hasFocus": profile.HasFocus, "window": window, "values": values, "mediaInputs": append([]string{}, profile.MediaInputs...)}
+	if realm == "top" && len(profile.Navigation) > 0 {
+		result["domLoading"] = profile.DOMLoading
+	}
 	if realm == "top" && len(profile.Globals) > 0 {
 		result["globals"] = profile.Globals
 	}

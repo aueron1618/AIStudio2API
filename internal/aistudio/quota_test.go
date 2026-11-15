@@ -43,8 +43,8 @@ func TestQuotaCooldownConcurrent(t *testing.T) {
 	pool := NewAccountPool([]*Account{account}, 1)
 	checkedAt := time.Now().UTC()
 	cooldown := QuotaCooldown{Until: checkedAt.Add(time.Minute), Reason: "first limit", Escalate: true}
-	until, err := pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, checkedAt, cooldown)
-	if err != nil || until.IsZero() {
+	until, changed, err := pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, checkedAt, cooldown)
+	if err != nil || until.IsZero() || !changed {
 		t.Fatalf("until=%v err=%v", until, err)
 	}
 	const attempts = 16
@@ -57,7 +57,7 @@ func TestQuotaCooldownConcurrent(t *testing.T) {
 		go func() {
 			defer writers.Done()
 			<-start
-			results[index], failures[index] = pool.MarkQuotaCooldownIfGeneration(
+			results[index], _, failures[index] = pool.MarkQuotaCooldownIfGeneration(
 				account.ID, "shared", 1, checkedAt.Add(time.Duration(index+1)*time.Millisecond),
 				QuotaCooldown{Until: checkedAt.Add(time.Hour), Reason: "concurrent limit", Escalate: true},
 			)
@@ -99,10 +99,10 @@ func TestQuotaCooldownStaleResults(t *testing.T) {
 				}}
 				pool := NewAccountPool([]*Account{account}, 1)
 				before := cloneRuntime(account.runtime)
-				until, err := pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", test.generation, now.Add(test.delay), QuotaCooldown{
+				until, changed, err := pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", test.generation, now.Add(test.delay), QuotaCooldown{
 					Until: now.Add(2 * time.Hour), Reason: "stale", Escalate: escalate,
 				})
-				if err != nil || !until.IsZero() || !reflect.DeepEqual(account.runtime, before) {
+				if err != nil || changed || !until.IsZero() || !reflect.DeepEqual(account.runtime, before) {
 					t.Fatalf("until=%v err=%v runtime=%+v want=%+v", until, err, account.runtime, before)
 				}
 				if test.delay != 0 {
@@ -134,7 +134,7 @@ func TestQuotaCooldownSuccessResetsLevel(t *testing.T) {
 			}}
 			pool := NewAccountPool([]*Account{account}, 1)
 			cooldown := QuotaCooldown{Until: now.Add(time.Minute), Reason: "next plan", Escalate: true}
-			until, err := pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, now, cooldown)
+			until, _, err := pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, now, cooldown)
 			if err != nil || until.Before(now.Add(15*time.Minute)) || until.After(time.Now().Add(15*time.Minute)) ||
 				account.runtime.Cooldowns["shared"].Level != 3 || !until.Equal(account.runtime.Cooldowns["shared"].Until) {
 				t.Fatalf("expired plan did not escalate: until=%v err=%v state=%+v", until, err, account.runtime.Cooldowns["shared"])
@@ -150,11 +150,11 @@ func TestQuotaCooldownSuccessResetsLevel(t *testing.T) {
 			if len(account.runtime.Cooldowns) != 1 || account.runtime.Cooldowns["build:shared"].Level != 4 {
 				t.Fatalf("success must clear only matching and global cooldowns: %+v", account.runtime.Cooldowns)
 			}
-			until, err = pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, now, cooldown)
+			until, _, err = pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, now, cooldown)
 			if err != nil || !until.IsZero() || len(account.runtime.Cooldowns) != 1 {
 				t.Fatalf("old error restored cooldown: until=%v err=%v state=%+v", until, err, account.runtime.Cooldowns)
 			}
-			until, err = pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, checkedAt.Add(time.Second), cooldown)
+			until, _, err = pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, checkedAt.Add(time.Second), cooldown)
 			if err != nil || until.IsZero() || account.runtime.Cooldowns["shared"].Level != 1 {
 				t.Fatalf("success did not reset level: until=%v err=%v state=%+v", until, err, account.runtime.Cooldowns["shared"])
 			}
@@ -176,7 +176,7 @@ func TestQuotaCooldownPersistence(t *testing.T) {
 	pool := NewAccountPool([]*Account{account}, 1)
 	now := time.Now().UTC()
 	cooldown := QuotaCooldown{Until: now.Add(time.Minute), Reason: "plan limit", Escalate: true}
-	until, err := pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, now, cooldown)
+	until, _, err := pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, now, cooldown)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestQuotaCooldownPersistence(t *testing.T) {
 	}
 	reloaded := &Account{ID: account.ID, Directory: directory, RuntimePath: path, modelAccessGeneration: 1}
 	pool = NewAccountPool([]*Account{reloaded}, 1)
-	until, err = pool.MarkQuotaCooldownIfGeneration(reloaded.ID, "shared", 1, now.Add(time.Second), cooldown)
+	until, _, err = pool.MarkQuotaCooldownIfGeneration(reloaded.ID, "shared", 1, now.Add(time.Second), cooldown)
 	if err != nil || until.Before(now.Add(5*time.Minute)) || until.After(time.Now().Add(5*time.Minute)) {
 		t.Fatalf("reloaded until=%v err=%v", until, err)
 	}
@@ -298,10 +298,41 @@ func TestQuotaCooldownExplicitRetry(t *testing.T) {
 	if !ok || cooldown.Escalate {
 		t.Fatalf("cooldown=%+v ok=%v", cooldown, ok)
 	}
-	until, err := pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, now, cooldown)
+	until, _, err := pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, now, cooldown)
 	if err != nil || !until.Equal(now.Add(17*time.Second)) || !account.runtime.Cooldowns["shared"].Until.Equal(until) ||
 		account.runtime.Cooldowns["shared"].Level != 0 {
 		t.Fatalf("explicit delay changed: until=%v err=%v state=%+v", until, err, account.runtime.Cooldowns["shared"])
+	}
+}
+
+func TestQuotaCooldownKeepsKnownResetWithShortFallback(t *testing.T) {
+	now := time.Now().UTC()
+	known := CooldownState{Until: now.Add(time.Hour), Reason: DailyLimitKind + ": known reset"}
+	account := &Account{ID: "account", modelAccessGeneration: 1, runtime: accountRuntimeState{Cooldowns: map[string]CooldownState{"shared": known}}}
+	pool := NewAccountPool([]*Account{account}, 1)
+	cooldown, ok := QuotaCooldownForError(&RPCError{StatusCode: http.StatusTooManyRequests, RetryDelay: 17 * time.Second}, now)
+	if !ok {
+		t.Fatal("explicit retry was not recognized")
+	}
+	until, changed, err := pool.MarkQuotaCooldownIfGeneration(account.ID, "shared", 1, now, cooldown)
+	current := account.runtime.Cooldowns["shared"]
+	if err != nil || !changed || !until.Equal(now.Add(17*time.Second)) || !current.Until.Equal(known.Until) || current.Reason != known.Reason || current.Fallback == nil || !current.Fallback.Until.Equal(until) {
+		t.Fatalf("lost known quota reset or fallback: %+v until=%v changed=%v err=%v", current, until, changed, err)
+	}
+	for _, test := range []struct {
+		queued  time.Duration
+		delay   time.Duration
+		blocked bool
+	}{
+		{0, 45 * time.Second, false},
+		{30 * time.Second, 45 * time.Second, true},
+		{CooldownQueueLimit, time.Second, true},
+	} {
+		err := QueuedCoolingError("shared", CooldownState{Until: time.Now().Add(test.delay)}, test.queued)
+		var cooling *AllCoolingError
+		if errors.As(err, &cooling) != test.blocked {
+			t.Fatalf("queued=%v delay=%v err=%v", test.queued, test.delay, err)
+		}
 	}
 }
 

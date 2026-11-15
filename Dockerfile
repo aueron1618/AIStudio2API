@@ -6,7 +6,7 @@ COPY web/ ./
 COPY internal/i18n/messages/ /src/internal/i18n/messages/
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm AS build
 ARG TARGETARCH
 ARG VERSION=dev
 ARG ZIG=0.16.0
@@ -50,7 +50,7 @@ ARG TARGETARCH
 COPY release/linux-$TARGETARCH/aistudio2api /usr/local/bin/aistudio2api
 
 # The font pruner runs on the build platform; it never enters the runtime image.
-FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS browser-tools
+FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm AS browser-tools
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY cmd/prune-camoufox/ ./cmd/prune-camoufox/

@@ -2,6 +2,7 @@ package camoufoxnative
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,7 +18,7 @@ import (
 func TestReloadFailureReleasesPageSetupAndClosesInvalidRuntime(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, peer, commands := newBiDiTestClient(t)
-		worker := &Worker{client: client, connection: client.connection, contextID: "old", page: "old-page", tabs: make(map[string]*tabUse), chats: []*chatTab{{contextID: "old", page: "old-page"}}}
+		worker := &Worker{client: client, connection: client.connection, contextID: "old", page: "old-page", tabs: map[string]*tabUse{"old": {}}, chats: []*chatTab{{contextID: "old", page: "old-page"}}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		done := make(chan error, 1)
@@ -71,6 +72,13 @@ func TestReloadFailureReleasesPageSetupAndClosesInvalidRuntime(t *testing.T) {
 				t.Fatalf("canceled page retained %s", method)
 			}
 		}
+		unload := requireBiDiTestCommand(t, commands)
+		if unload.Method != "browsingContext.navigate" || unload.Params["context"] != "old" || unload.Params["url"] != "about:blank" {
+			t.Fatalf("invalid runtime did not unload its page: %+v", unload)
+		}
+		writeBiDiTestMessage(t, peer, map[string]any{"type": "success", "id": unload.ID, "result": map[string]any{}})
+		synctest.Wait()
+		time.Sleep(pageUnloadDelay)
 		end := requireBiDiTestCommand(t, commands)
 		if end.Method != "session.end" {
 			t.Fatalf("invalid in-place reload did not close the runtime: %+v", end)
@@ -200,6 +208,9 @@ func (fixture *workerPageFixture) reply(t *testing.T, command bidiTestCommand) {
 	case "browsingContext.navigate":
 		id := command.Params["context"].(string)
 		fixture.navigated = append(fixture.navigated, id)
+		if command.Params["url"] == "about:blank" {
+			break
+		}
 		if command.Params["url"] != aiStudioOrigin+"/prompts/new_chat?model=fixture&temporary=true" {
 			t.Fatalf("cold-start URL = %v", command.Params["url"])
 		}
@@ -286,6 +297,13 @@ func TestCloseDoesNotRearmIdleMemoryTimer(t *testing.T) {
 		}
 		closed := make(chan error, 1)
 		go func() { closed <- worker.Close() }()
+		unload := requireBiDiTestCommand(t, fixture.commands)
+		if unload.Method != "browsingContext.navigate" || unload.Params["context"] != "main" || unload.Params["url"] != "about:blank" {
+			t.Fatalf("close did not unload its page: %+v", unload)
+		}
+		fixture.reply(t, unload)
+		synctest.Wait()
+		time.Sleep(pageUnloadDelay)
 		end := requireBiDiTestCommand(t, fixture.commands)
 		if end.Method != "session.end" {
 			t.Fatalf("close command = %+v", end)
@@ -313,7 +331,7 @@ func TestReloadWaitsForAsyncChatResetBeforeBudgetReuse(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(t.Context())
 		body := &protectedResponseBody{ctx: ctx, cancel: cancel, worker: worker, done: true, completed: true,
-			release: func(completed bool) { worker.releaseChat(tab, completed) }}
+			release: func(completed, call bool) { worker.releaseChat(tab, completed && !call) }}
 		if err := body.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -560,6 +578,102 @@ func TestReloadKeepsLiveResponseWithoutWaitingForIt(t *testing.T) {
 		<-finished
 		if len(fixture.live) != 1 || fixture.live["main"] {
 			t.Fatal("last old response did not physically close only its own page")
+		}
+	})
+}
+
+func TestFunctionContinuationRejectsUnavailableTabs(t *testing.T) {
+	body := []byte(`[null,[[[[null,"task"]],"user"],[[[null,"call"]],"model"],[[[null,"result"]],"user"]]]`)
+	contents, err := generateContents(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"ready", "busy", "unsent", "retired", "resetting", "closed", "unowned"} {
+		t.Run(state, func(t *testing.T) {
+			tab := &chatTab{contextID: "main", contents: append([]json.RawMessage(nil), contents[:1]...)}
+			use := &tabUse{}
+			worker := &Worker{contextID: "main", chats: []*chatTab{tab}, tabs: map[string]*tabUse{"main": use}}
+			switch state {
+			case "busy":
+				tab.busy = true
+			case "unsent":
+				tab.unsent = true
+			case "retired":
+				use.retired = true
+			case "resetting":
+				use.resetting = make(chan struct{})
+			case "closed":
+				worker.closed = true
+			case "unowned":
+				delete(worker.tabs, "main")
+			}
+			ready := state == "ready"
+			if worker.ContinuesFunctionCall(body) != ready {
+				t.Fatal("function continuation ignored tab lifecycle state")
+			}
+			acquired, err := worker.acquireFunctionChat(contents)
+			if ready {
+				if err != nil || acquired != tab || !tab.busy || use.requests != 1 {
+					t.Fatalf("function chat was not leased: %v", err)
+				}
+				worker.releaseChat(tab, false)
+				if tab.busy || use.requests != 0 || len(worker.chats) != 1 {
+					t.Fatal("primary function chat was not reusable")
+				}
+			} else if err == nil || acquired != nil {
+				t.Fatal("function result acquired an unavailable tab")
+			}
+		})
+	}
+}
+
+func TestCloseUnloadsRetiredTabsBeforeSessionEnd(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fixture := newWorkerPageFixture(t)
+		worker := fixture.worker
+		worker.tabs["retired"] = &tabUse{retired: true, requests: 1}
+		fixture.live["retired"] = true
+		closed := make(chan error, 1)
+		go func() { closed <- worker.Close() }()
+		unloaded := map[string]bool{}
+		for range 2 {
+			command := requireBiDiTestCommand(t, fixture.commands)
+			if command.Method != "browsingContext.navigate" || command.Params["url"] != "about:blank" || command.Params["wait"] != "complete" {
+				t.Fatalf("close did not unload a tracked page: %+v", command)
+			}
+			unloaded[command.Params["context"].(string)] = true
+			fixture.reply(t, command)
+		}
+		requireNoBiDiTestCommand(t, fixture.commands)
+		time.Sleep(pageUnloadDelay)
+		end := requireBiDiTestCommand(t, fixture.commands)
+		if end.Method != "session.end" || !unloaded["main"] || !unloaded["retired"] {
+			t.Fatalf("tracked pages were not unloaded before session end: %+v", end)
+		}
+		fixture.reply(t, end)
+		if err := <-closed; err != nil || !worker.released || len(worker.tabs) != 0 || worker.idle != nil {
+			t.Fatalf("unload prevented final cleanup: %v", err)
+		}
+	})
+}
+
+func TestCloseUnloadTimeoutStillReleasesWorker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fixture := newWorkerPageFixture(t)
+		closed := make(chan error, 1)
+		go func() { closed <- fixture.worker.Close() }()
+		command := requireBiDiTestCommand(t, fixture.commands)
+		if command.Method != "browsingContext.navigate" {
+			t.Fatalf("unload command = %+v", command)
+		}
+		time.Sleep(4 * time.Second)
+		select {
+		case err := <-closed:
+			if err != nil || !fixture.worker.released || len(fixture.worker.tabs) != 0 {
+				t.Fatalf("timed out unload did not clean up: %v", err)
+			}
+		default:
+			t.Fatal("unload telemetry blocked worker shutdown")
 		}
 	})
 }

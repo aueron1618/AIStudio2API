@@ -237,6 +237,33 @@ func TestRealmHostUpstreamContracts(t *testing.T) {
 	}
 }
 
+func TestRealmHostNavigationAndMediaProfile(t *testing.T) {
+	vm, err := NewRuntime(t.Context(), Options{
+		Challenge: Challenge{Program: "test", GlobalName: "fixture"},
+		Interpreter: `var fixture = {a(program, ready) {
+  ready(async callback => {
+    const entry = performance.getEntriesByType('navigation')[0];
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    callback('!' + String(entry.responseEnd === 12.5 && entry.toJSON().responseEnd === 12.5 &&
+      performance.timing.domLoading - performance.timeOrigin === 15 &&
+      devices.length === 1 && devices[0].kind === 'audioinput' && devices[0].label === ''));
+  }, () => {});
+}};`,
+		Profile: Profile{
+			Locale: "en-US", TimeZone: "UTC", PageURL: "https://aistudio.google.com/prompts/new_chat",
+			NavigationStart: time.Now().Add(-time.Second), DOMLoading: 15,
+			Navigation: map[string]any{"responseEnd": 12.5}, MediaInputs: []string{"audioinput"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Close()
+	if result := realmResult(t, vm); result != "true" {
+		t.Fatalf("navigation/media host profile = %s", result)
+	}
+}
+
 func BenchmarkRealmHost(b *testing.B) {
 	testRealmHost(b, "true").Close()
 	b.ReportAllocs()

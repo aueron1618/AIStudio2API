@@ -2,10 +2,12 @@ import { createSSRApp, nextTick, reactive, ref } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import { api } from '@/api'
+import { useConsole } from '@/console'
 import { messages } from '@/locales/en'
 import { mountSetup } from '@/test-component'
 import type {
   Account,
+  AccountExit,
   AccountDraft,
   AccountLoginInput,
   AccountTask,
@@ -13,6 +15,7 @@ import type {
   CookieBrowser,
 } from '@/types'
 import AccountsPanel from './AccountsPanel.vue'
+import AccountExits from './AccountExits.vue'
 
 vi.mock('@/desktop', () => ({ keepPage: () => () => {} }))
 vi.mock('@/api', async (original) => {
@@ -27,6 +30,7 @@ vi.mock('@/api', async (original) => {
       chromeImportProfiles: vi.fn(),
       importChromeAccounts: vi.fn(),
       refreshAccount: vi.fn(),
+      accountExits: vi.fn(),
     },
   }
 })
@@ -121,6 +125,8 @@ function mount() {
     loading: false,
     error: '',
     chromeImport: false,
+    camoufox: undefined,
+    geoip: undefined,
     onTask: (task: AccountTask) => {
       taskEvents(task)
       props.tasks = [task]
@@ -147,6 +153,8 @@ async function renderImport(
     loading: false,
     error: '',
     chromeImport: false,
+    camoufox: undefined,
+    geoip: undefined,
   })
   app.directive('tooltip', {})
   app.mixin({
@@ -188,6 +196,50 @@ afterEach(() => {
 })
 
 describe('Cookie import preferences and layout', () => {
+  it('groups account egress without leaking proxy passwords or accepting stale lookup results', async () => {
+    let resolveFirst!: (value: AccountExit[]) => void
+    vi.mocked(api.accountExits)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve
+          }),
+      )
+      .mockResolvedValueOnce([
+        { proxy: 'http://user:secret@proxy.example.test:8080', ip: '192.0.2.1', country: 'US' },
+        { proxy: '', ip: '192.0.2.1', country: 'US' },
+        { proxy: 'http://offline.example.test', error: 'offline' },
+      ])
+    const instance = mountSetup<{
+      loadExits: () => Promise<void>
+      groups: { ip: string; accounts: number; error: string }[]
+      loading: boolean
+      proxyText: (proxies: string[]) => string
+    }>(AccountExits, {
+      accounts: [
+        { egress: 'http://user:secret@proxy.example.test:8080' },
+        { egress: '' },
+        { egress: 'http://offline.example.test' },
+      ],
+      geoip: undefined,
+    })
+    cleanups.push(instance.unmount)
+    expect(useConsole().exitLookups.value).toBe(1)
+    await instance.state.loadExits()
+    expect(instance.state.groups).toMatchObject([
+      { ip: '192.0.2.1', accounts: 2 },
+      { accounts: 1, error: 'offline' },
+    ])
+    expect(instance.state.proxyText(['http://user:secret@proxy.example.test:8080'])).not.toContain(
+      'secret',
+    )
+    resolveFirst([{ proxy: '', ip: '192.0.2.2' }])
+    await nextTick()
+    expect(instance.state.groups[0]?.ip).toBe('192.0.2.1')
+    expect(instance.state.loading).toBe(false)
+    expect(useConsole().exitLookups.value).toBe(0)
+  })
+
   it('starts blank without preferences and does not remember untouched defaults', () => {
     const { state } = mount()
     expect(state.cookieEnvironment).toEqual({ proxy: '', locale: '', timezone: '' })
@@ -508,7 +560,6 @@ describe('background Cookie account tasks', () => {
       email: 'existing@example.test',
       profile: 'Default',
       display_name: 'Existing account',
-      locale: 'en',
       restricted: '',
     }
     vi.mocked(api.chromeImportProfiles).mockResolvedValue([

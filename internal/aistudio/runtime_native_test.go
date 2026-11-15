@@ -34,9 +34,10 @@ func (runtime *nativeRuntimeFixture) Proof(_ context.Context, digest, prompt str
 	return "!fixture", nil
 }
 
-func (runtime *nativeRuntimeFixture) RunProof(ctx context.Context, digest, prompt string) (string, error) {
+func (runtime *nativeRuntimeFixture) RunProof(ctx context.Context, digest, prompt string, _ []byte) (string, string, error) {
 	runtime.run = true
-	return runtime.Proof(ctx, digest, prompt)
+	proof, err := runtime.Proof(ctx, digest, prompt)
+	return proof, prompt, err
 }
 
 func (*nativeRuntimeFixture) ProtocolHeaders(context.Context) (http.Header, error) {

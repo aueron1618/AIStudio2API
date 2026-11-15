@@ -2,9 +2,11 @@ package camoufoxnative
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -337,7 +339,10 @@ func TestProtectedCanceledCloseJoinsStopBeforeNextTurn(t *testing.T) {
 		body := &protectedResponseBody{
 			ctx: ctx, cancel: cancel, worker: worker, contextID: tab.contextID, page: tab.page, requestID: "test-request", channel: channel,
 			stop: func() error { stopStarted <- struct{}{}; <-allowStop; return worker.stopTurn(tab) },
-			release: func(completed bool) {
+			release: func(completed, call bool) {
+				if call {
+					t.Error("canceled response reported a function call")
+				}
 				worker.releaseChat(tab, completed)
 				released <- completed
 			},
@@ -408,4 +413,49 @@ func TestProtectedCanceledCloseJoinsStopBeforeNextTurn(t *testing.T) {
 		worker.releaseChat(tab, false)
 		requireNoBiDiTestCommand(t, commands)
 	})
+}
+
+func TestProtectedResponseFunctionMarkerAcrossBoundedChunks(t *testing.T) {
+	marker := string(FunctionCallMarker)
+	for _, test := range []struct {
+		name   string
+		chunks []string
+		call   bool
+	}{
+		{"text", []string{"plain", " response"}, false},
+		{"whole", []string{marker + "function"}, true},
+		{"split", []string{strings.Repeat("x", protectedChunkBytes-len(marker)/2) + marker[:len(marker)/2], marker[len(marker)/2:] + "function"}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			channel := &bidiChannel{notify: make(chan struct{}, 1)}
+			client := &bidiClient{channels: map[string]*bidiChannel{"response": channel}}
+			for _, chunk := range test.chunks {
+				channel.push(base64.StdEncoding.EncodeToString([]byte(chunk)))
+			}
+			channel.push(`{"done":true}`)
+			released := 0
+			body := &protectedResponseBody{ctx: ctx, cancel: cancel, worker: &Worker{client: client}, requestID: "response", channel: channel,
+				release: func(completed, call bool) {
+					released++
+					if !completed || call != test.call {
+						t.Errorf("release completed=%t call=%t", completed, call)
+					}
+				}}
+			data, err := io.ReadAll(body)
+			if err != nil || string(data) != strings.Join(test.chunks, "") || body.call != test.call {
+				t.Fatalf("stream bytes or function marker changed: call=%t err=%v", body.call, err)
+			}
+			if body.tail != nil || body.buffer != nil || channel.queue != nil {
+				t.Fatal("completed stream retained decoded bytes or marker overlap")
+			}
+			if err := body.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := body.Close(); err != nil || released != 1 {
+				t.Fatal("function stream was not released exactly once")
+			}
+		})
+	}
 }

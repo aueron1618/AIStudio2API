@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
@@ -19,6 +20,14 @@ import (
 )
 
 const pageFixtureModels = `[[["models/fixture",null,"v1","Fixture",null,1024,256,["generateContent"]]]]`
+
+const pageFixtureBundle = "https://www.gstatic.com/boq-makersuite/_/js/k=boq-makersuite.MakerSuite.en_US.fixture/exm=_b/m=_b"
+
+const pageFixtureDocument = `<html lang="en"><head><script>var flags = {"WIu0Nc":"fixture-key"};</script>
+<script type="application/json">{"cfb2h":"fixture","goX6ee":[1],"TSDtV":"%.@.[[null,null,\"fixture\"]]]","UUFaWc":"%.@.1]","S6lZl":1}</script>
+<link rel="stylesheet" href="/styles.css"><link rel="preload" as="script" href="/bundle.js"><script src="/bundle.js"></script>
+<link rel="preload" as="script" href="` + pageFixtureBundle + `"><script src="` + pageFixtureBundle + `"></script>
+<link rel="icon" href="/icon.png" sizes="16x16"></head><body></body></html>`
 
 const pageFixtureInterpreter = `var fixture = {a(program, ready) {
   const image = new Image(); image.src = '/probe.png';
@@ -81,7 +90,7 @@ func pageFixtureRoundTrip(t *testing.T, source string, observe func(*http.Reques
 			if request.URL.Query().Get("temporary") != "true" || request.URL.Query().Get("model") != "fixture" || !strings.HasPrefix(request.URL.Path, "/u/3/") {
 				t.Errorf("cold-start URL = %s", request.URL)
 			}
-			body = `<html><head><script>var flags = {"WIu0Nc":"fixture-key"};</script><link rel="stylesheet" href="/styles.css"><link rel="preload" as="script" href="/bundle.js"><script src="/bundle.js"></script><link rel="icon" href="/icon.png" sizes="16x16"></head><body></body></html>`
+			body = pageFixtureDocument
 		case request.URL.String() == waaCreateURL:
 			body = string(challenge)
 		case request.URL.String() == loggingContextURL:
@@ -97,6 +106,25 @@ func pageFixtureRoundTrip(t *testing.T, source string, observe func(*http.Reques
 			response.Header.Set("Cache-Control", "max-age=3600")
 			response.Header.Set("ETag", `"fixture"`)
 			body = "resource"
+		case request.URL.String() == pageFixtureBundle:
+			response.Header.Set("Cache-Control", "max-age=3600")
+			body = scriptLoaderCall + "script);"
+		case strings.HasSuffix(request.URL.Path, "/m="+starterModule):
+			response.Header.Set("Cache-Control", "max-age=3600")
+			body = `var fixtureModels=["models/fixture"];var series={id:"fixture",type:"text",Ek:a=>fixtureModels.includes(a.getName()),yl:[{title:"Fixture"}]};`
+		case strings.HasSuffix(request.URL.Path, "/m="+starterDependency), request.URL.String() == feedbackScript:
+			body = "script"
+		case request.URL.String() == gapiLoaderScript:
+			body = `h:"m;/_/scs/abc-static/_/js/k=fixture/d=1/rs=fixture/m=__features__",le:["fixture"]`
+		case request.URL.Host == "apis.google.com" && strings.HasPrefix(request.URL.Path, "/_/scs/abc-static/_/js/"):
+			body = "script"
+		case strings.HasPrefix(request.URL.String(), cookieBarConfig):
+			body = `{"content":{"mainText":"[This site] uses cookies","moreText":"Learn more","moreUrl":"https://policies.google.com/technologies/cookies"}}`
+		case request.URL.String() == lockupImage || request.URL.String() == googleLogoImage || request.URL.String() == thinkingImage:
+			response.Header.Set("Content-Type", "image/svg+xml")
+			body = "image"
+		case request.URL.Host == "play.google.com" && request.URL.Path == "/log":
+			body = "[]"
 		case request.URL.Path == "/probe.png":
 			response.Header.Set("Content-Type", "image/png")
 			body = "image"
@@ -109,6 +137,62 @@ func pageFixtureRoundTrip(t *testing.T, source string, observe func(*http.Reques
 		response.Body = io.NopCloser(strings.NewReader(body))
 		return response, nil
 	}
+}
+
+func TestGoPageOwnsTelemetryLifetime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		arrived := make(chan struct{})
+		var started sync.Once
+		var requests atomic.Int32
+		transport := &pageTestTransport{roundTrip: func(request *http.Request) (*http.Response, error) {
+			requests.Add(1)
+			started.Do(func() { close(arrived) })
+			<-request.Context().Done()
+			return nil, request.Context().Err()
+		}}
+		runtime, _ := newTestGoPageRuntime(t, transport)
+		runtime.elements = newPageElements(runtime.sendClearcut, runtime.after, runtime.stopTimer, "en-US", time.UTC, nil, "window", "en-US", "models/fixture")
+		runtime.elements.mu.Lock()
+		runtime.elements.pageEvent(veRun, time.Now(), nil)
+		runtime.elements.mu.Unlock()
+		runtime.elements.after(time.Now().Add(time.Hour), func() { t.Error("page element callback outlived page") })
+		runtime.vitals = newPageVitals(runtime.sendClearcut, runtime.after, runtime.stopTimer, pageTelemetry{}, "en-US", time.UTC, time.Now(), map[string]any{"responseStart": 0, "loadEventEnd": 0}, "/prompts/new_chat")
+		runtime.serviceStreamz = newStreamzReporter("en-US", time.UTC, func(body []byte) { runtime.sendClearcut(clearcutPlain, body) }, nil)
+		runtime.serviceStreamz.record(streamzRecord{metric: "wrl", labels: []any{"Create"}, value: 1})
+		runtime.sendClearcut(clearcutPlain, []byte(`[]`))
+		<-arrived
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-runtime.serviceStreamz.done:
+		default:
+			t.Fatal("Close did not join the telemetry reporter")
+		}
+		count := requests.Load()
+		time.Sleep(time.Hour)
+		if requests.Load() != count || len(runtime.timers) != 0 || len(runtime.requests) != 0 || len(runtime.serviceStreamz.pending) != 0 {
+			t.Fatal("closed page retained or dispatched telemetry work")
+		}
+	})
+}
+
+func TestStreamzCloseCancelsAndJoinsMetricRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		reporter := newStreamzReporter("en-US", time.UTC, func([]byte) { t.Error("closed reporter sent metrics") }, func(ctx context.Context) ([]waa.BotGuardMetric, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})
+		<-started
+		reporter.close()
+		reporter.close()
+		reporter.record(streamzRecord{metric: "ec"})
+		if len(reporter.pending) != 0 {
+			t.Fatal("closed reporter retained new records")
+		}
+	})
 }
 
 func TestGoPageColdStartCatalogAndReloadCache(t *testing.T) {
@@ -152,7 +236,7 @@ func TestGoPageColdStartCatalogAndReloadCache(t *testing.T) {
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if proof, err := next.RunProof(t.Context(), "digest", "hello"); err != nil || proof != "!fixture" {
+	if proof, _, err := next.RunProof(t.Context(), "digest", "hello", nil); err != nil || proof != "!fixture" {
 		t.Fatalf("closing the old page damaged the replacement: %q, %v", proof, err)
 	}
 	mu.Lock()
@@ -265,13 +349,13 @@ func TestGoPageCanRebuildCanceledProofVM(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := runtime.RunProof(ctx, "digest", "busy"); !errors.Is(err, context.DeadlineExceeded) {
+	if _, _, err := runtime.RunProof(ctx, "digest", "busy", nil); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("busy proof = %v", err)
 	}
 	if runtime.vm != nil {
 		t.Fatal("page retained an interrupted, unusable VM")
 	}
-	if proof, err := runtime.RunProof(t.Context(), "digest", "next"); err != nil || proof != "!fixture" {
+	if proof, _, err := runtime.RunProof(t.Context(), "digest", "next", nil); err != nil || proof != "!fixture" {
 		t.Fatalf("proof VM was not rebuilt: %q, %v", proof, err)
 	}
 }
@@ -310,7 +394,7 @@ func TestGoPageRefreshOutlivesCallerAndJoinsOnClose(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			done := make(chan error, 1)
-			go func() { _, err := runtime.RunProof(ctx, "digest", "canceled"); done <- err }()
+			go func() { _, _, err := runtime.RunProof(ctx, "digest", "canceled", nil); done <- err }()
 			select {
 			case <-started:
 			case <-time.After(5 * time.Second):
@@ -358,7 +442,7 @@ func TestGoPageRefreshOutlivesCallerAndJoinsOnClose(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("background refresh did not complete")
 			}
-			if proof, err := runtime.RunProof(t.Context(), "digest", "next"); err != nil || proof != "!fixture" {
+			if proof, _, err := runtime.RunProof(t.Context(), "digest", "next", nil); err != nil || proof != "!fixture" {
 				t.Fatalf("refreshed proof = %q, %v", proof, err)
 			}
 			if runtime.vm == previous || creates.Load() != 2 {

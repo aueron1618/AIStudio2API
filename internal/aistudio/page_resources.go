@@ -54,7 +54,14 @@ type pageIcon struct {
 type pageDocument struct {
 	resources []pageResource
 	icons     []pageIcon
+	// lang 是 html 元素的 lang 属性
+	lang string
+	// symbolsFont 是文档内联样式中 Google Symbols 字体的地址
+	symbolsFont string
 }
+
+// symbolsFontPattern 匹配文档内联样式中 Google Symbols 字体的地址
+var symbolsFontPattern = regexp.MustCompile(`font-family:'Google Symbols';[^}]*?src:url\((https://fonts\.gstatic\.com/l/font\?kit=[^)]+)\)`)
 
 // iconSizePattern 匹配 sizes 属性中的一个有效尺寸
 var iconSizePattern = regexp.MustCompile(`(?i)^([1-9][0-9]*)x[1-9][0-9]*$`)
@@ -91,6 +98,14 @@ func parsePageDocument(body []byte, pageURL string) pageDocument {
 			attributes[attribute.Key] = attribute.Val
 		}
 		switch token.DataAtom {
+		case atom.Html:
+			document.lang = attributes["lang"]
+		case atom.Style:
+			if tokenizer.Next() == html.TextToken && document.symbolsFont == "" {
+				if match := symbolsFontPattern.FindSubmatch(tokenizer.Text()); match != nil {
+					document.symbolsFont = string(match[1])
+				}
+			}
 		case atom.Base:
 			if href, ok := attributes["href"]; ok {
 				if parsed, err := base.Parse(href); err == nil {
@@ -251,15 +266,23 @@ func (runtime *goWAARuntime) loadPageIcons(ctx context.Context, document pageDoc
 			continue
 		}
 		runtime.schedule(0, func(ctx context.Context) {
-			_ = runtime.fetchCached(ctx, icon, subresourceHeaders(icon, "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5", "image", "u=6"))
+			_ = runtime.fetchCached(ctx, icon, subresourceHeaders(icon, imageAccept, "image", "u=6"))
 		})
 	}
 }
 
-// fetchCached 按账户页面缓存发出子资源请求：新鲜的缓存不发请求，过期且有校验值时发条件请求，读完响应后更新缓存
+// fetchCached 按账户页面缓存发出子资源请求：新鲜的缓存不发请求，过期且有校验值时发条件请求，读完响应后更新缓存；需要从正文读出内容的资源（前端主程序、入门卡片模块、Google Fonts 样式表、Cookie 提示条脚本与文案、api.js）缓存条目没有记下内容时重新完整下载
 func (runtime *goWAARuntime) fetchCached(ctx context.Context, target string, headers http.Header) error {
 	requested := time.Now()
+	address, err := url.Parse(target)
+	if err != nil {
+		return err
+	}
+	read := noteReader(address)
 	entry, fresh := runtime.pageCache.lookup(target, requested)
+	if read != nil && entry.pageCacheNotes.empty() {
+		entry, fresh = pageCacheEntry{}, false
+	}
 	if fresh {
 		return nil
 	}
@@ -273,7 +296,7 @@ func (runtime *goWAARuntime) fetchCached(ctx context.Context, target string, hea
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(io.Discard, response.Body)
+	body, err := io.ReadAll(response.Body)
 	_ = response.Body.Close()
 	if err != nil {
 		return err
@@ -281,7 +304,64 @@ func (runtime *goWAARuntime) fetchCached(ctx context.Context, target string, hea
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNotModified {
 		return fmt.Errorf("HTTP %d", response.StatusCode)
 	}
-	return runtime.pageCache.store(target, response, time.Now())
+	var notes pageCacheNotes
+	if read != nil && response.StatusCode == http.StatusOK {
+		if notes, err = read(body); err != nil {
+			return err
+		}
+	}
+	return runtime.pageCache.store(target, response, time.Now(), notes)
+}
+
+// empty 判断缓存条目没有记下任何正文内容
+func (notes pageCacheNotes) empty() bool {
+	return notes.Loader == nil && notes.Starters == nil && notes.Fonts == nil && notes.AuditKey == "" && notes.Consent == "" && notes.Gapi == ""
+}
+
+// noteReader 返回从该资源正文读出缓存内容的函数，不需要读正文的资源返回 nil
+func noteReader(address *url.URL) func([]byte) (pageCacheNotes, error) {
+	switch {
+	case camoufoxnative.FrontendBundle(address):
+		return func(body []byte) (pageCacheNotes, error) {
+			position, err := scriptLoaderPosition(body)
+			return pageCacheNotes{Loader: &position}, err
+		}
+	case strings.HasSuffix(address.Path, "/m="+starterModule):
+		return func(body []byte) (pageCacheNotes, error) {
+			series, err := parseStarterSeries(body)
+			return pageCacheNotes{Starters: series}, err
+		}
+	case address.Host == googleFontsHost:
+		return func(body []byte) (pageCacheNotes, error) {
+			return pageCacheNotes{Fonts: latinFontFaces(body)}, nil
+		}
+	case address.String() == cookieBarScript:
+		return func(body []byte) (pageCacheNotes, error) {
+			match := cookieBarKeyPattern.FindSubmatch(body)
+			if match == nil {
+				return pageCacheNotes{}, errors.New("Cookie 提示条脚本缺少 API key")
+			}
+			return pageCacheNotes{AuditKey: string(match[1])}, nil
+		}
+	case strings.HasPrefix(address.String(), cookieBarConfig):
+		return func(body []byte) (pageCacheNotes, error) {
+			text, err := cookieBarText(body)
+			return pageCacheNotes{Consent: text}, err
+		}
+	case address.String() == gapiLoaderScript:
+		return func(body []byte) (pageCacheNotes, error) {
+			loader, err := gapiClientURL(body)
+			return pageCacheNotes{Gapi: loader}, err
+		}
+	}
+	return nil
+}
+
+// notes 返回地址的缓存条目中从正文读出的内容
+func (cache *pageCache) notes(target string) pageCacheNotes {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return cache.entries[target].pageCacheNotes
 }
 
 // firefoxRedirectionLimit 是 Firefox network.http.redirection-limit 的默认值
@@ -351,6 +431,23 @@ type pageCacheEntry struct {
 	CacheControl string    `json:"cacheControl,omitempty"`
 	LastModified string    `json:"lastModified,omitempty"`
 	ETag         string    `json:"etag,omitempty"`
+	pageCacheNotes
+}
+
+// pageCacheNotes 是从子资源正文中读出、随缓存条目保存的内容，每种资源只有对应的一项
+type pageCacheNotes struct {
+	// Loader 是前端主程序中脚本加载调用的位置
+	Loader *sourcePosition `json:"loader,omitempty"`
+	// Starters 是入门卡片模块中各模型系列的入门卡片
+	Starters []starterSeries `json:"starters,omitempty"`
+	// Fonts 是 Google Fonts 样式表中拉丁字符子集的字体地址，按字体族名索引
+	Fonts map[string]string `json:"fonts,omitempty"`
+	// AuditKey 是 Cookie 提示条脚本发 CreateAuditRecord 用的 API key
+	AuditKey string `json:"auditKey,omitempty"`
+	// Consent 是 Cookie 提示条按页面语言显示的正文
+	Consent string `json:"consent,omitempty"`
+	// Gapi 是 api.js 加载 gapi client 模块的地址
+	Gapi string `json:"gapi,omitempty"`
 }
 
 // loadPageCache 读取账户目录中的页面缓存元数据，文件不存在时为空缓存
@@ -394,14 +491,32 @@ func (cache *pageCache) lookup(target string, now time.Time) (pageCacheEntry, bo
 	return entry, age+now.Sub(entry.Received) < maxAge
 }
 
-// store 按响应更新地址的缓存条目并写回文件：304 刷新新鲜度，200 替换条目，no-store 删除条目
-func (cache *pageCache) store(target string, response *http.Response, received time.Time) error {
+// loader 返回前端主程序缓存条目中脚本加载调用的位置
+func (cache *pageCache) loader(target string) (sourcePosition, error) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	entry, ok := cache.entries[target]
+	if !ok || entry.Loader == nil {
+		return sourcePosition{}, fmt.Errorf("页面缓存缺少前端主程序 %s 的脚本加载调用位置", target)
+	}
+	return *entry.Loader, nil
+}
+
+// starters 返回入门卡片模块缓存条目中的模型系列
+func (cache *pageCache) starters(target string) []starterSeries {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return cache.entries[target].Starters
+}
+
+// store 按响应更新地址的缓存条目并写回文件：304 刷新新鲜度，200 替换条目并记下从正文读出的内容，no-store 删除条目
+func (cache *pageCache) store(target string, response *http.Response, received time.Time, notes pageCacheNotes) error {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	entry := cache.entries[target]
 	header := response.Header
 	if response.StatusCode == http.StatusOK {
-		entry = pageCacheEntry{LastModified: header.Get("Last-Modified"), ETag: header.Get("ETag")}
+		entry = pageCacheEntry{LastModified: header.Get("Last-Modified"), ETag: header.Get("ETag"), pageCacheNotes: notes}
 	}
 	if value := header.Get("Last-Modified"); value != "" {
 		entry.LastModified = value

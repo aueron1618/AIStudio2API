@@ -36,8 +36,17 @@ export interface Account {
   pairing_renewed_at?: string
   // transition 是账户启停的后台收尾阶段：draining 等待在途请求结束并关闭 Worker，syncing 同步模型目录
   transition?: 'draining' | 'syncing'
-  // active_requests 是账户上进行中的请求数
   active_requests: number
+}
+
+// AccountExit 是一个账户出口代理的公网 IP 与按 IP 定位的国家，proxy 为空时是直连，查询失败时 error 为原因
+export interface AccountExit {
+  proxy: string
+  ip?: string
+  country?: string
+  timezone?: string
+  locale?: string
+  error?: string
 }
 
 interface ProxyPoolEntry {
@@ -75,7 +84,6 @@ export interface ChromeImportProfile {
   profile: string
   display_name: string
   email: string
-  locale: string
   // restricted 是账户服务受限的原因，受限的账户不能导入
   restricted: string
 }
@@ -98,7 +106,7 @@ export interface CookieAccountItem {
   auth_user: number
 }
 
-// CookieAccountsInput 是一次导入的 Cookie 账户与共用的账户环境，语言与时区为空时调试浏览器账户沿用浏览器的设置
+// CookieAccountsInput 是一次导入的 Cookie 账户与共用的账户环境，语言与时区为空时按出口位置填写
 export interface CookieAccountsInput extends AccountLoginInput {
   items: CookieAccountItem[]
 }
@@ -151,8 +159,8 @@ interface AccountCounters {
   auth_required: number
 }
 
-// CamoufoxStatus 是 Camoufox 是否就绪、是否正在下载或解压、正在进行的下载与最近一次准备失败的原因
-export interface CamoufoxStatus {
+// PreparationStatus 是 Camoufox 或出口 IP 库是否就绪、是否正在下载或解压、正在进行的下载与最近一次准备失败的原因
+export interface PreparationStatus {
   ready: boolean
   preparing: boolean
   download?: { received: number; total: number }
@@ -166,7 +174,9 @@ export interface ServiceStatus {
   version: string
   active_requests: number
   accounts: AccountCounters
-  camoufox: CamoufoxStatus
+  camoufox: PreparationStatus
+  // geoip 是识别出口所在地的 IP 库的准备状态，结构与 camoufox 相同
+  geoip: PreparationStatus
   chrome_import: boolean
 }
 
@@ -197,8 +207,24 @@ export interface AdminLog {
   level: 'INFO' | 'WARN' | 'ERROR'
   source: string
   message: string
+  fields?: LogField[]
+  stage?: AdminLogStage
   event: string
   request?: RequestLog
+}
+
+// LogField 是日志按顺序排列的一个字段，key 为英文标识
+export interface LogField {
+  key: string
+  value: string
+}
+
+// AdminLogStage 是分阶段运行日志所属的阶段，step 与 steps 为当前步骤与总步骤数，state 为结束状态
+interface AdminLogStage {
+  name: string
+  step?: number
+  steps?: number
+  state?: 'completed' | 'failed' | 'cancelled'
 }
 
 // RequestLog 对应请求日志的结构化载荷
@@ -320,7 +346,7 @@ export interface ThinkingBudget {
   can_disable?: boolean
 }
 
-export type UpstreamChannel = 'playground' | 'build'
+export type UpstreamChannel = 'playground' | 'build' | 'assistant'
 
 export interface Cooldown {
   account_id: string
@@ -558,6 +584,10 @@ export interface PromptSummary {
   description: string
   created_at: string
   updated_at: string
+  // turns 是保存时对话的消息条数，没有记录时缺省
+  turns?: number
+  // tokens 是保存时整段对话的 token 数，没有记录时缺省
+  tokens?: number
 }
 
 // PromptInput 是保存对话时提交的内容
@@ -565,6 +595,8 @@ export interface PromptInput<T> {
   title: string
   model: string
   description: string
+  turns?: number
+  tokens?: number
   data: T
 }
 

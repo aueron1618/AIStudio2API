@@ -1,5 +1,5 @@
 import type { Model } from '@/types'
-import { Capability, hasCategory, hasCode } from '../catalog'
+import { Capability, hasCategory, hasCode, isOmniModel } from '../catalog'
 
 // PageKind 是 Playground 的页面类型
 export type PageKind = 'chat' | 'live' | 'image' | 'video' | 'speech' | 'music'
@@ -21,6 +21,7 @@ export const unsavedKinds: readonly PageKind[] = ['live', 'speech', 'music']
 export function pageKindOf(model: Model | undefined): PageKind {
   if (model === undefined) return 'chat'
   if (hasCode(model, Capability.LiveRoute)) return 'live'
+  if (isOmniModel(model)) return 'chat'
   if (hasCode(model, Capability.ImageGeneration)) return 'image'
   if (hasCode(model, Capability.VideoRoute)) return 'video'
   if (hasCode(model, Capability.SpeechRoute)) return 'speech'

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -204,5 +205,44 @@ func TestRootChannelRoutes(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestAssistantModelAliasesUseBuildRoutes(t *testing.T) {
+	models := []aistudio.Model{
+		{ID: "shared", Methods: []string{"generateContent"}, Channels: []string{"playground"}, Capabilities: map[string]bool{"chat_model": true}},
+		{ID: "shared-build", Methods: []string{"generateContent"}, Channels: []string{"assistant"},
+			Capabilities: map[string]bool{"assistant_route": true, "chat_model": true}, CapabilityOptions: map[string][]string{"aliases": {"assistant-alt"}}},
+	}
+	account := &aistudio.Account{ID: "assistant@example.test", Config: accountTestConfig("assistant@example.test"), State: aistudio.AccountReady}
+	pool := aistudio.NewAccountPool([]*aistudio.Account{account}, 1)
+	pool.SetUpstreamChannels([]aistudio.Channel{aistudio.ChannelPlayground})
+	if err := pool.SetCatalog(account.ID, aistudio.BenefitTierFree, models); err != nil {
+		t.Fatal(err)
+	}
+	service := &trackedService{pool: pool, models: models, modelMapping: []config.ModelAlias{{Alias: "friendly", Model: "shared-build(high)"}}}
+	const antiPrefix = "\u6297\u622a\u65ad-"
+	handler := api.NewHandler(service, api.Config{AntiTruncation: func() bool { return true }})
+	for _, prefix := range []string{"/v1", "/build/v1"} {
+		for _, name := range []string{"shared-build", "assistant-alt", "friendly", antiPrefix + "shared-build", antiPrefix + "assistant-alt", antiPrefix + "friendly"} {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, prefix+"/models/"+url.PathEscape(name), nil))
+			want := http.StatusNotFound
+			if prefix == "/build/v1" {
+				want = http.StatusOK
+			}
+			if response.Code != want {
+				t.Fatalf("assistant model %s on %s: %d %s", name, prefix, response.Code, response.Body)
+			}
+			if want == http.StatusOK {
+				var model aistudio.Model
+				if err := json.Unmarshal(response.Body.Bytes(), &model); err != nil || !model.Capabilities["assistant_route"] || !slices.Equal(model.Channels, []string{"build"}) {
+					t.Fatalf("assistant alias lost capability or explicit channel: %+v, %v", model, err)
+				}
+			}
+		}
+	}
+	if got := service.mappedModel("friendly(low)"); got != "shared-build(low)" {
+		t.Fatalf("model mapping lost assistant selection or reasoning override: %q", got)
 	}
 }

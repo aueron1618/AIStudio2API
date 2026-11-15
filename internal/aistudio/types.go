@@ -37,6 +37,14 @@ type FileRef struct {
 	MIME string `json:"mime,omitempty"`
 }
 
+// UploadRef 表示经 AI Studio /_/upload 上传的附件引用
+type UploadRef struct {
+	MIME string `json:"mime"`
+	Path string `json:"path"`
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
 // VideoMetadata 是视频 Part 的截取起止与采样帧率，起止为 Duration 字符串
 type VideoMetadata struct {
 	StartOffset string   `json:"start_offset,omitempty"`
@@ -152,6 +160,7 @@ type Part struct {
 	InlineData          *Blob                `json:"inline_data,omitempty"`
 	ExternalMedia       *ExternalMedia       `json:"external_media,omitempty"`
 	File                *FileRef             `json:"file,omitempty"`
+	Upload              *UploadRef           `json:"upload,omitempty"`
 	FunctionCall        *FunctionCall        `json:"function_call,omitempty"`
 	FunctionResult      *FunctionResult      `json:"function_result,omitempty"`
 	ExecutableCode      *ExecutableCode      `json:"executable_code,omitempty"`
@@ -443,6 +452,8 @@ type GenerateRequest struct {
 	AntiTruncation bool `json:"-"`
 	// The appended control turn must stay attached to the latest genuine turn.
 	antiTruncationControlTail bool
+	// KeepAbnormalFinish 表示异常结束重新生成耗尽且没有输出时仍以该结束原因结束，供按官方形状输出的 Gemini 入口使用
+	KeepAbnormalFinish bool `json:"-"`
 	// continuationRound 为自动续写的轮次，首轮为 0
 	continuationRound int
 	// continuationToken 为上一轮响应给出的续写 token

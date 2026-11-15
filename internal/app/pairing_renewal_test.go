@@ -22,7 +22,7 @@ func TestRestrictedAccountSkipsRenewalAndInPlaceImport(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			created, err := admin.addAccount(t.Context(), aistudio.DefaultAccountConfig("restricted@example.test"), state, "", "renewal-fixture")
+			created, err := admin.addAccount(t.Context(), accountTestConfig("restricted@example.test"), state, "", "renewal-fixture")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -173,7 +173,7 @@ func TestPairingRenewalRequiresTokenAndVerifiedIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cfg := aistudio.DefaultAccountConfig("user@example.test")
+			cfg := accountTestConfig("user@example.test")
 			cfg.AuthUser, cfg.Proxy = 3, "http://127.0.0.1:4321"
 			account, err := admin.addAccount(t.Context(), cfg, state, "", "renewal-fixture")
 			if err != nil {

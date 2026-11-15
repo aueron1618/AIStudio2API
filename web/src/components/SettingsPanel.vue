@@ -172,13 +172,21 @@ const capacityLocked = computed(() => {
   return keys.length > 0 ? keys.join(', ') : undefined
 })
 
-// capacityLimit 是 Worker 滑块的上限：账户数、已保存峰值与当前峰值中最大的一个
+// previewFallback 表示保存的预览地址已在本次启动生效，但端口不可用、预览服务改用了空闲端口
+const previewFallback = computed(
+  () =>
+    props.config !== null &&
+    !props.config.management_restart_required &&
+    form.preview_listen_addr === props.config.preview_listen_addr &&
+    props.config.preview_listen_addr !== props.config.active_preview_listen_addr,
+)
+
+// capacityLimit 是 Worker 滑块的上限：所选 WAA 后端默认峰值的两倍（SpiderMonkey 20、Camoufox 10），账户数或输入的峰值更大时取其值
 const capacityLimit = computed(() =>
   Math.max(
+    form.waa_backend === 'camoufox' ? 20 : 40,
     props.accounts.length,
-    props.config?.max_active_workers ?? 0,
     form.max_active_workers,
-    1,
   ),
 )
 
@@ -191,7 +199,7 @@ function setWorkerRange(range: number[] | undefined): void {
 
 // capacitySummary 是当前容量下最多同时处理的请求数：运行的 Worker 数不超过账户数
 const capacitySummary = computed(() =>
-  t('settings.capacitySummary')
+  t(props.accounts.length === 1 ? 'settings.capacitySummaryOne' : 'settings.capacitySummary')
     .replace(
       '{requests}',
       String(
@@ -393,6 +401,8 @@ async function saveConfig(): Promise<void> {
   try {
     const saved = await api.saveConfig({
       ...form,
+      warm_worker_limit: Math.min(form.warm_worker_limit, form.max_active_workers),
+      warm_startup_concurrency: Math.min(form.warm_startup_concurrency, form.max_active_workers),
       ...(adminPassword.value ? { admin_password: adminPassword.value } : {}),
     })
     emit('saved', saved)
@@ -541,7 +551,17 @@ async function saveConfig(): Promise<void> {
                 spellcheck="false"
               />
               <p
-                v-if="form.preview_listen_addr !== config.active_preview_listen_addr"
+                v-if="previewFallback"
+                class="mt-1 flex items-start gap-1.5 text-xs [overflow-wrap:anywhere] text-yellow-300"
+              >
+                <UiIcon name="warning" :size="14" class="mt-px shrink-0" />{{
+                  t('settings.previewFallback')
+                    .replace('{configured}', config.preview_listen_addr)
+                    .replace('{active}', config.active_preview_listen_addr)
+                }}
+              </p>
+              <p
+                v-else-if="form.preview_listen_addr !== config.active_preview_listen_addr"
                 class="mt-1 text-xs break-all text-gray-500"
               >
                 {{ t('settings.activeValue') }}: {{ config.active_preview_listen_addr }}
@@ -701,7 +721,7 @@ async function saveConfig(): Promise<void> {
                     v-for="item in capacityItems"
                     :key="item.field"
                     :for="`setting-${item.field}`"
-                    class="block text-xs text-gray-400"
+                    class="flex flex-col justify-between text-xs text-gray-400"
                   >
                     {{ t(item.label) }}
                     <input
@@ -927,6 +947,7 @@ async function saveConfig(): Promise<void> {
             <SettingRow
               :label="t('settings.modelMapping')"
               group-id="setting-model-mapping"
+              wide
               :description="t('settings.modelMappingHelp')"
               effect="service"
               :changed="changedFields.has('model_mapping')"
@@ -946,6 +967,7 @@ async function saveConfig(): Promise<void> {
             <SettingRow
               :label="t('settings.modelChannels')"
               group-id="setting-model-channels"
+              wide
               :description="t('settings.modelChannelsHelp')"
               effect="immediate"
               :changed="changedFields.has('model_channels')"

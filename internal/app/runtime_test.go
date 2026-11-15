@@ -2,17 +2,22 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
+	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 )
 
@@ -98,7 +103,7 @@ func TestGenerateWithRetryHonorsAccountSwitchBudget(t *testing.T) {
 			defer cancel()
 			request := aistudio.GenerateRequest{ID: "switch-budget", Model: "shared"}
 			service.requests.start(request, cancel)
-			acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool, failures *int) (*aistudio.AccountLease, error) {
+			acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool, failures *int, _ *time.Duration) (*aistudio.AccountLease, error) {
 				if calls == 0 {
 					*failures += test.coldFailures
 				}
@@ -171,7 +176,7 @@ func TestGenerateWithRetryStreamInterruption(t *testing.T) {
 				}
 				service.requests.start(request, cancel)
 				events := make(chan aistudio.Event)
-				acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool, _ *int) (*aistudio.AccountLease, error) {
+				acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool, _ *int, _ *time.Duration) (*aistudio.AccountLease, error) {
 					return service.pool.AcquireFor(ctx, selection)
 				}
 				go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
@@ -227,7 +232,7 @@ func TestGenerateWithRetryCancellation(t *testing.T) {
 			request := aistudio.GenerateRequest{ID: "cancel-test", Model: "shared", Unary: unary}
 			service.requests.start(request, cancel)
 			events := make(chan aistudio.Event)
-			acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool, _ *int) (*aistudio.AccountLease, error) {
+			acquire := func(ctx context.Context, selection aistudio.AccountSelection, _ bool, _ *int, _ *time.Duration) (*aistudio.AccountLease, error) {
 				return service.pool.AcquireFor(ctx, selection)
 			}
 			go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
@@ -292,7 +297,7 @@ func TestGenerateWithRetryQuotaFallbackKeepsChannel(t *testing.T) {
 				request := aistudio.GenerateRequest{ID: "quota-limit-test", Model: "shared"}
 				service.requests.start(request, cancel)
 				var fallbacks []bool
-				acquire := func(ctx context.Context, selection aistudio.AccountSelection, quotaFallback bool, _ *int) (*aistudio.AccountLease, error) {
+				acquire := func(ctx context.Context, selection aistudio.AccountSelection, quotaFallback bool, _ *int, _ *time.Duration) (*aistudio.AccountLease, error) {
 					fallbacks = append(fallbacks, quotaFallback)
 					if selection.Channel != channel {
 						return nil, errors.New("quota fallback lost the fixed URL channel")
@@ -347,6 +352,329 @@ func TestForwardTerminalErrorFinishesRequestBeforeDrain(t *testing.T) {
 	for range destination {
 	}
 	assertRetryLeasesReleased(t, service)
+}
+
+func TestDispatchQueueDoesNotBlockIndependentAPIKeyScopes(t *testing.T) {
+	manager, _ := newWorkerBudgetTest(t, 2, 2, 1, 1)
+	pool := manager.pool
+	pool.SetAPIKeyAccounts(map[string][]string{"key-a": {"a@example.test"}, "key-b": {"b@example.test"}})
+	selection := aistudio.AccountSelection{ModelID: "shared", Method: "generateContent"}
+	unrestricted := dispatchKey(selection)
+	selection.AllowedAccountIDs = []string{}
+	if dispatchKey(selection) == unrestricted {
+		t.Fatal("explicit empty scope shares a dispatch queue with unrestricted requests")
+	}
+	selection.AllowedAccountIDs = nil
+	if _, err := manager.Worker(t.Context(), "b@example.test", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	busy, err := pool.AcquireFor(t.Context(), aistudio.AccountSelection{AccountID: "a@example.test", ModelID: "shared", Method: "generateContent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &trackedService{pool: pool, workers: manager, requests: manager.requests}
+	ctxA, cancelA := context.WithCancel(aistudio.ContextWithAPIKey(t.Context(), "key-a"))
+	first := make(chan error, 1)
+	go func() {
+		failures, cooled := 0, time.Duration(0)
+		lease, err := service.acquireWarmLease(ctxA, selection, false, &failures, &cooled)
+		if lease != nil {
+			err = errors.Join(err, lease.Release())
+		}
+		first <- err
+	}()
+	t.Cleanup(func() {
+		cancelA()
+		_ = busy.Release()
+		select {
+		case <-first:
+		case <-time.After(5 * time.Second):
+			t.Error("canceled queued request did not stop")
+		}
+	})
+	awaitWorkerBudget(t, func() bool {
+		manager.dispatch.mu.Lock()
+		defer manager.dispatch.mu.Unlock()
+		return len(manager.dispatch.waiters) == 1
+	})
+	ctxB, cancelB := context.WithTimeout(aistudio.ContextWithAPIKey(t.Context(), "key-b"), time.Second)
+	defer cancelB()
+	failures, cooled := 0, time.Duration(0)
+	lease, err := service.acquireWarmLease(ctxB, selection, false, &failures, &cooled)
+	if err != nil {
+		t.Fatalf("unrelated key was blocked behind a busy scoped account: %v", err)
+	}
+	if lease.Account().ID != "b@example.test" {
+		t.Fatal("queued request escaped its API key scope")
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDispatchQueueRekeysLiveAPIKeyBindings(t *testing.T) {
+	manager, _ := newWorkerBudgetTest(t, 2, 2, 1, 1)
+	pool := manager.pool
+	allowed := []string{"a@example.test", "b@example.test"}
+	pool.SetAPIKeyAccounts(map[string][]string{"key-a": allowed, "key-b": allowed})
+	if _, err := manager.Worker(t.Context(), "b@example.test", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	busy := make([]*aistudio.AccountLease, 0, len(allowed))
+	type result struct {
+		key, account string
+		err          error
+	}
+	results := make(chan result, 2)
+	started, received := 0, 0
+	t.Cleanup(func() {
+		cancel()
+		for _, lease := range busy {
+			_ = lease.Release()
+		}
+		for range started - received {
+			workerBudgetResult(t, results)
+		}
+	})
+	for _, id := range allowed {
+		lease, err := pool.AcquireFor(ctx, aistudio.AccountSelection{AccountID: id, ModelID: "shared", Method: "generateContent"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		busy = append(busy, lease)
+	}
+	service := &trackedService{pool: pool, workers: manager, requests: manager.requests}
+	selection := aistudio.AccountSelection{ModelID: "shared", Method: "generateContent"}
+	for _, key := range []string{"key-a", "key-b"} {
+		started++
+		go func() {
+			requestCtx := aistudio.ContextWithAccountScope(aistudio.ContextWithAPIKey(ctx, key), allowed)
+			failures, cooled := 0, time.Duration(0)
+			lease, err := service.acquireWarmLease(requestCtx, selection, false, &failures, &cooled)
+			value := result{key: key, err: err}
+			if lease != nil {
+				value.account = lease.Account().ID
+				value.err = errors.Join(value.err, lease.Release())
+			}
+			results <- value
+		}()
+		awaitWorkerBudget(t, func() bool {
+			manager.dispatch.mu.Lock()
+			defer manager.dispatch.mu.Unlock()
+			return len(manager.dispatch.waiters) == started
+		})
+	}
+	pool.SetAPIKeyAccounts(map[string][]string{"key-a": {allowed[0]}, "key-b": {allowed[1]}})
+	if err := busy[1].Release(); err != nil {
+		t.Fatal(err)
+	}
+	completed := workerBudgetResult(t, results)
+	received++
+	if completed.err != nil || completed.key != "key-b" || completed.account != allowed[1] {
+		t.Fatalf("live scope update did not unblock the independent ready account: %+v", completed)
+	}
+	select {
+	case value := <-results:
+		received++
+		t.Fatalf("the still-busy account unexpectedly completed: %+v", value)
+	default:
+	}
+}
+
+func TestDispatchQueuePreservesFIFOAcrossLiveScopeChanges(t *testing.T) {
+	pool := aistudio.NewAccountPool(nil, 1)
+	pool.SetAPIKeyAccounts(map[string][]string{"first": {"a", "b"}, "second": {"a", "b"}})
+	queue := newDispatchQueue(pool)
+	selection := aistudio.AccountSelection{ModelID: "shared", Method: "generateContent"}
+	first := queue.join(aistudio.ContextWithAPIKey(t.Context(), "first"), selection)
+	second := queue.join(aistudio.ContextWithAPIKey(t.Context(), "second"), selection)
+	for _, scopes := range []map[string][]string{
+		{"first": {"a"}, "second": {"a"}},
+		{"first": {"a", "b"}, "second": {"a", "b"}},
+	} {
+		pool.SetAPIKeyAccounts(scopes)
+		if queue.turn(second, selection) || !queue.turn(first, selection) {
+			t.Fatal("later waiter overtook the original head after a common scope change")
+		}
+	}
+	queue.setStarting(first, true)
+	if !queue.turn(second, selection) {
+		t.Fatal("a starting worker blocked the next request")
+	}
+	queue.setStarting(first, false)
+	queue.leave(first)
+	if !queue.turn(second, selection) {
+		t.Fatal("removing the head did not advance the queue")
+	}
+	queue.leave(second)
+}
+
+type dispatchScopeBarrier struct {
+	context.Context
+	entered chan struct{}
+	resume  chan struct{}
+	once    sync.Once
+}
+
+func (barrier *dispatchScopeBarrier) Value(key any) any {
+	barrier.once.Do(func() {
+		close(barrier.entered)
+		<-barrier.resume
+	})
+	return barrier.Context.Value(key)
+}
+
+func TestDispatchQueueUsesOneBindingSnapshotPerTurn(t *testing.T) {
+	pool := aistudio.NewAccountPool(nil, 1)
+	pool.SetAPIKeyAccounts(map[string][]string{"first": {"a", "b"}, "second": {"a", "b"}})
+	queue := newDispatchQueue(pool)
+	selection := aistudio.AccountSelection{ModelID: "shared", Method: "generateContent"}
+	barrier := &dispatchScopeBarrier{
+		Context: aistudio.ContextWithAPIKey(t.Context(), "first"), entered: make(chan struct{}), resume: make(chan struct{}),
+	}
+	release := sync.OnceFunc(func() { close(barrier.resume) })
+	t.Cleanup(release)
+	queue.join(barrier, selection)
+	second := queue.join(aistudio.ContextWithAPIKey(t.Context(), "second"), selection)
+	result := make(chan bool, 1)
+	go func() { result <- queue.turn(second, selection) }()
+	workerBudgetResult(t, barrier.entered)
+	pool.SetAPIKeyAccounts(map[string][]string{"first": {"a"}, "second": {"a"}})
+	release()
+	if workerBudgetResult(t, result) || queue.turn(second, selection) {
+		t.Fatal("mixed binding epochs let a later equivalent request overtake the head")
+	}
+}
+
+type assistantLifecycleFixture struct {
+	page camoufoxnative.PageCatalog
+	send func(context.Context, aistudio.RPCRequest) (*aistudio.RPCResponse, error)
+}
+
+func (fixture *assistantLifecycleFixture) PageCatalog(ctx context.Context, _ string, _ bool) (camoufoxnative.PageCatalog, error) {
+	return fixture.page, ctx.Err()
+}
+
+func (fixture *assistantLifecycleFixture) Do(ctx context.Context, rpc aistudio.RPCRequest) (*aistudio.RPCResponse, error) {
+	return fixture.send(ctx, rpc)
+}
+
+func (fixture *assistantLifecycleFixture) DoProtected(ctx context.Context, _ aistudio.GenerateRequest, rpc aistudio.RPCRequest) (*aistudio.RPCResponse, error) {
+	return fixture.send(ctx, rpc)
+}
+
+func (fixture *assistantLifecycleFixture) DoProtectedApplet(ctx context.Context, _ aistudio.AppletProtectedRequest, rpc aistudio.RPCRequest) (*aistudio.RPCResponse, error) {
+	return fixture.send(ctx, rpc)
+}
+
+func TestServiceStopJoinsAssistantCompanionsBeforeWorkerReset(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager, probe := newWorkerBudgetTest(t, 0, 1, 1, 1)
+		row := make([]any, 65)
+		row[0], row[3], row[5], row[6] = "models/shared", "Shared", 1024, 256
+		row[7], row[64] = []string{"generateContent", "countTokens"}, []int{1, 48}
+		catalog, err := json.Marshal([]any{[]any{row}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		step := make([]any, 16)
+		step[0] = []any{[]any{[]any{[]any{nil, "complete answer"}}, "model"}}
+		step[11], step[12], step[15] = 1, 1, []int{4, 2, 1}
+		stream, err := json.Marshal([]any{[]any{[]any{nil, nil, []any{step}, "trajectory"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		entered := make(chan context.Context, 1)
+		resume := make(chan struct{})
+		release := sync.OnceFunc(func() { close(resume) })
+		fixture := &assistantLifecycleFixture{page: camoufoxnative.PageCatalog{Logging: []byte("[]"), Tier: []byte("[1]"), Models: catalog}}
+		fixture.send = func(ctx context.Context, rpc aistudio.RPCRequest) (*aistudio.RPCResponse, error) {
+			body := "[]"
+			switch rpc.Method {
+			case "ListCloudApiKeys":
+				body = `[[[null,null,"fixture-key"]]]`
+			case "CreateApplet":
+				body = `[null,["applet",null,null,["Title","Description"]]]`
+			case "CodeAssistantOffline":
+				body = `["task","trajectory"]`
+			case "StreamCodeAssistantOfflineGeneration":
+				body = string(stream)
+			case "ProvisionAndInitializeApplet":
+				entered <- ctx
+				<-resume
+				_, err := manager.Worker(ctx, rpc.AccountID, "shared")
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("stopped assistant companion could recreate a worker: %v", err)
+				}
+				return nil, err
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return &aistudio.RPCResponse{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {aistudio.JSONProtobufContentType}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
+		client := aistudio.NewClient(aistudio.ClientOptions{Transport: fixture, Protected: fixture, Pages: fixture})
+		pooled := aistudio.NewPooledService(manager.pool, client)
+		for _, id := range manager.pool.EnabledAccounts() {
+			if _, err := pooled.RefreshAccountModels(t.Context(), id, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		service := newTrackedService(t.Context(), pooled, manager.pool, manager.requests, manager, time.Minute)
+		t.Cleanup(func() {
+			release()
+			_, _ = service.Stop()
+		})
+		if _, _, err := service.Start(t.Context(), func() {}); err != nil {
+			t.Fatal(err)
+		}
+		firstLifecycle := service.assistantLifecycle
+		requestCtx, cancel, err := service.dataRequestContext(aistudio.ContextWithChannel(t.Context(), aistudio.ChannelBuild))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cancel()
+		request := aistudio.GenerateRequest{AccountID: "a@example.test", Model: "shared-build", Contents: []aistudio.Content{{Role: aistudio.RoleUser, Parts: []aistudio.Part{{Text: "reply"}}}}}
+		events, err := pooled.Generate(requestCtx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for event := range events {
+			if event.Kind == aistudio.EventError {
+				t.Fatal(event.Err)
+			}
+		}
+		companionCtx := workerBudgetResult(t, entered)
+		stopped := make(chan error, 1)
+		go func() { _, err := service.Stop(); stopped <- err }()
+		workerBudgetResult(t, companionCtx.Done())
+		synctest.Wait()
+		select {
+		case err := <-stopped:
+			t.Fatalf("Stop returned before its retained companion was drained: %v", err)
+		default:
+		}
+		release()
+		if err := workerBudgetResult(t, stopped); err != nil {
+			t.Fatal(err)
+		}
+		if service.assistantLifecycle != nil {
+			t.Fatal("stopped service retained its active assistant scope")
+		}
+		assertWorkerBudget(t, manager, probe, 0)
+		for _, status := range manager.pool.Status() {
+			if status.ActiveRequests != 0 {
+				t.Fatalf("assistant cleanup leaked an account lease: %+v", status)
+			}
+		}
+		if _, _, err := service.Start(t.Context(), func() {}); err != nil || service.assistantLifecycle == firstLifecycle || service.assistantLifecycle == nil {
+			t.Fatalf("restart did not create an independent assistant scope: %v", err)
+		}
+		if _, err := pooled.Generate(context.WithoutCancel(requestCtx), request); !errors.Is(err, context.Canceled) {
+			t.Fatalf("request admitted before Stop escaped into the new generation: %v", err)
+		}
+	})
 }
 
 func TestVideoTaskPreservesRequestScope(t *testing.T) {

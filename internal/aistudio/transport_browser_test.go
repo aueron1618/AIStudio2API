@@ -1,6 +1,7 @@
 package aistudio
 
 import (
+	"net/http"
 	"reflect"
 	"testing"
 	"time"
@@ -34,13 +35,29 @@ func TestBrowserRoundTripperFirefoxHTTP2(t *testing.T) {
 		dest     string
 		priority string
 		weight   uint8
-	}{{"document", "u=0, i", 41}, {"empty", "u=0", 41}, {"empty", "", 21}, {"script", "", 21}, {"image", "u=5, i", 11}} {
+	}{{"document", "u=0, i", 41}, {"empty", "u=0", 41}, {"empty", "", 21}, {"script", "", 21}, {"image", "u=5, i", 11}, {"font", "", 31}, {"image", "u=4, i", 12}, {"empty", "u=6", 1}, {"image", "u=6", 21}} {
 		header := fhttp.Header{"Sec-Fetch-Dest": {item.dest}}
 		if item.priority != "" {
 			header.Set("Priority", item.priority)
 		}
 		if got := firefoxStreamPriority(header); got != (http2.PriorityParam{Weight: item.weight}) {
 			t.Fatalf("Sec-Fetch-Dest=%s Priority=%q 的头部优先级=%+v，Firefox 158 的权重字节为 %d", item.dest, item.priority, got, item.weight)
+		}
+	}
+}
+
+func TestBrowserCORSContentTypeClassification(t *testing.T) {
+	for _, test := range []struct {
+		values []string
+		unsafe bool
+	}{
+		{nil, true},
+		{[]string{"text/plain;charset=UTF-8"}, false},
+		{[]string{"application/json"}, true},
+	} {
+		got := corsRequestHeaders(http.Header{"Content-Type": test.values})
+		if (len(got) == 1 && got[0] == "content-type") != test.unsafe {
+			t.Fatalf("Content-Type=%v unsafe=%v", test.values, got)
 		}
 	}
 }

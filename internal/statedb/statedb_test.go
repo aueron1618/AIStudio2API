@@ -1,6 +1,7 @@
 package statedb
 
 import (
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -11,7 +12,7 @@ import (
 
 func TestStateRoundTripAndLoadRelease(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runtime", "states.db")
-	store, err := Open(path, func(_, message string) { t.Error(message) })
+	store, err := Open(path, func(_, message string, attrs ...any) { t.Error(message, attrs) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +22,7 @@ func TestStateRoundTripAndLoadRelease(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(path, func(_, message string) { t.Error(message) })
+	reopened, err := Open(path, func(_, message string, attrs ...any) { t.Error(message, attrs) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,8 +38,8 @@ func TestStateRoundTripAndLoadRelease(t *testing.T) {
 
 func TestStateSaveFailureRollsBack(t *testing.T) {
 	var warnings []string
-	store, err := Open(filepath.Join(t.TempDir(), "states.db"), func(level, message string) {
-		warnings = append(warnings, level+": "+message)
+	store, err := Open(filepath.Join(t.TempDir(), "states.db"), func(level, message string, attrs ...any) {
+		warnings = append(warnings, fmt.Sprintf("%s: %s %v", level, message, attrs))
 	})
 	if err != nil {
 		t.Fatal(err)

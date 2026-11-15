@@ -58,8 +58,8 @@ func TestRequestErrorPayloads(t *testing.T) {
 		write func(http.ResponseWriter, error)
 		want  map[string]any
 	}{
-		{"openai", writeOpenAIRequestError, map[string]any{"error": map[string]any{"message": err.Error(), "type": "requests", "code": "rate_limit_exceeded", "param": nil}}},
-		{"anthropic", writeAnthropicRequestError, map[string]any{"type": "error", "error": map[string]any{"type": "rate_limit_error", "message": err.Error()}}},
+		{"openai", writeOpenAIRequestError, map[string]any{"error": map[string]any{"message": err.Error() + ". Please try again in 2s.", "type": "requests", "code": "rate_limit_exceeded", "param": nil}}},
+		{"anthropic", writeAnthropicRequestError, map[string]any{"type": "error", "error": map[string]any{"type": "rate_limit_error", "message": err.Error() + ". Please try again in 2s."}}},
 		{"gemini", writeGeminiRequestError, map[string]any{"error": map[string]any{"code": float64(429), "message": err.Error(), "status": "RESOURCE_EXHAUSTED", "details": []any{map[string]any{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "2s"}}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,7 +171,11 @@ func TestRetryMetadataHTTP(t *testing.T) {
 			t.Fatal(err)
 		}
 		errBody := payload["error"].(map[string]any)
-		if errBody["message"] != failure.Error() {
+		message := failure.Error()
+		if !gemini {
+			message += ". Please try again in 2s."
+		}
+		if errBody["message"] != message {
 			t.Fatalf("upstream message lost: %s", raw)
 		}
 		if gemini && !reflect.DeepEqual(errBody["details"], []any{map[string]any{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "2s"}}) {

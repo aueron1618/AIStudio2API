@@ -491,6 +491,12 @@ func Load(path string) (Config, error) {
 		}
 	}
 	defaults := Default().envValues()
+	if _, ok := values["WARM_WORKER_LIMIT"]; !ok {
+		cfg.WarmWorkerLimit = min(cfg.WarmWorkerLimit, cfg.MaxActiveWorkers)
+	}
+	if _, ok := values["WARM_STARTUP_CONCURRENCY"]; !ok {
+		cfg.WarmStartupConcurrency = min(cfg.WarmStartupConcurrency, cfg.MaxActiveWorkers)
+	}
 	for failed := true; failed; {
 		failed = false
 		for _, check := range configChecks {

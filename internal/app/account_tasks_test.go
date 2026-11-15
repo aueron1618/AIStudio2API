@@ -26,7 +26,7 @@ func TestAccountTaskLifecycleInterruptsLockedLogin(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			account, err := admin.addAccount(ctx, aistudio.DefaultAccountConfig("user@example.test"), state, "", "")
+			account, err := admin.addAccount(ctx, accountTestConfig("user@example.test"), state, "", "")
 			if err != nil {
 				t.Fatal(err)
 			}

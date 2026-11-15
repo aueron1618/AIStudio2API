@@ -50,7 +50,21 @@ func (d *FrameDecoder) Decode(raw json.RawMessage) ([]Event, error) {
 	}
 	if isJSONNull(frame[0]) {
 		if feedbackRaw := rawAt(frame, 1); !isJSONNull(feedbackRaw) {
-			return nil, decodePromptFeedback(feedbackRaw, raw)
+			feedback, err := decodePromptFeedback(feedbackRaw, raw)
+			if err != nil {
+				return nil, err
+			}
+			if usageRaw := rawAt(frame, 2); !isJSONNull(usageRaw) {
+				usage, complete, err := decodeUsage(usageRaw, raw)
+				if err != nil {
+					return nil, err
+				}
+				if complete {
+					usage = excludeSystemRole(usage, d.systemRoleTokens)
+					feedback.Usage = &usage
+				}
+			}
+			return nil, feedback
 		}
 		return nil, nil
 	}
@@ -83,13 +97,11 @@ func (d *FrameDecoder) Decode(raw json.RawMessage) ([]Event, error) {
 			d.latestToken = frameToken
 		}
 	}
-	events := make([]Event, 0, 4)
+	events := make([]Event, 0, 1)
 	if len(candidate) > 0 && !isJSONNull(candidate[0]) {
-		contentEvents, err := d.decodeContent(candidate[0], raw)
-		if err != nil {
+		if events, err = d.decodeContent(events, candidate[0], raw); err != nil {
 			return nil, err
 		}
-		events = append(events, contentEvents...)
 	}
 	if citationsRaw := rawAt(candidate, 6); !isJSONNull(citationsRaw) {
 		citations, err := decodeCitations(citationsRaw, raw)
@@ -201,24 +213,24 @@ func excludeSystemRole(usage Usage, tokens int64) Usage {
 	return usage
 }
 
-func decodePromptFeedback(raw json.RawMessage, evidence json.RawMessage) error {
+func decodePromptFeedback(raw json.RawMessage, evidence json.RawMessage) (*PromptFeedbackError, error) {
 	feedback, err := rawArray(raw, "$[0][][1]", evidence)
 	if err != nil {
-		return withMethod(err, "GenerateContent")
+		return nil, withMethod(err, "GenerateContent")
 	}
 	reason, err := rawInt64(rawAt(feedback, 0), "$[0][][1][0]", evidence)
 	if err != nil {
-		return withMethod(err, "GenerateContent")
+		return nil, withMethod(err, "GenerateContent")
 	}
 	var message string
 	_ = json.Unmarshal(rawAt(feedback, 2), &message)
 	var ratings []SafetyRating
 	if ratingsRaw := rawAt(feedback, 1); !isJSONNull(ratingsRaw) {
 		if ratings, err = decodeSafetyRatings(ratingsRaw, "$[0][][1][1]", evidence); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return &PromptFeedbackError{Reason: decodePromptBlockReason(reason), Message: message, SafetyRatings: ratings, Raw: append(json.RawMessage(nil), raw...)}
+	return &PromptFeedbackError{Reason: decodePromptBlockReason(reason), Message: message, SafetyRatings: ratings, Raw: append(json.RawMessage(nil), raw...)}, nil
 }
 
 func decodePromptBlockReason(reason int64) string {
@@ -300,13 +312,14 @@ func (d *FrameDecoder) End() error {
 	return &StreamInterruptedError{Method: "GenerateContent", Frames: d.frames, Err: errMissingFinishFrame}
 }
 
-func (d *FrameDecoder) decodeContent(raw json.RawMessage, evidence json.RawMessage) ([]Event, error) {
+// decodeContent 把候选内容各 part 的事件追加到 events
+func (d *FrameDecoder) decodeContent(events []Event, raw json.RawMessage, evidence json.RawMessage) ([]Event, error) {
 	content, err := rawArray(raw, "$[0][][0][0][0]", evidence)
 	if err != nil {
 		return nil, withMethod(err, "GenerateContent")
 	}
 	if len(content) == 0 {
-		return nil, nil
+		return events, nil
 	}
 	role, err := rawString(rawAt(content, 1), "$[0][][0][0][0][1]", evidence)
 	if err != nil {
@@ -317,24 +330,22 @@ func (d *FrameDecoder) decodeContent(raw json.RawMessage, evidence json.RawMessa
 	}
 	partsRaw := rawAt(content, 0)
 	if isJSONNull(partsRaw) {
-		return nil, nil
+		return events, nil
 	}
 	parts, err := rawArray(partsRaw, "$[0][][0][0][0][0]", evidence)
 	if err != nil {
 		return nil, withMethod(err, "GenerateContent")
 	}
-	events := make([]Event, 0, len(parts))
 	for index, partRaw := range parts {
-		partEvents, err := d.decodePart(partRaw, fmt.Sprintf("$[0][][0][0][0][0][%d]", index), evidence)
-		if err != nil {
+		if events, err = d.decodePart(events, partRaw, fmt.Sprintf("$[0][][0][0][0][0][%d]", index), evidence); err != nil {
 			return nil, err
 		}
-		events = append(events, partEvents...)
 	}
 	return events, nil
 }
 
-func (d *FrameDecoder) decodePart(raw json.RawMessage, path string, evidence json.RawMessage) ([]Event, error) {
+// decodePart 把一个 part 的事件追加到 events
+func (d *FrameDecoder) decodePart(events []Event, raw json.RawMessage, path string, evidence json.RawMessage) ([]Event, error) {
 	part, err := rawArray(raw, path, evidence)
 	if err != nil {
 		return nil, withMethod(err, "GenerateContent")
@@ -353,7 +364,7 @@ func (d *FrameDecoder) decodePart(raw json.RawMessage, path string, evidence jso
 			return nil, withMethod(err, "GenerateContent")
 		}
 	}
-	events := make([]Event, 0, 2)
+	start := len(events)
 	textEvent := -1
 	if textRaw := rawAt(part, 1); !isJSONNull(textRaw) {
 		text, err := rawString(textRaw, path+"[1]", raw)
@@ -438,8 +449,8 @@ func (d *FrameDecoder) decodePart(raw json.RawMessage, path string, evidence jso
 			}
 		}
 	}
-	if len(events) == 0 && signature != "" {
-		return []Event{{Kind: EventThoughtSignature, ThoughtSignature: signature}}, nil
+	if len(events) == start && signature != "" {
+		events = append(events, Event{Kind: EventThoughtSignature, ThoughtSignature: signature})
 	}
 	return events, nil
 }

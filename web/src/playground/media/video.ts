@@ -12,21 +12,19 @@ import { modelMatches } from '../catalog'
 import { pageKindOf } from './kinds'
 import { requestTitle } from '../title'
 
-// VideoProtocol 是视频页发送请求使用的公开协议
 type VideoProtocol = 'gemini' | 'openai-videos'
 
-// videoProtocols 是视频页协议下拉的选项
 export const videoProtocols: { value: VideoProtocol; label: string }[] = [
   { value: 'gemini', label: 'Gemini API' },
   { value: 'openai-videos', label: 'OpenAI Videos' },
 ]
 
-// VideoFrame 是视频请求中的一张帧图片或参考图
+// VideoFrame 是视频示例代码中的一张帧图片或参考图
 export interface VideoFrame extends InlineImage {
   name: string
 }
 
-// VideoSettings 是视频页运行设置
+// VideoSettings 是视频示例代码使用的模型与运行设置
 export interface VideoSettings {
   model: string
   protocol: VideoProtocol
@@ -35,7 +33,6 @@ export interface VideoSettings {
   resolution: string
 }
 
-// VideoTurn 是视频页的一轮：用户轮次记录提示词与图片，模型轮次记录生成的视频地址
 interface VideoTurn {
   id: string
   role: 'user' | 'model'
@@ -53,32 +50,29 @@ interface VideoTurn {
   error?: string
 }
 
-// VideoTask 是模型轮次在服务端的视频任务：Gemini API 为 operation 名，OpenAI Videos 为视频 ID
 interface VideoTask {
   protocol: VideoProtocol
   id: string
+  model?: string
+  base?: '/v1' | '/build/v1' | undefined
 }
 
-// VideoData 是保存到对话库的视频会话
 export interface VideoData {
   kind: 'video'
   settings: VideoSettings
   turns: VideoTurn[]
 }
 
-// VideoOption 是运行设置下拉中的一项，disabled 时附官网提示
 interface VideoOption<T> {
   value: T
   disabled: boolean
 }
 
-// maxReferences 是官网参考图上限
 export const maxReferences = 3
 
 // resolutionOrder 按清晰度排列分辨率
 const resolutionOrder = ['720p', '1080p', '4k']
 
-// models 返回实时目录中的视频模型
 function models(): Model[] {
   return useConsole().models.value.filter((model) => pageKindOf(model) === 'video')
 }
@@ -88,10 +82,12 @@ function optionList(model: Model | undefined, key: string): string[] {
   return model?.capability_options?.[key] ?? []
 }
 
-// defaultSettings 返回官网默认设置：16:9、8 秒、模型的第一档分辨率
+// defaultSettings 返回视频示例代码的默认设置：16:9、8 秒、模型的第一档分辨率
 export function defaultSettings(model: Model | undefined): VideoSettings {
   const aspects = optionList(model, 'video_aspect_ratios')
-  const resolutions = sortedResolutions(model)
+  const resolutions = [...optionList(model, 'video_output_resolutions')].sort(
+    (a, b) => resolutionOrder.indexOf(a) - resolutionOrder.indexOf(b),
+  )
   return {
     model: model?.id ?? '',
     protocol: 'gemini',
@@ -280,7 +276,12 @@ function resume(): void {
     task.protocol === 'openai-videos'
       ? [
           await waitOpenAIVideo(
-            { id: task.id, model: state.settings.model, status: 'queued' },
+            {
+              id: task.id,
+              model: task.model ?? state.settings.model,
+              status: 'queued',
+              ...(task.base !== undefined && { base: task.base }),
+            },
             signal,
           ),
         ]
@@ -307,6 +308,7 @@ async function save(empty = false): Promise<void> {
     title: state.title,
     model: state.settings.model,
     description: state.description,
+    turns: state.turns.length,
     data: {
       kind: 'video',
       settings: state.settings,
@@ -419,7 +421,11 @@ async function run(): Promise<void> {
     await save()
     if (openAI) {
       const video = await createOpenAIVideo(body as FormData, signal)
-      await keepTask(turn, { protocol: 'openai-videos', id: video.id }, owner)
+      await keepTask(
+        turn,
+        { protocol: 'openai-videos', id: video.id, model: model.id, base: video.base },
+        owner,
+      )
       return [await waitOpenAIVideo(video, signal)]
     }
     const operation = await createVideo(model.id, body, signal)

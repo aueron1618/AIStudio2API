@@ -15,6 +15,7 @@
 
 <p>
   Playground 生成通道 &nbsp;•&nbsp;
+  Build 代码助手对话通道 &nbsp;•&nbsp;
   多账户高并发<br>
   Camoufox 与 SpiderMonkey 双 WAA 后端 &nbsp;•&nbsp;
   Claude Code、Codex 等 Agent 客户端 &nbsp;•&nbsp;
@@ -31,6 +32,7 @@
 ## 核心能力
 
 - **固定通道入口**: 本 fork 的 `UPSTREAM_CHANNELS` 默认保留 Playground 与 Build；`/v1` 固定 Playground，`/build/v1` 固定 Build，不跨通道回退。Build 应用代理是旧通道，上游已停用其生成，返回 `PROXY_GENERATION_DISABLED` 时保留上游原因；免费账户的两个通道共用同一模型的每日请求次数
+- **Build 对话模型**: Build 对话面板可选的模型各提供一个 `<模型>-build`（如 `gemini-3.8-flash-build`），由 Build 写代码助手连同其系统提示词回复，支持函数调用、工具结果续接与 Google 搜索，用量计入 Build 对话额度（免费请求或 Google AI 订阅额度）；每个账户使用一个 Build 应用，同一段对话在应用中续接，服务重启后照常续接。这类模型的每次请求都带有 Build 写代码助手自带的系统提示词注入，回答风格、格式与身份会受其影响，请按用途自行评估
 - **多账户高并发**: 识别 Free、Pro、Ultra 与 Plus 权益，按实时模型目录在账户间轮询或优先复用
 - **低内存与两种 WAA 后端**: 默认由进程内 SpiderMonkey 生成官方 proof，不常驻浏览器；零热池按需启动，空闲 30 秒后释放 Worker。仍可选择 Camoufox 后端，旧配置 `WAA_BACKEND=go` 自动迁移为 `spidermonkey`
 - **四套 API 协议**: OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 与 Gemini GenerateContent；Responses 支持 `/v1/responses/compact` 与 `compaction`、`compaction_trigger` 输入项的上下文压缩，Anthropic Messages 支持 `context_management` 的工具结果与思考清理和阈值压缩
@@ -46,10 +48,10 @@
 - **视频生成**: 视频长任务与图片转视频由 Gemini Omni 生成；Gemini Omni 通过四套生成接口接收文本、图片与视频输入，输出文本与 MP4 视频
 - **Deep Research**: Pro 与 Ultra 账户可通过四套生成接口与 Interactions 的 `agent` 字段调用 Deep Research，输出研究过程、带引用的报告与图表
 - **Agent 与 Antigravity**: 实时目录中的 `interaction_task` Agent 经上游后台 Interaction 运行；试用页提供目录支持的工具与设置，Antigravity 的模型选择取自其目录配置，不把普通模型或 Build 路由强制改成 Agent
-- **决策模型**: `gemini-decision-1` 经 `/v1beta/decisions` 对同一份输入一次回答多个是非、单选与评分问题，返回校准后的概率与置信度；输入可以是文本、图片、音频、视频与 PDF，只计输入 token；AI Studio 官网前端尚未调用这个模型，服务经网页的 CreateDecision 请求调用
+- **决策模型**: `gemini-decision-1` 经 `/v1beta/decisions` 对同一份输入一次回答多个是非、单选与评分问题，返回校准后的概率与置信度；输入可以是文本、图片、音频、视频与 PDF，只计输入 token；这个模型在 AI Studio 官网中隐藏，官网选中后只显示示例应用，本服务可以直接使用
 - **YouTube 输入**: YouTube 视频 URL 作为外部视频附件读取；开启 `YOUTUBE_LINKS` 后，消息文本中的 YouTube 链接同样作为视频读取
 - **视频理解设置**: Gemini 与 Interactions 支持逐视频的起止时间、0–24 FPS 范围内的正数采样率和静态/Agentic 处理；Agentic 返回服务端处理步骤并支持历史续接
-- **智能模型切换**: 从 AI Studio 实时发现模型并按 `model` 字段路由；开启 `DISCOVER_HIDDEN_MODELS` 后，官网前端已配置、账户模型列表尚未列出的模型经上游确认可用后同样可以调用
+- **智能模型切换**: 从 AI Studio 实时发现模型并按 `model` 字段路由；开启 `DISCOVER_HIDDEN_MODELS` 后，AI Studio 官网尚未公开的模型在确认账户能用后也会加入模型列表
 - **Google 工具**: 支持 Search、Image Search、URL Context、Code Execution 和 Maps
 - **Files 与 Transcribe**: 支持文件上传、查询、内容读取、删除和音频转录
 - **Live 与 Robotics**: 通过 WebSocket 支持文本、音频、JPEG、媒体结束、工具调用、恢复和中断
@@ -65,7 +67,7 @@
 - **macOS 桌面版**: macOS 13 或更高版本，Apple 芯片与 Intel 通用
 - **Linux 桌面版**: 基于 Ubuntu 22.04 构建，使用 GTK 3 与 WebKit2GTK 4.1，例如 Ubuntu 22.04、Debian 12 或更新版本；deb 安装这些依赖与 Camoufox 运行库，AppImage 另需下一行的 Camoufox 运行库
 - **Linux Release 运行**: 解压 `aistudio2api-<版本>-linux-<amd64或arm64>.tar.gz`，进入同名目录后运行 `./aistudio2api`；选择 Camoufox 时需要 Firefox 系运行库与 Xvfb，Debian/Ubuntu 执行 `sudo apt-get update && sudo apt-get satisfy -y "libgtk-3-0, libasound2t64 | libasound2, libx11-xcb1, xvfb"`
-- **源码运行**: Go 1.27+，推荐 Node.js 24.15 与 npm 11；启用 CGO，Windows 使用 [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releases) 的 UCRT clang，macOS 使用 Xcode Command Line Tools，Linux 使用 [Zig](https://ziglang.org/download/) 0.16；当前平台的 SpiderMonkey 与 libwebp 静态库分别从 [Mag1cFall/firefox](https://github.com/Mag1cFall/firefox/releases) 与 [Mag1cFall/libwebp](https://github.com/Mag1cFall/libwebp/releases) 的 Releases 下载
+- **源码运行**: Go 1.27.3+，推荐 Node.js 24.15 与 npm 11（也支持 Node.js 22.18+、24.11+ 或 26+）；启用 CGO，Windows 使用 [llvm-mingw](https://github.com/mstorsjo/llvm-mingw/releases) 的 UCRT clang，macOS 使用 Xcode Command Line Tools，Linux 使用 [Zig](https://ziglang.org/download/) 0.16；当前平台的 SpiderMonkey 与 libwebp 静态库分别从 [Mag1cFall/firefox](https://github.com/Mag1cFall/firefox/releases) 与 [Mag1cFall/libwebp](https://github.com/Mag1cFall/libwebp/releases) 的 Releases 下载
 - **操作系统**: Windows、macOS、Linux
 - **内存**: 默认进程内 SpiderMonkey、零常驻 Worker；首次请求和大上下文仍需要额外内存。原生 JS 堆不由 Go 的 `GOMEMLIMIT` 直接约束，需观察进程 RSS。配置取舍见 [运行时内存](docs/memory.md)
 - **网络**: 稳定的互联网连接访问 Google AI Studio
@@ -144,7 +146,7 @@ sudo apt install ./aistudio2api-<版本>-linux-amd64.deb
 
 #### 1. 安装依赖
 
-- Go 1.27 或更高版本
+- Go 1.27.3 或更高版本
 - 推荐 Node.js 24.15 与 npm 11；也支持 Node.js 22.18+、24.11+ 或 26+
 - C/C++ 编译器：macOS 为 Xcode Command Line Tools，Linux 为 [Zig](https://ziglang.org/download/) 0.16
 
@@ -238,7 +240,7 @@ docker build --target no-browser -t aistudio2api:no-browser .
 - 添加账户：把能登录 Google 的电脑上的 `auth/<Google 邮箱>/` 复制到 `data/auth/`；或在管理页面账户页点击“远程添加”取得配对令牌，经 SSH 隧道 `ssh -L 2048:127.0.0.1:2048 <服务器>` 后在该电脑运行 `setup --remote http://127.0.0.1:2048`
 - 添加账户：内置浏览器版可在“添加账户”中选择“浏览器登录”，在管理页面打开的登录窗口中登录 Google；两种版本均可粘贴 Cookie 并选择 HTTP 验证，或把能登录 Google 的电脑上的 `auth/<Google 邮箱>/` 复制到 `data/auth/`
 - `PROXY` 与账户代理从容器内访问，代理运行在宿主机时填写宿主机的局域网地址，并允许代理接受局域网连接
-- 容器默认使用 UTC，不固定 `TZ`。未显式指定的账户时区、服务日志与按日账本统计使用服务器时区；需要其他时区时，在已有 `environment` 下追加 `TZ: <IANA 时区>`，不要替换管理认证与 API 密钥条目。账户时区也可单独设置
+- 容器默认使用 UTC，不固定 `TZ`。服务日志与按日账本统计使用服务器时区；需要其他时区时，在已有 `environment` 下追加 `TZ: <IANA 时区>`，不要替换管理认证与 API 密钥条目。新账户未指定的语言与时区按出口 IP 的地理位置填写，CDP 导入优先沿用浏览器地区，也可在账户页单独设置
 - 修改 Compose 同目录的 `.env` 或 `docker-compose.yml` 后执行 `docker compose up -d --force-recreate`，仅 `restart` 不会更新容器环境变量；修改 `data/.env` 中未被环境变量覆盖的配置后可执行 `docker compose restart`。更新镜像执行 `docker compose pull && docker compose up -d`；在源码目录中执行 `docker compose up -d --build` 从源码构建
 
 ## 快速开始
@@ -259,7 +261,7 @@ docker build --target no-browser -t aistudio2api:no-browser .
    ./aistudio2api setup --login
    ```
 
-   登录完成后会从 AI Studio 页面读取 Google 邮箱，并为账户授权 Google Drive。账户保存到 `.env` 中 `AISTUDIO_AUTH_STATES` 指向的目录；语言和时区默认读取当前电脑设置，也可以通过 `--locale`、`--timezone` 指定。
+   登录完成后会从 AI Studio 页面读取 Google 邮箱，并为账户授权 Google Drive。账户保存到 `.env` 中 `AISTUDIO_AUTH_STATES` 指向的目录；语言和时区默认按出口 IP 的地理位置填写，也可以通过 `--locale`、`--timezone` 指定。
 
 2. **启动图形界面**:
    - Windows 双击 `aistudio2api.exe`
@@ -269,7 +271,7 @@ docker build --target no-browser -t aistudio2api:no-browser .
 
 3. **添加其他账户**:
    - 打开“账户”页面，点击“添加账户”选择方式
-    - “从 Chrome 导入”可多选本机 Chrome 账户；受验证的同邮箱账户可原地重导入，保留已有账户配置与资源归属。原始 Cookie/CDP 导入不覆盖已有账户
+   - “从 Chrome 导入”可多选本机 Chrome 账户；受验证的同邮箱账户可原地重导入，保留已有账户配置与资源归属。原始 Cookie/CDP 导入不覆盖已有账户
    - “粘贴 Cookie”支持粘贴或读文件：Cookie 请求头、多行文本、Cookie-Editor JSON 数组、含 `cookies` 的 storage-state JSON、Netscape 文件；每项 UTF-8 最大 1 MiB、最多 1000 条 Cookie。需包含有效的 `SAPISID`、`__Secure-1PAPISID`、`__Secure-3PAPISID`。请从 Network 复制完整 Cookie，`document.cookie` 会遗漏 HttpOnly。默认在无头浏览器中验证，也可显式选择 HTTP 验证；失败不会自动切换验证方式。成功后识别真实邮箱并保存轮换 Cookie，已有账户不会被覆盖
    - 管理接口 `POST /api/accounts/import/cookies` 使用 `{items:[{email?,cookies?,cdp?,auth_user,method?}],proxy?,locale?,timezone?}`，每批最多 100 项、JSON 上限 8 MiB。`method` 在每一项内，省略时为 `browser`，`http` 必须显式选择；`auth_user` 为 `/u/N/` 的会话序号 0 到 9，省略时为 0。上传 `email` 不是可信身份，受管理登录与同源保护
    - 创建、重新登录、Chrome 与 Cookie 导入均返回 `202 {task}`，不是同步导入成功；通过 `GET /api/accounts/tasks` 或 SSE `account_tasks` 查看各项结果。明显非法的 `method` / `auth_user` 在接收任务前返回 400；解析、验证与重复账户失败写入 `task.items[].code`。不再提供旧的 201 同步单对象导入
@@ -278,7 +280,8 @@ docker build --target no-browser -t aistudio2api:no-browser .
    - “从指纹浏览器导入”自动列出本机指纹浏览器与 Chromium 中已登录 AI Studio 的窗口及其语言与时区，勾选后导入，账户沿用该浏览器的语言与时区；浏览器需开启远程调试
    - “浏览器登录”会打开独立 Camoufox 窗口，登录完成后自动识别邮箱、授权 Google Drive 并保存；Google 要求验证身份时，在该窗口或手机上确认
    - 服务器没有图形界面，或从其他电脑、经反向代理打开管理页面时，“浏览器登录”与“重新登录”的 Camoufox 在服务器上无头运行，画面显示在管理页面的全屏登录窗口中，在其中点击、输入与粘贴，点“取消”结束登录
-   - 账户代理、语言区域与时区可在导入/登录/编辑对话框设置。新账户地区不预填，当前为手工输入 locale/IANA 时区，不提供候选选择；Cookie 对话框中的可选字段位于“更多设置”。保存写入账户配置，不只是界面语言
+   - 账户代理、语言区域与时区可在导入/登录/编辑对话框设置。新账户地区不预填，当前为手工输入 locale/IANA 时区，不提供候选选择；Cookie 对话框中的可选字段位于“更多设置”。未指定的地区在服务端按出口 IP 填写，CDP 导入优先沿用浏览器地区。保存写入账户配置，不只是界面语言
+   - 账户列表上方列出每个出口 IP 与经它访问 Google 的账户数，多个账户共用的出口 IP 以黄色标出
 
 4. **启动 API**:
    - 点击“启动服务”启动数据面
@@ -356,7 +359,7 @@ curl http://127.0.0.1:2048/v1/chat/completions \
 | Anthropic Messages | `http://127.0.0.1:2048` | `.env` 中的 `PROXY_API_KEY` |
 | Gemini | `http://127.0.0.1:2048` | `.env` 中的 `PROXY_API_KEY` |
 
-OpenAI / Anthropic 的 `/v1` 固定使用 **Playground** 通道；使用 **Build** 时将 Base URL 改为 `http://127.0.0.1:2048/build/v1`（Anthropic 的服务器地址改为 `http://127.0.0.1:2048/build`）。模型列表和单模型查询同样按通道过滤。上游已移除 `-build` 写代码助手模型及 `assistant` 通道，旧 Build 应用代理仍保留，二者不是同一个通道。固定入口不会因限额、结构化输出、模型映射或非流式优先选项切换通道；目标通道需要在 `UPSTREAM_CHANNELS` 中启用。Build 不支持的专用能力不会改走 Playground。`/v1beta` 保留自动路由。
+OpenAI / Anthropic 的 `/v1` 固定使用 **Playground** 通道；使用 **Build** 时将 Base URL 改为 `http://127.0.0.1:2048/build/v1`（Anthropic 的服务器地址改为 `http://127.0.0.1:2048/build`）。模型列表和单模型查询同样按通道过滤。恢复的 `-build` 写代码助手模型也使用 `/build/v1`，由目录中的 `assistant_route` 选择内部 `assistant` 通道；普通模型仍使用旧 Build 应用代理，不会因后缀或重试被改成助手。固定入口不会因限额、结构化输出、模型映射或非流式优先选项切换通道。`UPSTREAM_CHANNELS` 控制普通 Playground/Build 代理，写代码助手按上游规则独立启用。Build 不支持的专用能力不会改走 Playground。`/v1beta` 保留自动路由。
 
 模型名称从对应通道的模型接口或 `GET /v1beta/models` 读取。`PROXY_API_KEY` 为空时，浏览器中只有本机页面可以直接调用接口；网页版客户端和部分桌面客户端需要设置密钥。多个 key 用逗号分隔，客户端只填写其中一个；设置页可为每个 key 勾选处理其请求的账户，未配置绑定的 key 可用全部账户。请求带 `X-AIStudio-Account: <账户>` 请求头时只由该账户处理，账户填账户页显示的邮箱，仍须满足该 key 的账户范围；该账户出错时直接返回它的错误，不换到其他账户。
 
@@ -552,7 +555,7 @@ curl http://127.0.0.1:2048/v1beta/decisions \
 
 `questions` 的键由调用方命名，回答按同样的键返回。`noul` 返回为真的概率 `noul`，`criteria` 可写 `true_description` 与 `false_description`；`choice` 的 `criteria` 为选项 ID 到说明，返回 `choice` 与各选项的 `probabilities`；`score` 的 `criteria` 为从低到高的等级说明，返回期望等级 `score`、各等级的 `probabilities` 与 `legend`。每个回答都带 `confidence`。`input` 接受字符串或 Interactions 内容块，图片、音频、视频与 PDF 以 `data`（Base64）或 `uri`（HTTPS 链接或本服务 Files API 的文件）给出并写明 `mime_type`。Google Gen AI SDK 以 `client.decisions.create` 调用。
 
-AI Studio 官网前端尚未调用 `gemini-decision-1`：官网 Playground 选这个模型时只列出示例应用，示例应用经 Gemini API 以付费 API key 调用；本服务经网页的 CreateDecision 请求调用，官网页面不会发出这类请求，每次调用在运行日志中提醒。
+`gemini-decision-1` 在 AI Studio 官网中隐藏：官网 Playground 选这个模型时只显示示例应用，不能直接对话；本服务可以直接使用，每次使用在运行日志中提醒。
 
 ## 模型
 
@@ -583,7 +586,7 @@ AI Studio 官网前端尚未调用 `gemini-decision-1`：官网 Playground 选�
 | `gemini-3.8-live` | Gemini 3.8 Live | 实时对话 | 131072 | 65536 |
 | `gemini-3.5-live-translate-preview` | Gemini 3.5 Live Translate Preview | 实时翻译 | 16384 | 32768 |
 
-目录中另有 `-latest` 别名、Robotics-ER 与早期版本的图片与 TTS 模型。
+目录中另有 `-latest` 别名、Robotics-ER、早期版本的图片与 TTS 模型，以及 Build 通道的 `-build` 模型。
 
 公开端点实现标准 `generateContent`、`countTokens`、`embedContent`、`batchEmbedContents`、`predictLongRunning` 和 `createDecision`（`/v1beta/decisions`）；`bidiGenerateContent` 与 `bidiGenerateMusic` 模型经 `/v1/live` 调用。公开模型接口汇总各账户实时上游目录，按入口过滤通道，再投影本地映射、搜索与可选抗截断别名；管理目录保留真实上游模型。调度按目录明确提供的模型 ID、方法、能力字段和账户当前运行状态选择账户。
 
@@ -671,7 +674,7 @@ cp .env.example .env
 | `REQUEST_TIMEOUT` | `30m` | 单次请求最大执行时间，自动续写的每一轮开始时重新计时 |
 | `WARM_WORKER_LIMIT` | `0` | 常驻预热账户数；0 为按需启动，空闲 30 秒后回收全部 Worker |
 | `MAX_ACTIVE_WORKERS` | `1` | 高峰期活动 Worker 上限 |
-| `WARM_STARTUP_CONCURRENCY` | `1` | 同时冷启动的 Worker 数，两种后端均适用 |
+| `WARM_STARTUP_CONCURRENCY` | `1` | 同时冷启动的 Worker 数，两种后端均适用；常驻预热逐个启动 |
 | `PER_ACCOUNT_CONCURRENCY` | `1` | 单账号同时执行的请求数 |
 | `ROUTING_STRATEGY` | `round-robin` | `round-robin` 轮询；`fill-first` 账号粘性优先 |
 | `ACCOUNT_ORDER` | 空 | `fill-first` 依次使用的账户，逗号分隔，未列出的账户排在后面并按 ID 排序；也可在设置页调整，保存后立即生效 |
@@ -686,7 +689,7 @@ cp .env.example .env
 | `YOUTUBE_LINKS` | `false` | 用户消息文本中的 YouTube 链接作为视频发送给模型，并从文本中移除 |
 | `STRIP_THOUGHT_SIGNATURES` | `false` | 发往上游前去掉对话历史中的思考签名，函数调用带 `skip_thought_signature_validator`；之前各轮的思考内容不随签名发给模型，长对话的输入 token 较少 |
 | `SEARCH_MODEL_ALIASES` | `true` | 提供支持搜索的模型的 `-search` 型号，使用该型号时启用 Google 搜索 |
-| `DISCOVER_HIDDEN_MODELS` | `false` | 同步账户模型目录时（启动、每 24 小时与账户页“刷新全部”），找出 AI Studio 官网前端已配置、账户模型列表尚未列出的模型，经上游确认可用后加入目录，可直接用于各协议请求并列在 `/v1/models` 中，“模型目录”页标为“官网隐藏”；模型被正式列出后使用官方条目，关闭后下一次启动生成服务时从目录中移除 |
+| `DISCOVER_HIDDEN_MODELS` | `false` | 同步账户模型目录时（启动、每 24 小时与账户页“刷新全部”），找出 AI Studio 官网尚未公开的模型，确认账户能用后加入目录，可直接用于各协议请求并列在 `/v1/models` 中，“模型目录”页标为“官网隐藏”；官网公开后改用官网的模型信息，关闭后下一次启动生成服务时从目录中移除 |
 | `GOOGLE_SEARCH` | `false` | 为 OpenAI、Anthropic、Gemini 与 Interactions 的生成请求启用 Google 搜索，包含普通型号与携带函数工具的请求 |
 | `ANTI_TRUNCATION` | `false` | 公开抗截断模型变体开关，保存立即影响后续目录与请求；专用接口仅解析别名，文本生成启用函数包装，独立于自动续写 |
 | `CONTINUATION_REWRITE` | `true` | 以 assistant 消息结尾的请求在不支持原生续写的模型上改写为续写请求；关闭时所有模型原样发送，上游拒绝时返回其错误 |

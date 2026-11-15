@@ -37,7 +37,7 @@ SpiderMonkey 使用原生内存，不能用 Go heap 或 `GOMEMLIMIT` 代替整�
 
 ## 构建与验证
 
-需要 Go 1.27、CGO、目标平台 C/C++ 工具链及匹配的 SpiderMonkey 静态库。当前库版本与下载流程由 `.github/actions/spidermonkey/action.yml` 和发行工作流维护；本地步骤见 [开发文档](development.md) 与 README。发行程序静态链接引擎，运行者不需要安装编译器。
+需要 Go 1.27.3+、CGO、目标平台 C/C++ 工具链及匹配的 SpiderMonkey 静态库。当前库版本与下载流程由 `.github/actions/static-libraries/action.yml` 和发行工作流维护；本地步骤见 [开发文档](development.md) 与 README。发行程序静态链接引擎，运行者不需要安装编译器。
 
 配置原生编译环境后执行：
 

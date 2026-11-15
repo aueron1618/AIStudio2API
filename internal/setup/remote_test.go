@@ -18,6 +18,7 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
 	"github.com/Mag1cFall/AIStudio2API/internal/chromeauth"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
+	"github.com/gorilla/websocket"
 )
 
 // TestSetupRemoteOrigin 验证远程地址只接受 HTTPS origin 与本机 HTTP
@@ -112,6 +113,73 @@ func TestSetupCookieEmailCannotBypassVerification(t *testing.T) {
 				t.Fatalf("verification=%d saves=%d error=%v", calls, saves, err)
 			}
 		})
+	}
+}
+
+func TestSetupCDPRegionPrecedesEgressDefaults(t *testing.T) {
+	previous, previousAccess := verifySetupCookies, checkSetupAccess
+	t.Cleanup(func() { verifySetupCookies, checkSetupAccess = previous, previousAccess })
+	verifySetupCookies = func(context.Context, *aistudio.StorageState, string, int) (chromeauth.Verification, error) {
+		return chromeauth.Verification{Email: "user@example.test"}, nil
+	}
+	checkSetupAccess = func(context.Context, *aistudio.StorageState, string, int) error { return nil }
+	state, err := aistudio.ParseCookieImport("SAPISID=fixture; __Secure-1PAPISID=one; __Secure-3PAPISID=three")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		for {
+			var command struct {
+				ID     int    `json:"id"`
+				Method string `json:"method"`
+			}
+			if err := conn.ReadJSON(&command); err != nil {
+				return
+			}
+			var result any
+			switch command.Method {
+			case "Storage.getCookies":
+				result = state
+			case "Target.getTargets":
+				result = map[string]any{"targetInfos": []any{map[string]any{"targetId": "page", "type": "page"}}}
+			case "Target.attachToTarget":
+				result = map[string]string{"sessionId": "session"}
+			case "Runtime.evaluate":
+				result = map[string]any{"result": map[string]any{"value": []string{"ja-JP", "Asia/Tokyo"}}}
+			default:
+				t.Errorf("unexpected CDP method %q", command.Method)
+				return
+			}
+			if err := conn.WriteJSON(map[string]any{"id": command.ID, "result": result}); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(server.Close)
+	for _, override := range []bool{false, true} {
+		options := setupOptions{cdp: "ws" + strings.TrimPrefix(server.URL, "http"), egress: "http://127.0.0.1:1"}
+		wantLocale, wantTimezone := "ja-JP", "Asia/Tokyo"
+		if override {
+			options.locale, options.timezone = "en-US", "UTC"
+			wantLocale, wantTimezone = options.locale, options.timezone
+		}
+		saved := false
+		target := setupTargetFunc(func(_ context.Context, cfg aistudio.AccountConfig, _ aistudio.StorageState, _ string) (string, error) {
+			saved = true
+			if cfg.Locale != wantLocale || cfg.Timezone != wantTimezone {
+				t.Fatalf("CDP import changed selected region: %+v", cfg)
+			}
+			return cfg.Label, nil
+		})
+		if err := importCookies(t.Context(), target, options); err != nil || !saved {
+			t.Fatalf("CDP import consulted egress before browser region or did not save: %v", err)
+		}
 	}
 }
 

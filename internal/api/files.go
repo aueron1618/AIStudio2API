@@ -100,8 +100,8 @@ func (s *server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 			writeFileParseError(w, r, err)
 			return
 		}
-		setRetryAfter(w, err)
-		writeFileError(w, r, statusFromError(err), openAIErrorCode(err), err.Error())
+		seconds := setRetryAfter(w, err)
+		writeFileError(w, r, statusFromError(err), openAIErrorCode(err), retryMessage(err.Error(), seconds))
 		return
 	}
 	metadata, err := service.FileMetadata(r.Context(), ref.ID)
@@ -109,8 +109,8 @@ func (s *server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		if !shouldWriteRequestError(r, err) {
 			return
 		}
-		setRetryAfter(w, err)
-		writeFileError(w, r, statusFromError(err), openAIErrorCode(err), err.Error())
+		seconds := setRetryAfter(w, err)
+		writeFileError(w, r, statusFromError(err), openAIErrorCode(err), retryMessage(err.Error(), seconds))
 		return
 	}
 	writeJSON(w, http.StatusOK, officialOrder(fileProtocol(r), fileResponse(r, metadata)))
@@ -566,8 +566,8 @@ func writeFileRequestError(w http.ResponseWriter, r *http.Request, err error) {
 		writeFileError(w, r, http.StatusNotFound, "file_not_found", "file not found")
 		return
 	}
-	setRetryAfter(w, err)
-	writeFileError(w, r, statusFromError(err), openAIErrorCode(err), err.Error())
+	seconds := setRetryAfter(w, err)
+	writeFileError(w, r, statusFromError(err), openAIErrorCode(err), retryMessage(err.Error(), seconds))
 }
 
 // writeFileParseError 写入 multipart 请求体解析错误，超过大小上限时返回 413

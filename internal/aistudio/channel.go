@@ -17,6 +17,8 @@ const (
 	ChannelPlayground Channel = "playground"
 	// ChannelBuild 表示官网 Build 应用代理的 Gemini API 调用
 	ChannelBuild Channel = "build"
+	// ChannelAssistant 表示官网 Build 写代码助手，只服务 -build 模型
+	ChannelAssistant Channel = "assistant"
 )
 
 // ChannelCooldownScope 返回通道在作用域上的冷却键，Build 使用 build:<作用域>
@@ -55,6 +57,9 @@ func (p *AccountPool) SetModelAccounts(accounts map[string][]string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.modelAccounts = maps.Clone(accounts)
+	for model, ids := range p.modelAccounts {
+		p.modelAccounts[model] = slices.Clone(ids)
+	}
 	p.notifyLocked()
 }
 
@@ -101,6 +106,9 @@ func contextAccount(ctx context.Context) string {
 
 // ContextWithSelectionScope carries the original key, admitted account scope, pinned account and URL channel into follow-up operations.
 func ContextWithSelectionScope(ctx, source context.Context) context.Context {
+	if lifecycle, ok := source.Value(assistantLifecycleKey{}).(*AssistantLifecycle); ok {
+		ctx = ContextWithAssistantLifecycle(ctx, lifecycle)
+	}
 	if key, ok := source.Value(apiKeyContextKey{}).(string); ok {
 		ctx = ContextWithAPIKey(ctx, key)
 	}
@@ -121,19 +129,44 @@ func (p *AccountPool) SetAPIKeyAccounts(accounts map[string][]string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.apiKeyAccounts = maps.Clone(accounts)
+	for key, ids := range p.apiKeyAccounts {
+		p.apiKeyAccounts[key] = slices.Clone(ids)
+	}
 	p.notifyLocked()
+}
+
+// ScopedSelection snapshots the effective scope for scheduler queue keys; acquisition still revalidates live bindings.
+func (p *AccountPool) ScopedSelection(ctx context.Context, selection AccountSelection) AccountSelection {
+	return p.ScopedSelectionSnapshot()(ctx, selection)
+}
+
+// ScopedSelectionSnapshot resolves queue scopes against one immutable binding policy.
+func (p *AccountPool) ScopedSelectionSnapshot() func(context.Context, AccountSelection) AccountSelection {
+	p.mu.Lock()
+	keyAccounts, modelAccounts := p.apiKeyAccounts, p.modelAccounts
+	p.mu.Unlock()
+	return func(ctx context.Context, selection AccountSelection) AccountSelection {
+		selection = scopedAccountSelection(ctx, selectionWithChannel(ctx, selection), keyAccounts, modelAccounts)
+		selection.AllowedAccountIDs = slices.Clone(selection.AllowedAccountIDs)
+		return selection
+	}
 }
 
 // scopedSelection 把请求指定的账户、所用 API key 与模型绑定的账户并入选择，指定账户与绑定资源的选择不受模型绑定限制
 func (p *AccountPool) scopedSelection(ctx context.Context, selection AccountSelection) AccountSelection {
+	p.mu.Lock()
+	keyAccounts, modelAccounts := p.apiKeyAccounts, p.modelAccounts
+	p.mu.Unlock()
+	return scopedAccountSelection(ctx, selection, keyAccounts, modelAccounts)
+}
+
+func scopedAccountSelection(ctx context.Context, selection AccountSelection, keyAccounts, modelAccounts map[string][]string) AccountSelection {
 	if selection.AccountID == "" {
 		selection.AccountID = contextAccount(ctx)
 	}
 	key, _ := ctx.Value(apiKeyContextKey{}).(string)
-	p.mu.Lock()
-	keyScope, keyBound := p.apiKeyAccounts[key]
-	modelScope, modelBound := p.modelAccounts[strings.TrimPrefix(strings.TrimSpace(selection.ModelID), "models/")]
-	p.mu.Unlock()
+	keyScope, keyBound := keyAccounts[key]
+	modelScope, modelBound := modelAccounts[strings.TrimPrefix(strings.TrimSpace(selection.ModelID), "models/")]
 	if scope, bound := ctx.Value(accountScopeContextKey{}).([]string); bound {
 		selection.AllowedAccountIDs = narrowedAccounts(selection.AllowedAccountIDs, scope)
 	}
@@ -195,6 +228,9 @@ func (l *AccountLease) CooldownScope(scope string) string {
 }
 
 func (p *AccountPool) channelEnabledLocked(channel Channel) bool {
+	if channel == ChannelAssistant {
+		return true
+	}
 	if len(p.channels) == 0 {
 		return channel == ChannelPlayground
 	}
@@ -227,8 +263,16 @@ func buildMethodSelection(selection AccountSelection) bool {
 // selectionChannelsLocked 返回选择可使用的通道顺序，优先通道排在首位，限定通道的模型只使用该通道
 func (p *AccountPool) selectionChannelsLocked(selection AccountSelection) []Channel {
 	limited, restricted := p.modelChannels[strings.TrimPrefix(strings.TrimSpace(selection.ModelID), "models/")]
+	if p.assistantModelLocked(selection.ModelID) {
+		// The Build URL admits coding assistants, but never reroutes ordinary models.
+		if !p.channelEnabledLocked(ChannelAssistant) || selection.Channel != "" && selection.Channel != ChannelBuild && selection.Channel != ChannelAssistant ||
+			restricted && limited != ChannelBuild && limited != ChannelAssistant {
+			return nil
+		}
+		return []Channel{ChannelAssistant}
+	}
 	if selection.Channel != "" {
-		if !p.channelEnabledLocked(selection.Channel) || restricted && limited != selection.Channel || selection.Channel == ChannelBuild &&
+		if selection.Channel == ChannelAssistant || !p.channelEnabledLocked(selection.Channel) || restricted && limited != selection.Channel || selection.Channel == ChannelBuild &&
 			!generationChannelSelection(selection) && !buildMethodSelection(selection) {
 			return nil
 		}
@@ -291,6 +335,8 @@ func (p *AccountPool) channelSupportsLocked(account *Account, channel Channel, s
 		}
 		return generationChannelSelection(selection) && p.channelEnabledLocked(ChannelBuild) &&
 			p.buildSupportsModelLocked(account, selection.ModelID, selection.anyTier)
+	case ChannelAssistant:
+		return p.channelEnabledLocked(ChannelAssistant) && p.assistantModelLocked(selection.ModelID) && accountSupportsSelection(account, selection)
 	default:
 		return false
 	}
@@ -358,6 +404,23 @@ func (p *AccountPool) channelCandidatesLocked(indices []int, selection AccountSe
 	return append(candidates[start:], candidates[:start]...)
 }
 
+// AssistantModel 判断模型是否为经 Build 写代码助手生成的 -build 模型
+func (p *AccountPool) AssistantModel(modelID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.assistantModelLocked(modelID)
+}
+
+// assistantModelLocked 判断模型是否带 assistant_route 能力，调用方持有 p.mu
+func (p *AccountPool) assistantModelLocked(modelID string) bool {
+	return p.modelCapabilityLocked(modelID, "assistant_route")
+}
+
+// assistantBusyLocked 判断账户正在为 -build 选择运行另一个写代码助手生成，同一账户同时只运行一个
+func (p *AccountPool) assistantBusyLocked(account *Account, selection AccountSelection) bool {
+	return account.assistantBusy && p.assistantModelLocked(selection.ModelID)
+}
+
 // InteractionAgentModel 判断模型是否为经 CreateInteraction 后台任务生成的 agent，如 Deep Research 与 Antigravity
 func (p *AccountPool) InteractionAgentModel(modelID string) bool {
 	p.mu.Lock()
@@ -406,7 +469,7 @@ func (p *AccountPool) buildSupportsModelLocked(account *Account, modelID string,
 
 // buildExcludedPlaygroundModel 判断 Playground 目录模型是否使用 Build 未接入的专用路由
 func buildExcludedPlaygroundModel(model Model) bool {
-	return model.Capabilities["interactions_api"] || model.Capabilities["transcription_output"]
+	return model.Capabilities["interactions_api"] || model.Capabilities["transcription_output"] || model.Capabilities["assistant_route"]
 }
 
 // buildRequiresSpecialTool 判断 Build 独有模型是否只能配合 Computer Use 等专用工具调用

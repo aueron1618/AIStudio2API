@@ -27,7 +27,7 @@ func TestCookieAuthUserUpdatePreservesConcurrentEnabledChange(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cfg := aistudio.DefaultAccountConfig("user@example.test")
+			cfg := accountTestConfig("user@example.test")
 			cfg.AuthUser, cfg.Enabled = 2, enabled
 			created, err := admin.addAccount(t.Context(), cfg, state, "", "")
 			if err != nil {
@@ -71,7 +71,7 @@ func TestBoundCookieRefreshUpdatesStoredStateAndWorker(t *testing.T) {
 		Source: aistudio.AuthSource{Browser: "chrome", Email: "user@example.test"},
 		OAuth:  &aistudio.ChromeOAuthMaterial{RefreshToken: "fixture-oauth"}, Bound: session,
 	})
-	created, err := admin.addAccount(t.Context(), aistudio.DefaultAccountConfig("user@example.test"), state, "", "")
+	created, err := admin.addAccount(t.Context(), accountTestConfig("user@example.test"), state, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestAuthRefreshWithoutExtension(t *testing.T) {
 	account := &aistudio.Account{
 		ID: "user@example.com", Directory: directory, StoragePath: storage,
 		RuntimePath: filepath.Join(directory, "runtime-state.json"), StorageState: loaded,
-		Config: aistudio.DefaultAccountConfig("user@example.com"),
+		Config: accountTestConfig("user@example.com"),
 	}
 	pool := aistudio.NewAccountPool([]*aistudio.Account{account}, 1)
 	lease, err := pool.AcquireAccount(t.Context(), account.ID)
@@ -272,7 +272,7 @@ func TestLoginAccountPreservesNativeRenewalMaterial(t *testing.T) {
 			initial := old
 			initial.Source.Email = "user@example.test"
 			state.SetAuthExtension(initial)
-			cfg := aistudio.DefaultAccountConfig("user@example.test")
+			cfg := accountTestConfig("user@example.test")
 			cfg.AuthUser = 2
 			created, err := admin.addAccount(t.Context(), cfg, state, "", "")
 			if err != nil {

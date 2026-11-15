@@ -66,6 +66,11 @@ func (admin *runtimeAdmin) ImportCookieAccount(ctx context.Context, input api.Co
 	if err := config.ValidateProxy(accountConfig.Proxy); err != nil {
 		return api.AdminAccount{}, invalidAccount(err)
 	}
+	environment, err := admin.accountEnvironment(ctx, admin.effectiveProxy(accountConfig.Proxy), accountConfig.Locale, accountConfig.Timezone)
+	if err != nil {
+		return api.AdminAccount{}, err
+	}
+	accountConfig.Locale, accountConfig.Timezone = environment.Locale, environment.Timezone
 	var result aistudio.IsolatedLoginResult
 	var directory string
 	if method == "http" {

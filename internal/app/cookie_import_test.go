@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	"github.com/Mag1cFall/AIStudio2API/internal/chromeauth"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
+	"github.com/Mag1cFall/AIStudio2API/internal/egress"
 	"github.com/gorilla/websocket"
 )
 
@@ -78,6 +80,22 @@ func (*cookieCatalogStub) ReclaimIdleAssistantApplets(context.Context) error { r
 
 func (*cookieCatalogStub) DeleteAccountAssistantApplets(context.Context, string) error { return nil }
 
+func accountTestConfig(label string) aistudio.AccountConfig {
+	cfg := aistudio.DefaultAccountConfig(label)
+	cfg.Locale, cfg.Timezone = "en-US", "UTC"
+	return cfg
+}
+
+func accountTestEnvironment(ctx context.Context, _ string, locale, timezone string) (egress.Exit, error) {
+	if locale == "" {
+		locale = "en-US"
+	}
+	if timezone == "" {
+		timezone = "UTC"
+	}
+	return egress.Exit{Locale: locale, Timezone: timezone}, ctx.Err()
+}
+
 func newAccountTestAdmin(t *testing.T) *runtimeAdmin {
 	t.Helper()
 	pool := aistudio.NewAccountPool(nil, 1)
@@ -91,7 +109,8 @@ func newAccountTestAdmin(t *testing.T) *runtimeAdmin {
 	return &runtimeAdmin{
 		lifecycle: t.Context(), config: config.Default(), pool: pool, workers: workers, service: service,
 		store: aistudio.NewAccountStore(t.TempDir()), requests: registry,
-		checkAccess: func(context.Context, *aistudio.StorageState, string, int) error { return nil },
+		checkAccess:        func(context.Context, *aistudio.StorageState, string, int) error { return nil },
+		resolveEnvironment: accountTestEnvironment,
 	}
 }
 
@@ -186,7 +205,8 @@ func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 			}
 			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), login: driver,
 				requests: registry, workers: workers, service: service,
-				checkAccess: func(context.Context, *aistudio.StorageState, string, int) error { return nil }}
+				checkAccess:        func(context.Context, *aistudio.StorageState, string, int) error { return nil },
+				resolveEnvironment: accountTestEnvironment}
 			httpCalls := 0
 			admin.verifyCookies = func(ctx context.Context, pending *aistudio.StorageState, proxy string, authUser int) (chromeauth.Verification, error) {
 				httpCalls++
@@ -408,6 +428,7 @@ func TestAdminHTTPCookieImportValidation(t *testing.T) {
 				cfg.InitTimeout = time.Millisecond
 			}
 			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), requests: newRequestRegistry(ctx), config: cfg, globalProxy: "http://127.0.0.1:1234"}
+			admin.resolveEnvironment = accountTestEnvironment
 			admin.checkAccess = func(context.Context, *aistudio.StorageState, string, int) error {
 				t.Fatal("rejected HTTP import attempted a network access check")
 				return nil
@@ -516,6 +537,57 @@ func (driver *canceledCookieLogin) ImportCookies(context.Context, aistudio.Isola
 	return aistudio.IsolatedLoginResult{Email: "verified@example.test", StorageState: driver.state}, nil
 }
 
+func TestCookieImportFillsMissingEgressEnvironment(t *testing.T) {
+	state, err := aistudio.ParseCookieImport("SAPISID=fixture; __Secure-1PAPISID=one; __Secure-3PAPISID=three")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"http", "browser"} {
+		for _, canceled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/canceled=%t", method, canceled), func(t *testing.T) {
+				admin := newAccountTestAdmin(t)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				admin.globalProxy = "http://127.0.0.1:1234"
+				calls := 0
+				admin.resolveEnvironment = func(_ context.Context, proxy, locale, timezone string) (egress.Exit, error) {
+					calls++
+					if proxy != admin.globalProxy || locale != "de-DE" || timezone != "" {
+						t.Fatal("egress defaults did not preserve the explicit locale and effective proxy")
+					}
+					if canceled {
+						cancel()
+					}
+					return egress.Exit{Locale: locale, Timezone: "Europe/Berlin"}, nil
+				}
+				driver := &cookieLoginStub{result: aistudio.IsolatedLoginResult{Email: "user@example.test", StorageState: state}}
+				admin.login = driver
+				admin.verifyCookies = func(context.Context, *aistudio.StorageState, string, int) (chromeauth.Verification, error) {
+					return chromeauth.Verification{Email: "user@example.test"}, nil
+				}
+				account, err := admin.ImportCookieAccount(ctx, api.CookieImportInput{
+					Cookies: "SAPISID=fixture; __Secure-1PAPISID=one; __Secure-3PAPISID=three", Method: method, Locale: "de-DE",
+				})
+				if calls != 1 {
+					t.Fatalf("environment resolved %d times", calls)
+				}
+				if canceled {
+					if !errors.Is(err, context.Canceled) || len(admin.pool.Status()) != 0 || driver.calls != 0 {
+						t.Fatalf("canceled environment lookup published an account or started a browser: %v", err)
+					}
+					return
+				}
+				if err != nil || account.Locale != "de-DE" || account.Timezone != "Europe/Berlin" {
+					t.Fatalf("account environment = %+v, %v", account, err)
+				}
+				if method == "browser" && (driver.request.Locale != account.Locale || driver.request.Timezone != account.Timezone) {
+					t.Fatal("isolated verification used a different region from the saved account")
+				}
+			})
+		}
+	}
+}
+
 type accountCommitContext struct {
 	context.Context
 	checked chan struct{}
@@ -543,7 +615,7 @@ func TestAccountPublicationCancellationRollsBackPersistedState(t *testing.T) {
 	admin.service.modelChangeMu.Lock()
 	finished := make(chan error, 1)
 	go func() {
-		_, err := admin.addAccount(commit, aistudio.DefaultAccountConfig("user@example.test"), state, "", "renewal-fixture")
+		_, err := admin.addAccount(commit, accountTestConfig("user@example.test"), state, "", "renewal-fixture")
 		finished <- err
 	}()
 	select {

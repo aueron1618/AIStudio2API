@@ -366,6 +366,71 @@ func TestGeminiContentPolicyHTTP(t *testing.T) {
 	}
 }
 
+func TestGeminiNativeFeedbackAndAbnormalFinish(t *testing.T) {
+	for _, kind := range []string{"feedback", "feedback_event", "abnormal_finish"} {
+		for _, mode := range []string{"unary", "sse", "json_stream"} {
+			t.Run(kind+"/"+mode, func(t *testing.T) {
+				usage := &aistudio.Usage{InputTokens: 8, TotalTokens: 8}
+				service := generationTestService{generate: func(_ context.Context, request aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
+					if !request.KeepAbnormalFinish {
+						t.Error("Gemini did not request its native abnormal finish reason")
+					}
+					feedback := &aistudio.PromptFeedbackError{Reason: "safety", Message: "blocked", Usage: usage}
+					switch kind {
+					case "feedback":
+						return nil, feedback
+					case "feedback_event":
+						return testEventStream(aistudio.Event{Kind: aistudio.EventError, Err: feedback}), nil
+					default:
+						return testEventStream(
+							aistudio.Event{Kind: aistudio.EventUsage, Usage: usage},
+							aistudio.Event{Kind: aistudio.EventFinish, FinishReason: "malformed_function_call", FinishMessage: "invalid call"},
+						), nil
+					}
+				}}
+				path := "/v1beta/models/test:generateContent"
+				if mode != "unary" {
+					path = "/v1beta/models/test:streamGenerateContent"
+					if mode == "sse" {
+						path += "?alt=sse"
+					}
+				}
+				response, raw := protocolTestRequest(t, newProtocolTestServer(t, service), http.MethodPost, path, `{"contents":[{"parts":[{"text":"hi"}]}]}`, nil)
+				if response.StatusCode != http.StatusOK {
+					t.Fatalf("native Gemini outcome became an HTTP error: %d %s", response.StatusCode, raw)
+				}
+				var payload map[string]any
+				switch mode {
+				case "sse":
+					frames := sseTestPayloads(t, raw)
+					payload = frames[len(frames)-1]
+				case "json_stream":
+					var frames []map[string]any
+					if err := json.Unmarshal(raw, &frames); err != nil || len(frames) == 0 {
+						t.Fatalf("invalid JSON stream: %s, %v", raw, err)
+					}
+					payload = frames[len(frames)-1]
+				default:
+					if err := json.Unmarshal(raw, &payload); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if payload["error"] != nil || payload["usageMetadata"].(map[string]any)["promptTokenCount"] != float64(8) {
+					t.Fatalf("Gemini outcome lost usage or became an error envelope: %s", raw)
+				}
+				if kind == "abnormal_finish" {
+					candidate := payload["candidates"].([]any)[0].(map[string]any)
+					if candidate["finishReason"] != "MALFORMED_FUNCTION_CALL" || candidate["finishMessage"] != "invalid call" {
+						t.Fatalf("abnormal finish was normalized away: %s", raw)
+					}
+				} else if feedback := payload["promptFeedback"].(map[string]any); feedback["blockReason"] != "SAFETY" || feedback["blockReasonMessage"] != "blocked" || payload["candidates"] != nil {
+					t.Fatalf("prompt feedback response changed: %s", raw)
+				}
+			})
+		}
+	}
+}
+
 func TestGeminiDynamicThinkingBudget(t *testing.T) {
 	for _, budget := range []string{"null", "-1", "0", "1024"} {
 		var request geminiRequest

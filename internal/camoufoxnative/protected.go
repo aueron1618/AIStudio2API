@@ -1,6 +1,7 @@
 package camoufoxnative
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -360,8 +361,11 @@ type protectedResponseBody struct {
 	channel   *bidiChannel
 	// stop 在正文读完前关闭时中止请求，为空时在页面中止 XHR
 	stop func() error
-	// release 在关闭时结束请求所在的标签页使用，参数表示正文已读完；为空时按受保护请求结束
-	release func(done bool)
+	// release 在关闭时结束请求所在的标签页使用，参数表示正文已读完与正文中出现了函数调用；为空时按受保护请求结束
+	release func(done, call bool)
+	// call 表示正文中出现了函数调用 Part，tail 是已读正文末尾不足一个标记长度的字节
+	call bool
+	tail []byte
 
 	mu        sync.Mutex
 	buffer    []byte
@@ -389,6 +393,7 @@ func (body *protectedResponseBody) Read(target []byte) (n int, resultErr error) 
 		if resultErr != nil && resultErr != io.EOF && !body.done {
 			body.done = true
 			body.buffer = nil
+			body.tail = nil
 			body.channel.finish(io.ErrClosedPipe, true)
 			body.worker.client.closeChannel(body.requestID)
 			aborted := body.abort()
@@ -417,6 +422,16 @@ func (body *protectedResponseBody) Read(target []byte) (n int, resultErr error) 
 			if err != nil {
 				return 0, err
 			}
+			if !body.call {
+				window := append(body.tail, body.buffer...)
+				body.call = bytes.Contains(window, FunctionCallMarker)
+				if body.call {
+					body.tail = nil
+				} else {
+					// Keep only the marker overlap, not the decoded chunk's backing array.
+					body.tail = append(body.tail[:0], window[max(len(window)-len(FunctionCallMarker)+1, 0):]...)
+				}
+			}
 			continue
 		}
 		var message protectedMessage
@@ -428,6 +443,7 @@ func (body *protectedResponseBody) Read(target []byte) (n int, resultErr error) 
 		}
 		if message.Done {
 			body.done, body.completed = true, true
+			body.tail = nil
 			body.worker.client.closeChannel(body.requestID)
 		}
 	}
@@ -473,16 +489,17 @@ func (body *protectedResponseBody) Close() error {
 	body.closed = true
 	body.closeDone = make(chan struct{})
 	body.buffer = nil
+	body.tail = nil
 	if body.channel != nil {
 		body.channel.finish(io.ErrClosedPipe, true)
 	}
 	done := body.done
 	aborting := body.abortDone != nil
-	completed := body.completed
+	completed, call := body.completed, body.call
 	body.mu.Unlock()
 	defer close(body.closeDone)
 	if body.release != nil {
-		defer body.release(completed)
+		defer body.release(completed, call)
 	} else if body.worker != nil {
 		defer body.worker.finishRequest(body.contextID)
 	}

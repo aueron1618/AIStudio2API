@@ -35,6 +35,13 @@ const routes: RouteRecordRaw[] = [
     meta: studio,
   },
   {
+    path: '/prompts/new_omni',
+    redirect: (to) => ({
+      path: '/prompts/new_chat',
+      query: { ...to.query, model: 'omni-featured' },
+    }),
+  },
+  {
     path: '/generate-speech',
     name: 'speech',
     component: () => import('@/playground/media/SpeechPage.vue').then(afterTask),

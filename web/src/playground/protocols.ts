@@ -541,6 +541,8 @@ function chatDecoder(): Decoder {
       const reasoning = record(usage.completion_tokens_details).reasoning_tokens
       if (typeof reasoning === 'number') update.thoughtTokens = reasoning
       if (typeof usage.prompt_tokens === 'number') update.promptTokens = usage.prompt_tokens
+      const cached = record(usage.prompt_tokens_details).cached_tokens
+      if (typeof cached === 'number') update.cachedTokens = cached
       return update
     },
     done: () => false,
@@ -623,6 +625,8 @@ function responsesUsage(response: Record<string, unknown>, update: StreamUpdate)
   const reasoning = record(usage.output_tokens_details).reasoning_tokens
   if (typeof reasoning === 'number') update.thoughtTokens = reasoning
   if (typeof usage.input_tokens === 'number') update.promptTokens = usage.input_tokens
+  const cached = record(usage.input_tokens_details).cached_tokens
+  if (typeof cached === 'number') update.cachedTokens = cached
   const incomplete = record(response.incomplete_details).reason
   update.finishReason =
     typeof incomplete === 'string'
@@ -698,6 +702,7 @@ function anthropicDecoder(): Decoder {
   // fetches 是网页读取调用的网址，读取失败的结果块只带调用 ID
   const fetches = new Map<string, string>()
   let promptTokens: number | undefined
+  let cachedTokens: number | undefined
   const serverTool = (name: string, id: string, input: Record<string, unknown>): Part[] => {
     if (name === 'web_fetch') fetches.set(id, stringOf(input.url))
     return anthropicServerTool(name, id, input)
@@ -743,8 +748,12 @@ function anthropicDecoder(): Decoder {
     event(value) {
       const update: StreamUpdate = { parts: [] }
       const usage = record(value.usage ?? record(value.message).usage)
-      if (typeof usage.input_tokens === 'number') promptTokens = usage.input_tokens
+      if (typeof usage.cache_read_input_tokens === 'number')
+        cachedTokens = usage.cache_read_input_tokens
+      if (typeof usage.input_tokens === 'number')
+        promptTokens = usage.input_tokens + (cachedTokens ?? 0)
       if (promptTokens !== undefined) update.promptTokens = promptTokens
+      if (cachedTokens !== undefined) update.cachedTokens = cachedTokens
       if (typeof usage.output_tokens === 'number') update.tokens = usage.output_tokens
       switch (value.type) {
         case 'content_block_start': {
@@ -1110,6 +1119,8 @@ function interactionsDecoder(): Decoder {
       update.tokens = Number(output ?? 0) + Number(thoughts ?? 0)
     if (typeof thoughts === 'number') update.thoughtTokens = thoughts
     if (typeof usage.total_input_tokens === 'number') update.promptTokens = usage.total_input_tokens
+    if (typeof usage.total_cached_tokens === 'number')
+      update.cachedTokens = usage.total_cached_tokens
     if (typeof interaction.status === 'string')
       update.finishReason = finishReason(interaction.status)
   }
@@ -1341,6 +1352,16 @@ interface GenerateOptions {
   onUpdate: (update: StreamUpdate) => void
 }
 
+// streamChunks 以 reader 逐块读取 stream，提前结束时取消读取
+async function* streamChunks<T>(stream: ReadableStream<T>): AsyncGenerator<T> {
+  const reader = stream.getReader()
+  try {
+    for (let next = await reader.read(); !next.done; next = await reader.read()) yield next.value
+  } finally {
+    await reader.cancel()
+  }
+}
+
 // generate 以所选协议调用本服务公开接口，把流式事件或完整响应换为片段变化回调
 export async function generate(options: GenerateOptions): Promise<void> {
   const call = protocolCall(
@@ -1383,7 +1404,7 @@ export async function generate(options: GenerateOptions): Promise<void> {
       },
     }),
   )
-  for await (const { data } of events) {
+  for await (const { data } of streamChunks(events)) {
     if (data === '[DONE]') return
     const value = record(JSON.parse(data))
     const error = errorOf(value)

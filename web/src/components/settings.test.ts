@@ -515,6 +515,8 @@ describe('Cookie import form', () => {
         chromeImport: false,
         loading: false,
         error: '',
+        camoufox: undefined,
+        geoip: undefined,
       })
       app.directive('tooltip', {})
       app.mixin({
@@ -540,12 +542,14 @@ describe('Cookie import form', () => {
     },
   )
 
-  it('keeps the required region fields for other account forms without prefilling them', async () => {
+  it('keeps all account fields blank and allows upstream exit-based region defaults', async () => {
     const html = await render(AccountEnvironmentFields, {
       modelValue: { proxy: '', locale: '', timezone: '' },
     })
-    const fields = html.match(/<input[^>]*required[^>]*>/g) ?? []
-    expect(fields).toHaveLength(2)
+    const fields = html.match(/<input[^>]*>/g) ?? []
+    expect(fields).toHaveLength(3)
     expect(fields.every((field) => field.includes('value=""'))).toBe(true)
+    expect(fields.every((field) => !field.includes('required'))).toBe(true)
+    expect(fields.filter((field) => field.includes(messages['accounts.byExit']))).toHaveLength(2)
   })
 })

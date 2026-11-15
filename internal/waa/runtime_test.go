@@ -24,7 +24,7 @@ func TestRuntimeCloseReleasesVM(t *testing.T) {
 	}
 	vm.Close()
 	vm.Close()
-	if vm.agent != nil || vm.snapshot != 0 || vm.shutdown != 0 || vm.loop.afterTask != nil || vm.results != nil {
+	if vm.agent != nil || vm.snapshot != 0 || vm.shutdown != 0 || vm.mouse != 0 || vm.key != 0 || vm.loop.afterTask != nil || vm.results != nil || vm.metrics != nil {
 		t.Fatal("closed runtime retained JS state")
 	}
 	vm.resetIdle()
@@ -36,7 +36,7 @@ func TestRuntimeCloseReleasesVM(t *testing.T) {
 	default:
 		t.Fatal("event loop has not exited")
 	}
-	if err := vm.fillPrompt(t.Context(), "closed", false); err == nil {
+	if err := vm.fillPrompt(t.Context(), "closed"); err == nil {
 		t.Fatal("closed runtime accepted prompt")
 	}
 }
@@ -95,18 +95,27 @@ func TestRuntimeReadyCallbackDoesNotHideCanceledInitialization(t *testing.T) {
 }
 
 func TestRuntimeCanceledProofStopsBusyScript(t *testing.T) {
+	started := make(chan struct{})
 	vm, err := NewRuntime(t.Context(), Options{
 		Challenge:   Challenge{Program: "test", GlobalName: "fixture"},
-		Interpreter: `var fixture = {a(program, ready) { ready(() => { for (;;) {} }, () => {}); }};`,
-		Profile:     Profile{Locale: "en-US", TimeZone: "UTC"},
+		Interpreter: `var fixture = {a(program, ready) { ready(() => { new Image().src = '/snapshot'; for (;;) {} }, () => {}); }};`,
+		Profile:     Profile{Locale: "en-US", TimeZone: "UTC", PageURL: "https://aistudio.google.com/"},
+		LoadImage:   func(string) bool { close(started); return true },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer vm.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
-	if _, err := vm.RunProof(ctx, "digest", "hello"); !errors.Is(err, context.DeadlineExceeded) {
+	finished := make(chan error, 1)
+	go func() { _, err := vm.RunProof(ctx, "digest", "hello"); finished <- err }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunProof did not enter the snapshot script")
+	}
+	if err := <-finished; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("canceled proof = %v", err)
 	}
 	select {
@@ -128,6 +137,7 @@ func TestRuntimeRunProofDispatchesInputBeforeRun(t *testing.T) {
   box.appendChild(textarea); document.body.appendChild(box);
   const run = document.createElement('ms-run-button');
   const button = document.createElement('button');
+  button.appendChild(document.createElement('span'));
   run.appendChild(button); document.body.appendChild(run);
   const events = [];
   textarea.addEventListener('input', () => events.push('input:' + textarea.value));
@@ -144,6 +154,9 @@ func TestRuntimeRunProofDispatchesInputBeforeRun(t *testing.T) {
 	proof, err := vm.RunProof(t.Context(), "digest", "a\r\nb")
 	if err != nil || proof != "!input:a\nb|change|run:a\nb" {
 		t.Fatalf("RunProof = %q, %v", proof, err)
+	}
+	if vm.pointer.Clicked().IsZero() {
+		t.Fatal("RunProof did not record the trusted click time")
 	}
 	proof, err = vm.RefreshSnapshot(t.Context())
 	if err != nil || proof != "!input:a\nb|change|run:" {
@@ -170,6 +183,31 @@ func TestRuntimeProofClearsPrompt(t *testing.T) {
 	proof, err = vm.RefreshSnapshot(t.Context())
 	if err != nil || proof != "!" {
 		t.Fatalf("prompt was retained after proof: %q, %v", proof, err)
+	}
+}
+
+func TestRuntimeSubmitProofClearsNormalizedResult(t *testing.T) {
+	vm, err := NewRuntime(t.Context(), Options{
+		Challenge: Challenge{Program: "test", GlobalName: "fixture"},
+		Interpreter: `var fixture = {a(program, ready) {
+  const events = [];
+  addEventListener('input', event => events.push(event.isTrusted));
+  addEventListener('click', event => events.push(event.isTrusted));
+  ready(callback => callback('!' + document.querySelector('ms-function-call-chunk').querySelector('input').value + ':' + events.join(',')), () => {});
+}};`,
+		Profile: Profile{Locale: "en-US", TimeZone: "UTC"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Close()
+	proof, err := vm.SubmitProof(t.Context(), "digest", "a\r\nb\rc", 3)
+	if err != nil || proof != "!abc:true,true,true" {
+		t.Fatalf("SubmitProof = %q, %v", proof, err)
+	}
+	proof, err = vm.RefreshSnapshot(t.Context())
+	if err != nil || proof != "!:true,true,true" {
+		t.Fatalf("function result was retained or cleanup dispatched input: %q, %v", proof, err)
 	}
 }
 
@@ -252,5 +290,66 @@ func TestRuntimeRejectionNotificationOrder(t *testing.T) {
 		if err != nil || proof != want {
 			t.Fatalf("rejection notification = %q, %v; want %q", proof, err, want)
 		}
+	}
+}
+
+func TestRuntimeInputCancellationStopsBusyScript(t *testing.T) {
+	for _, operation := range []string{"keyboard", "pointer", "activation"} {
+		t.Run(operation, func(t *testing.T) {
+			vm := testRealmHost(t, "true")
+			defer vm.Close()
+			started := make(chan struct{})
+			vm.loop.post(func() {
+				close(started)
+				_, _ = vm.agent.evaluate(vm.agent.top.global, `for (;;) {}`, "busy.js")
+			})
+			<-started
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+			defer cancel()
+			var err error
+			switch operation {
+			case "keyboard":
+				_, err = vm.keyInput(ctx, "prompt", "text", []string{"input"})
+			case "pointer":
+				err = vm.Replaced(ctx)
+			case "activation":
+				err = vm.Activate(ctx)
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("canceled %s = %v", operation, err)
+			}
+			select {
+			case <-vm.loop.exited:
+			default:
+				t.Fatal("input cancellation did not join the JS thread")
+			}
+			if vm.agent != nil || vm.mouse != 0 || vm.key != 0 || vm.metrics != nil || vm.idle != nil {
+				t.Fatal("canceled input retained VM state")
+			}
+		})
+	}
+}
+
+func TestRuntimeMetricsAreDrained(t *testing.T) {
+	vm := testRealmHost(t, "true")
+	defer vm.Close()
+	initial, err := vm.TakeMetrics(t.Context())
+	if err != nil || len(initial) != 2 || initial[0].Metric != "ec" || initial[0].Label != "t" || initial[1].Metric != "el" || initial[1].Label != "t" {
+		t.Fatalf("initial metrics = %+v, %v", initial, err)
+	}
+	proof, err := vm.Proof(t.Context(), "digest", "text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := vm.TakeMetrics(t.Context())
+	if err != nil || len(metrics) != 3 || metrics[0] != (BotGuardMetric{Metric: "ec", Label: "n", Value: 1}) || metrics[1].Metric != "el" || metrics[1].Label != "n" || metrics[1].Value < 0 || metrics[2] != (BotGuardMetric{Metric: "frs", Value: float64(len(proof))}) {
+		t.Fatalf("snapshot metrics = %+v, %v", metrics, err)
+	}
+	if taken, err := vm.TakeMetrics(t.Context()); err != nil || len(taken) != 0 {
+		t.Fatalf("metrics were retained after draining: %+v, %v", taken, err)
+	}
+	vm.Close()
+	if _, err := vm.TakeMetrics(t.Context()); err == nil {
+		t.Fatal("closed runtime accepted a metrics request")
 	}
 }
