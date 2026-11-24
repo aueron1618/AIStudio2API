@@ -13,9 +13,12 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/brainplusplus/go-browserforge/fingerprints"
 	bfheaders "github.com/brainplusplus/go-browserforge/headers"
+
+	"github.com/Mag1cFall/AIStudio2API/internal/waa/rhythm"
 )
 
 var firefoxVersionPattern = regexp.MustCompile(`\b1[0-9]{2}\.0\b`)
@@ -27,10 +30,17 @@ type savedFingerprint struct {
 	Locale         string         `json:"locale"`
 	Timezone       string         `json:"timezone"`
 	Config         map[string]any `json:"config"`
+	// Rhythm 是账户点击与粘贴的事件节奏
+	Rhythm *rhythm.Rhythm `json:"rhythm,omitempty"`
 }
+
+// fingerprintMu 串行化账户指纹文件的读写
+var fingerprintMu sync.Mutex
 
 // PersistAccountFingerprint 将隔离登录指纹保存到账户目录
 func PersistAccountFingerprint(sourceDirectory string, targetDirectory string) error {
+	fingerprintMu.Lock()
+	defer fingerprintMu.Unlock()
 	source := filepath.Join(sourceDirectory, "camoufox-fingerprint.json")
 	data, err := os.ReadFile(source)
 	if errors.Is(err, os.ErrNotExist) {
@@ -114,13 +124,16 @@ func loadAccountCamoufoxConfig(storageStatePath string, ffVersion int, locale st
 		timezone = "UTC"
 	}
 	path := filepath.Join(filepath.Dir(storageStatePath), "camoufox-fingerprint.json")
+	fingerprintMu.Lock()
+	defer fingerprintMu.Unlock()
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		config, buildErr := buildCamoufoxConfig(ffVersion, locale, timezone)
 		if buildErr != nil {
 			return nil, buildErr
 		}
-		if writeErr := writeAccountCamoufoxConfig(path, savedFingerprint{FirefoxVersion: ffVersion, Locale: locale, Timezone: timezone, Config: config}); writeErr != nil {
+		account := rhythm.New()
+		if writeErr := writeAccountCamoufoxConfig(path, savedFingerprint{FirefoxVersion: ffVersion, Locale: locale, Timezone: timezone, Config: config, Rhythm: &account}); writeErr != nil {
 			return nil, writeErr
 		}
 		return config, nil
@@ -136,6 +149,11 @@ func loadAccountCamoufoxConfig(storageStatePath string, ffVersion int, locale st
 		return nil, fmt.Errorf("账户 Camoufox 指纹为空")
 	}
 	changed := false
+	if saved.Rhythm == nil {
+		account := rhythm.New()
+		saved.Rhythm = &account
+		changed = true
+	}
 	if saved.FirefoxVersion != ffVersion {
 		version := fmt.Sprintf("%d.0", ffVersion)
 		for _, key := range []string{"navigator.userAgent", "navigator.appVersion", "headers.User-Agent"} {
@@ -204,12 +222,30 @@ func applyLocaleTimezone(config map[string]any, locale string, timezone string) 
 	config["voices"] = windowsVoices(locale)
 }
 
+// writeAccountCamoufoxConfig 先写入同目录临时文件并刷盘，再以 os.Rename 替换账户指纹文件
 func writeAccountCamoufoxConfig(path string, saved savedFingerprint) error {
 	encoded, err := json.Marshal(saved)
 	if err != nil {
 		return fmt.Errorf("编码账户 Camoufox 指纹: %w", err)
 	}
-	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+	temporary, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("创建账户 Camoufox 指纹临时文件: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if _, err := temporary.Write(encoded); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("写入账户 Camoufox 指纹: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("同步账户 Camoufox 指纹: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("关闭账户 Camoufox 指纹临时文件: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("写入账户 Camoufox 指纹: %w", err)
 	}
 	return nil

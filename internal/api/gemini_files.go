@@ -576,7 +576,8 @@ func writeGeminiUploadFailure(w http.ResponseWriter, err error, uploadStatus str
 		w.Header().Set("X-Goog-Upload-Status", uploadStatus)
 	}
 	if status == http.StatusRequestEntityTooLarge {
-		writeGeminiError(w, status, statusName, err.Error())
+		writeGeminiError(w, status, statusName, publicReason(err))
+		setAccessLogResponseError(w, err.Error())
 		return
 	}
 	writeGeminiRequestError(w, err)

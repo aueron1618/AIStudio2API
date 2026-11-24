@@ -118,6 +118,9 @@ func TestRetainedAccountLeaseDefersCapacityRelease(t *testing.T) {
 	if err := first(); err != nil {
 		t.Fatal(err)
 	}
+	if err := first(); err != nil {
+		t.Fatal(err)
+	}
 	if next, waitable, err := pool.TryAcquireFor(t.Context(), selection); err != nil || next != nil || !waitable {
 		t.Fatalf("retained lease released its account early: lease=%v waitable=%t err=%v", next, waitable, err)
 	}

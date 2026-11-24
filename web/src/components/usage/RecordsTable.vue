@@ -52,7 +52,7 @@ const columnLabels: Record<Column, () => string> = {
   channel: () => t('usage.dimension.channel'),
   protocol: () => t('usage.dimension.protocol'),
   tokens: () => t('usage.tokens'),
-  latency: () => t('usage.duration'),
+  latency: () => `${t('usage.duration')} · ${t('usage.firstEvent')}`,
   queue: () => t('usage.queue'),
   attempts: () => t('usage.attempts'),
 }
@@ -107,6 +107,7 @@ async function load(): Promise<void> {
   query.set('limit', String(pageSize.value))
   try {
     const result = await api.usageRecords(query, current.signal)
+    if (current.signal.aborted) return
     items.value = result.items
     nextCursor.value = result.next_cursor
     state.value = 'ready'
@@ -387,8 +388,9 @@ function stateClass(record: UsageRecord): string {
                 >
                   <div class="text-gray-200">{{ compact(record.total_tokens) }}</div>
                   <div class="text-xs text-gray-500">
-                    {{ compact(record.input_tokens) }} / {{ compact(record.reasoning_tokens) }} /
-                    {{ compact(record.reply_tokens) }}
+                    {{ t('usage.input') }} {{ compact(record.input_tokens) }} ·
+                    {{ t('usage.output') }}
+                    {{ compact(record.reasoning_tokens + record.reply_tokens) }}
                   </div>
                 </td>
                 <td
@@ -507,25 +509,25 @@ function stateClass(record: UsageRecord): string {
           {{ t('usage.pageSize').replace('{count}', String(size)) }}
         </option>
       </UiSelect>
-      <span class="ml-auto tabular-nums">{{
-        t('usage.page').replace('{page}', String(page + 1))
-      }}</span>
-      <button
-        type="button"
-        class="flex items-center gap-1 rounded-md border border-line px-2 py-1 hover:bg-raised disabled:opacity-40"
-        :disabled="page === 0"
-        @click="move(-1)"
-      >
-        <UiIcon name="chevronLeft" :size="12" />{{ t('usage.previousPage') }}
-      </button>
-      <button
-        type="button"
-        class="flex items-center gap-1 rounded-md border border-line px-2 py-1 hover:bg-raised disabled:opacity-40"
-        :disabled="nextCursor === undefined"
-        @click="move(1)"
-      >
-        {{ t('usage.nextPage') }}<UiIcon name="chevronRight" :size="12" />
-      </button>
+      <div class="ml-auto flex items-center gap-2">
+        <span class="tabular-nums">{{ t('usage.page').replace('{page}', String(page + 1)) }}</span>
+        <button
+          type="button"
+          class="flex items-center gap-1 rounded-md border border-line px-2 py-1 hover:bg-raised disabled:opacity-40"
+          :disabled="page === 0"
+          @click="move(-1)"
+        >
+          <UiIcon name="chevronLeft" :size="12" />{{ t('usage.previousPage') }}
+        </button>
+        <button
+          type="button"
+          class="flex items-center gap-1 rounded-md border border-line px-2 py-1 hover:bg-raised disabled:opacity-40"
+          :disabled="nextCursor === undefined"
+          @click="move(1)"
+        >
+          {{ t('usage.nextPage') }}<UiIcon name="chevronRight" :size="12" />
+        </button>
+      </div>
     </footer>
     <RecordDrawer :record="selected" @close="selected = null" />
   </section>

@@ -21,12 +21,13 @@ import {
   hasCode,
   isAgent,
   isOmniModel,
+  outputLimit,
   thinkingLevelLabels,
   thinkingLevelTooltips,
 } from './catalog'
 import { protocolOptions, protocolsFor, protocolSupports, type ProtocolSetting } from './protocols'
 import { publicAPIBase } from './request'
-import { defaultSettings, outputLimit, useCompare, usePlayground } from './session'
+import { defaultSettings, useCompare, usePlayground } from './session'
 import { useTools } from './tools'
 import type { ImageOutput, ImageQuality, MediaResolution } from './types'
 import type { Model } from '@/types'

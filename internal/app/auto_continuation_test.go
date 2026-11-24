@@ -19,11 +19,12 @@ func TestAutoContinuationDisableSurvivesConcurrentStartup(t *testing.T) {
 	}
 	manager := &runtimeManager{
 		lifecycle: ctx, configPath: path, activeManagement: cfg, logs: &logOutput{},
-		current: configTestGeneration(ctx, path, cfg),
+		current: configTestGeneration(t, ctx, path, cfg),
 	}
+	manager.settings.Store(requestSettingsOf(cfg))
 	building := make(chan struct{})
 	release := make(chan struct{})
-	next := configTestGeneration(ctx, path, cfg)
+	next := configTestGeneration(t, ctx, path, cfg)
 	manager.factory = func(launch, _ context.Context, snapshot config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
 		next.service.SetAutoContinuation(snapshot.AutoContinuation)
 		close(building)

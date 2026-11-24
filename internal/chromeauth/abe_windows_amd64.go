@@ -3,14 +3,18 @@
 package chromeauth
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -40,11 +44,15 @@ const (
 )
 
 var (
-	kernel32               = windows.NewLazySystemDLL("kernel32.dll")
-	procVirtualAllocEx     = kernel32.NewProc("VirtualAllocEx")
-	procWriteProcessMemory = kernel32.NewProc("WriteProcessMemory")
-	procCreateRemoteThread = kernel32.NewProc("CreateRemoteThread")
-	procLoadLibraryW       = kernel32.NewProc("LoadLibraryW")
+	kernel32                   = windows.NewLazySystemDLL("kernel32.dll")
+	procVirtualAllocEx         = kernel32.NewProc("VirtualAllocEx")
+	procWriteProcessMemory     = kernel32.NewProc("WriteProcessMemory")
+	procCreateRemoteThread     = kernel32.NewProc("CreateRemoteThread")
+	procLoadLibraryW           = kernel32.NewProc("LoadLibraryW")
+	versionDLL                 = windows.NewLazySystemDLL("version.dll")
+	procGetFileVersionInfoSize = versionDLL.NewProc("GetFileVersionInfoSizeW")
+	procGetFileVersionInfo     = versionDLL.NewProc("GetFileVersionInfoW")
+	procVerQueryValue          = versionDLL.NewProc("VerQueryValueW")
 )
 
 //go:embed native/abe_helper_amd64.bin
@@ -91,20 +99,130 @@ func readAppBoundCiphertext(chromeRoot string) ([]byte, error) {
 	return decoded[len(appBoundPrefix):], nil
 }
 
-// findChromeExecutable 定位稳定版 Chrome 可执行文件
+// findChromeExecutable 定位官方稳定版 Google Chrome 可执行文件
 func findChromeExecutable() (string, error) {
+	return findChromeExecutableWith(chromeExecutableFromRegistry, chromeExecutableFallbacks())
+}
+
+// findChromeExecutableWith 依次从 HKCU、HKLM 注册表与常见安装目录查找官方 Google Chrome 可执行文件
+func findChromeExecutableWith(fromRegistry func(registry.Key) (string, error), fallbacks []string) (string, error) {
 	for _, root := range []registry.Key{registry.CURRENT_USER, registry.LOCAL_MACHINE} {
-		path, err := chromeExecutableFromRegistry(root)
-		if err == nil {
+		path, err := fromRegistry(root)
+		if err == nil && isGoogleChromeExecutable(path) {
 			return path, nil
 		}
 	}
-	for _, path := range chromeExecutableFallbacks() {
-		if fileInfo, err := os.Stat(path); err == nil && !fileInfo.IsDir() {
+	for _, path := range fallbacks {
+		if isGoogleChromeExecutable(path) {
 			return path, nil
 		}
 	}
-	return "", fmt.Errorf("找不到 chrome.exe")
+	return "", fmt.Errorf("找不到官方 Google Chrome chrome.exe")
+}
+
+// isGoogleChromeExecutable 通过 Windows PE 版本信息核对可执行文件为官方 Google Chrome
+func isGoogleChromeExecutable(path string) bool {
+	if fileInfo, err := os.Stat(path); err != nil || fileInfo.IsDir() {
+		return false
+	}
+	pathUTF16, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false
+	}
+	var handle uint32
+	size, _, _ := procGetFileVersionInfoSize.Call(
+		uintptr(unsafe.Pointer(pathUTF16)),
+		uintptr(unsafe.Pointer(&handle)),
+	)
+	if size == 0 {
+		return false
+	}
+	block := make([]byte, size)
+	ok, _, _ := procGetFileVersionInfo.Call(
+		uintptr(unsafe.Pointer(pathUTF16)),
+		0,
+		size,
+		uintptr(unsafe.Pointer(&block[0])),
+	)
+	if ok == 0 {
+		return false
+	}
+	for _, langCodePage := range versionTranslations(block) {
+		company := strings.TrimSpace(versionStringValue(block, fmt.Sprintf(`\StringFileInfo\%s\CompanyName`, langCodePage)))
+		product := strings.TrimSpace(versionStringValue(block, fmt.Sprintf(`\StringFileInfo\%s\ProductName`, langCodePage)))
+		if (strings.EqualFold(company, "Google LLC") || strings.EqualFold(company, "Google Inc.")) &&
+			strings.EqualFold(product, "Google Chrome") {
+			return true
+		}
+	}
+	return false
+}
+
+// versionTranslations 读取版本资源中的语言与代码页列表，缺失时回退到英文 Unicode 表
+func versionTranslations(block []byte) []string {
+	subBlock, err := windows.UTF16PtrFromString(`\VarFileInfo\Translation`)
+	if err != nil {
+		return []string{"040904b0"}
+	}
+	var ptr uintptr
+	var length uint32
+	ok, _, _ := procVerQueryValue.Call(
+		uintptr(unsafe.Pointer(&block[0])),
+		uintptr(unsafe.Pointer(subBlock)),
+		uintptr(unsafe.Pointer(&ptr)),
+		uintptr(unsafe.Pointer(&length)),
+	)
+	defer runtime.KeepAlive(block)
+	base := uintptr(unsafe.Pointer(&block[0]))
+	if ok == 0 || ptr < base || length < 4 {
+		return []string{"040904b0"}
+	}
+	offset := int(ptr - base)
+	size := int(length)
+	if offset < 0 || offset+size > len(block) {
+		return []string{"040904b0"}
+	}
+	count := size / 4
+	raw := block[offset : offset+count*4]
+	translations := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		lang := binary.LittleEndian.Uint16(raw[i*4 : i*4+2])
+		codePage := binary.LittleEndian.Uint16(raw[i*4+2 : i*4+4])
+		translations = append(translations, fmt.Sprintf("%04x%04x", lang, codePage))
+	}
+	return translations
+}
+
+// versionStringValue 从 PE 版本资源块中读取指定字符串项
+func versionStringValue(block []byte, path string) string {
+	subBlock, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return ""
+	}
+	var ptr uintptr
+	var length uint32
+	ok, _, _ := procVerQueryValue.Call(
+		uintptr(unsafe.Pointer(&block[0])),
+		uintptr(unsafe.Pointer(subBlock)),
+		uintptr(unsafe.Pointer(&ptr)),
+		uintptr(unsafe.Pointer(&length)),
+	)
+	defer runtime.KeepAlive(block)
+	base := uintptr(unsafe.Pointer(&block[0]))
+	if ok == 0 || ptr < base || length == 0 {
+		return ""
+	}
+	offset := int(ptr - base)
+	byteLen := int(length) * 2
+	if offset < 0 || offset+byteLen > len(block) {
+		return ""
+	}
+	units := make([]uint16, int(length))
+	raw := block[offset : offset+byteLen]
+	for i := range units {
+		units[i] = binary.LittleEndian.Uint16(raw[i*2 : i*2+2])
+	}
+	return windows.UTF16ToString(units)
 }
 
 // chromeExecutableFromRegistry 读取 Windows App Paths
@@ -118,7 +236,7 @@ func chromeExecutableFromRegistry(root registry.Key) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	value = strings.TrimSpace(value)
+	value = strings.Trim(strings.TrimSpace(value), `"`)
 	if value == "" {
 		return "", fmt.Errorf("Chrome App Paths 为空")
 	}
@@ -157,12 +275,10 @@ func decryptAppBoundCiphertext(chromePath string, encrypted []byte) ([]byte, err
 		return nil, fmt.Errorf("写入 ABE helper: %w", err)
 	}
 
-	restoreEnv := setTemporaryEnv(map[string]string{
-		abeInputEnv:  base64.StdEncoding.EncodeToString(encrypted),
-		abeOutputEnv: outputPath,
+	process, thread, err := startHiddenChrome(chromePath, filepath.Join(tempDir, "profile"), []string{
+		abeInputEnv + "=" + base64.StdEncoding.EncodeToString(encrypted),
+		abeOutputEnv + "=" + outputPath,
 	})
-	process, thread, err := startHiddenChrome(chromePath, filepath.Join(tempDir, "profile"))
-	restoreEnv()
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +294,6 @@ func decryptAppBoundCiphertext(chromePath string, encrypted []byte) ([]byte, err
 	if _, err := windows.ResumeThread(thread); err != nil {
 		return nil, fmt.Errorf("启动临时 Chrome: %w", err)
 	}
-	time.Sleep(750 * time.Millisecond)
 	if err := injectDLL(process, helperPath); err != nil {
 		return nil, err
 	}
@@ -186,7 +301,7 @@ func decryptAppBoundCiphertext(chromePath string, encrypted []byte) ([]byte, err
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(outputPath)
 		if err == nil {
-			if len(data) != 32 {
+			if bytes.HasPrefix(data, []byte("ERR ")) || len(data) != 32 {
 				return nil, fmt.Errorf("Chrome ABE helper 返回异常: %s", strings.TrimSpace(string(data)))
 			}
 			return data, nil
@@ -229,33 +344,8 @@ func closeChromeProcess(job windows.Handle, process windows.Handle, thread windo
 	windows.CloseHandle(process)
 }
 
-// temporaryEnvValue 保存父进程环境变量原值
-type temporaryEnvValue struct {
-	value string
-	set   bool
-}
-
-// setTemporaryEnv 设置子进程继承用环境变量
-func setTemporaryEnv(values map[string]string) func() {
-	oldValues := make(map[string]temporaryEnvValue, len(values))
-	for key, value := range values {
-		oldValue, ok := os.LookupEnv(key)
-		oldValues[key] = temporaryEnvValue{value: oldValue, set: ok}
-		os.Setenv(key, value)
-	}
-	return func() {
-		for key, oldValue := range oldValues {
-			if oldValue.set {
-				os.Setenv(key, oldValue.value)
-			} else {
-				os.Unsetenv(key)
-			}
-		}
-	}
-}
-
-// startHiddenChrome 创建隐藏的独立临时 Chrome
-func startHiddenChrome(chromePath string, profileDir string) (windows.Handle, windows.Handle, error) {
+// startHiddenChrome 创建隐藏的独立临时 Chrome，env 追加在本进程环境变量之后
+func startHiddenChrome(chromePath string, profileDir string, env []string) (windows.Handle, windows.Handle, error) {
 	commandLine := strings.Join([]string{
 		quoteWindowsArg(chromePath),
 		"--user-data-dir=" + quoteWindowsArg(profileDir),
@@ -282,6 +372,11 @@ func startHiddenChrome(chromePath string, profileDir string) (windows.Handle, wi
 		Flags:      startfUseShowWindow,
 		ShowWindow: swHide,
 	}
+	var environment []uint16
+	for _, entry := range append(os.Environ(), env...) {
+		environment = append(append(environment, utf16.Encode([]rune(entry))...), 0)
+	}
+	environment = append(environment, 0)
 	var processInfo windows.ProcessInformation
 	err = windows.CreateProcess(
 		chromePathUTF16,
@@ -289,8 +384,8 @@ func startHiddenChrome(chromePath string, profileDir string) (windows.Handle, wi
 		nil,
 		nil,
 		false,
-		createSuspended,
-		nil,
+		createSuspended|windows.CREATE_UNICODE_ENVIRONMENT,
+		&environment[0],
 		nil,
 		&startupInfo,
 		&processInfo,

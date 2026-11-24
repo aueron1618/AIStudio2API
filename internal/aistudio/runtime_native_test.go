@@ -3,7 +3,6 @@ package aistudio
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +26,7 @@ type nativeRuntimeFixture struct {
 	digest    string
 	prompt    string
 	body      io.ReadCloser
+	sent      []byte
 }
 
 func (runtime *nativeRuntimeFixture) Proof(_ context.Context, digest, prompt string) (string, error) {
@@ -48,7 +48,8 @@ func (*nativeRuntimeFixture) PageCatalog() camoufoxnative.PageCatalog {
 	return camoufoxnative.PageCatalog{Logging: []byte("[]"), Tier: []byte("[1]"), Models: []byte(pageFixtureModels)}
 }
 
-func (runtime *nativeRuntimeFixture) SendProtected(context.Context, string, http.Header, []byte) (*camoufoxnative.ProtectedResponse, error) {
+func (runtime *nativeRuntimeFixture) SendProtected(_ context.Context, _ string, _ http.Header, payload protectedBody) (*camoufoxnative.ProtectedResponse, error) {
+	runtime.sent = payload.Bytes()
 	body := runtime.body
 	if body == nil {
 		body = io.NopCloser(strings.NewReader(runtime.name))
@@ -212,13 +213,13 @@ func TestNativePrepareUsesRunOnlyForPageGenerate(t *testing.T) {
 	for _, run := range []bool{false, true} {
 		runtime := &nativeRuntimeFixture{}
 		worker := &NativeWorker{runtime: runtime}
-		request := ProtectedRequest{URL: makerSuiteRPCURL + "GenerateContent", Body: []byte(`[null,null,null,null,null]`), ProofField: 5, Prompt: "binding"}
+		request := ProtectedRequest{URL: makerSuiteRPCURL + "GenerateContent", Body: []byte(`[null,null,null,null,null]`), ProofAt: len(`[null,null,null,null,`), Prompt: "binding"}
 		if run {
 			request.PagePrompt = "typed"
 		}
 		prepared, err := worker.Prepare(t.Context(), request)
 		digest := sha256.Sum256([]byte("binding"))
-		if err != nil || runtime.run != run || runtime.digest != fmt.Sprintf("%x", digest) || runtime.prompt != request.PagePrompt || !strings.Contains(string(prepared.Body), `"!fixture"`) {
+		if err != nil || runtime.run != run || runtime.digest != fmt.Sprintf("%x", digest) || runtime.prompt != request.PagePrompt || !strings.Contains(string(prepared.Payload()), `"!fixture"`) || string(prepared.Body) != string(request.Body) || prepared.ProofAt != request.ProofAt {
 			t.Fatalf("Prepare run=%v: %+v, %v", run, prepared, err)
 		}
 	}
@@ -231,19 +232,19 @@ type nativeGenerateFixture struct {
 
 func (runtime *nativeGenerateFixture) Generate(ctx context.Context, turn camoufoxnative.GenerateTurn) (*camoufoxnative.ProtectedResponse, error) {
 	runtime.turn = turn
-	return runtime.SendProtected(ctx, "", nil, nil)
+	return runtime.SendProtected(ctx, "", nil, protectedBody{})
 }
 
 func TestNativeGenerateUsesPageRunWithoutPrecomputedProof(t *testing.T) {
 	runtime := &nativeGenerateFixture{nativeRuntimeFixture: &nativeRuntimeFixture{name: "generated"}}
 	worker := &NativeWorker{runtime: runtime}
-	body, err := json.Marshal([]any{"model", []any{[]any{[]any{[]any{nil, "hi"}}, "user"}}, nil, nil, nil})
+	body, proofAt, err := marshalWAAArray([]any{"model", []any{[]any{[]any{[]any{nil, "hi"}}, "user"}}, nil, nil, nil}, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := ProtectedRequest{URL: makerSuiteRPCURL + "GenerateContent", Body: body, ProofField: 5, Prompt: "binding", PagePrompt: "hi"}
+	request := ProtectedRequest{URL: makerSuiteRPCURL + "GenerateContent", Body: body, ProofAt: proofAt, Prompt: "binding", PagePrompt: "hi"}
 	prepared, err := worker.Prepare(t.Context(), request)
-	if err != nil || string(prepared.Body) != string(body) || runtime.digest != "" {
+	if err != nil || string(prepared.Body) != string(body) || prepared.ProofAt != proofAt || runtime.digest != "" {
 		t.Fatal("Camoufox Generate was given a precomputed proof instead of a real Run")
 	}
 	response, err := worker.SendProtected(t.Context(), request)
@@ -252,7 +253,7 @@ func TestNativeGenerateUsesPageRunWithoutPrecomputedProof(t *testing.T) {
 	}
 	defer response.Body.Close()
 	digest := sha256.Sum256([]byte("binding"))
-	if runtime.turn.Digest != fmt.Sprintf("%x", digest) || string(runtime.turn.Body[runtime.turn.ProofStart:runtime.turn.ProofEnd]) != "null" {
+	if runtime.turn.Digest != fmt.Sprintf("%x", digest) || string(runtime.turn.Body[runtime.turn.ProofStart:runtime.turn.ProofEnd]) != "null" || runtime.turn.Step == nil {
 		t.Fatalf("GenerateTurn lost binding or proof span: %+v", runtime.turn)
 	}
 }
@@ -261,21 +262,21 @@ func TestNativeGenerateReusesContinuationProof(t *testing.T) {
 	runtime := &nativeGenerateFixture{nativeRuntimeFixture: &nativeRuntimeFixture{name: "continued"}}
 	worker := &NativeWorker{runtime: runtime}
 	defer worker.Close()
-	body, err := json.Marshal([]any{"model", []any{[]any{[]any{[]any{nil, "hi"}}, "user"}}, nil, nil, nil})
+	body, proofAt, err := marshalWAAArray([]any{"model", []any{[]any{[]any{[]any{nil, "hi"}}, "user"}}, nil, nil, nil}, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := ProtectedRequest{URL: makerSuiteRPCURL + "GenerateContent", Body: body, ProofField: 5, Prompt: "binding", PagePrompt: "hi", Proof: "!first-round"}
+	request := ProtectedRequest{URL: makerSuiteRPCURL + "GenerateContent", Body: body, ProofAt: proofAt, Prompt: "binding", PagePrompt: "hi", Proof: "!first-round"}
 	prepared, err := worker.Prepare(t.Context(), request)
-	if err != nil || prepared.Proof != request.Proof || !strings.Contains(string(prepared.Body), `"!first-round"`) || runtime.digest != "" || runtime.run {
+	if err != nil || prepared.Proof != request.Proof || !strings.Contains(string(prepared.Payload()), `"!first-round"`) || string(prepared.Body) != string(body) || prepared.ProofAt != proofAt || runtime.digest != "" || runtime.run {
 		t.Fatalf("continuation generated a new proof: prepared=%+v err=%v", prepared, err)
 	}
-	request.Body, request.Headers, request.Proof = prepared.Body, prepared.Headers, prepared.Proof
+	request.Body, request.Headers, request.Proof, request.ProofAt = prepared.Body, prepared.Headers, prepared.Proof, prepared.ProofAt
 	response, err := worker.SendProtected(t.Context(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Proof != request.Proof || len(runtime.turn.Body) != 0 {
+	if response.Proof != request.Proof || len(runtime.turn.Body) != 0 || !strings.Contains(string(runtime.sent), `"!first-round"`) {
 		t.Errorf("continuation reran the page or lost its proof: response=%+v turn=%+v", response, runtime.turn)
 	}
 	if err := response.Body.Close(); err != nil {
@@ -503,6 +504,48 @@ func TestNativeReloadJoinsCanceledResponseBeforeCloseStarts(t *testing.T) {
 		}
 		if body.closeCall.Load() != 1 || previous.closes.Load() != 1 || worker.runtimeUses[previous] != nil {
 			t.Fatal("Reload and the late Close did not share cleanup ownership")
+		}
+	})
+}
+
+func TestNativeCloseJoinsResponseBeforeReleasingLease(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		body := &nativeCanceledBody{closing: make(chan struct{}), allow: make(chan struct{})}
+		runtime := &nativeRuntimeFixture{body: body}
+		worker := &NativeWorker{runtime: runtime, state: WorkerState{Phase: WorkerReady}}
+		account := &Account{ID: "fixture", Config: AccountConfig{Enabled: true}, State: AccountReady}
+		pool := NewAccountPool([]*Account{account}, 1)
+		lease, err := pool.AcquireFor(t.Context(), AccountSelection{AccountID: account.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lease.Release()
+		response, err := worker.SendProtected(ContextWithAccountLease(t.Context(), lease), ProtectedRequest{URL: "https://fixture.test/protected", Headers: http.Header{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := lease.Release(); err != nil {
+			t.Fatal(err)
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- worker.Close() }()
+		<-body.closing
+		synctest.Wait()
+		if len(closed) != 0 || body.closeCall.Load() != 1 || runtime.closes.Load() != 0 {
+			t.Error("worker Close did not join the in-flight response cleanup")
+		}
+		if next, waitable, err := pool.TryAcquireFor(t.Context(), AccountSelection{AccountID: account.ID}); next != nil || !waitable || err != nil {
+			t.Errorf("native cleanup released capacity early: %v, %t, %v", next, waitable, err)
+		}
+		close(body.allow)
+		if err := <-closed; err != nil {
+			t.Fatal(err)
+		}
+		if err := response.Body.Close(); err != nil || body.closeCall.Load() != 1 || runtime.closes.Load() != 1 {
+			t.Fatal("native shutdown duplicated response or runtime closure")
+		}
+		if !lease.released || lease.holds != 0 || worker.State().Phase != WorkerClosed {
+			t.Fatal("joined native shutdown leaked its lease or closing state")
 		}
 	})
 }

@@ -25,6 +25,7 @@ func (service *trackedService) Embed(ctx context.Context, request aistudio.Embed
 	service.requests.start(aistudio.GenerateRequest{ID: request.ID, Model: request.Model}, cancel)
 	request.CandidateAccountIDs, err = service.embeddingCandidates(requestCtx, modelID)
 	if err != nil {
+		err = endedRequestError(requestCtx, err)
 		api.SetAccessLogError(requestCtx, err)
 		service.requests.finish(request.ID, finalRequestState(err))
 		return aistudio.EmbeddingResult{}, err
@@ -49,7 +50,8 @@ func (service *trackedService) Embed(ctx context.Context, request aistudio.Embed
 		}
 		return recovered, recoveryErr
 	}
-	observed := aistudio.ContextWithAccountSelectionObserver(requestCtx, func(account *aistudio.Account) {
+	observed := aistudio.ContextWithAccountSelectionObserver(requestCtx, func(lease *aistudio.AccountLease) {
+		account := lease.Account()
 		workerGenerations[account.ID] = service.workers.WorkerGeneration(account.ID)
 		api.SetAccessLogChannel(requestCtx, string(aistudio.ChannelBuild))
 		api.SetAccessLogTarget(requestCtx, modelID, account.Config.Label)
@@ -58,6 +60,7 @@ func (service *trackedService) Embed(ctx context.Context, request aistudio.Embed
 		service.requests.markChannel(request.ID, string(aistudio.ChannelBuild))
 	})
 	result, err := service.service.(aistudio.EmbeddingService).Embed(observed, request)
+	err = endedRequestError(requestCtx, err)
 	if err == nil {
 		api.SetAccessLogGenerationResult(requestCtx, &aistudio.Usage{InputTokens: result.TokenCount, TotalTokens: result.TokenCount}, 0)
 	}

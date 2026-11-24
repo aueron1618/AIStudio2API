@@ -1,13 +1,20 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n, type TranslationKey } from '@/i18n'
-import { isBlockField, type LogRow, type LogStageState } from '@/logs'
-import LogLine from './LogLine.vue'
+import {
+  formatLogDuration,
+  isBlockField,
+  logDuration,
+  type LogRow,
+  type LogStageState,
+} from '@/logs'
+import LogLine, { useLogLineText } from './LogLine.vue'
 import UiCollapse from './UiCollapse.vue'
 import UiDisclosure from './UiDisclosure.vue'
 
 const props = defineProps<{ row: LogRow }>()
 const { t, locale, logText } = useI18n()
+const formatLine = useLogLineText()
 const stage = computed(() => props.row.stage!)
 // open 是步骤列表是否展开，由日志页按行保存
 const open = defineModel<boolean>('open', { required: true })
@@ -30,23 +37,47 @@ const latest = computed(() => props.row.events.at(-1)!)
 const ended = computed(() => stage.value.state !== 'running')
 // blocks 是最近一条日志是否带另起一行的长字段
 const blocks = computed(() => latest.value.fields?.some(isBlockField) ?? false)
+// duration 是最近一条日志的耗时，显示在行尾
+const duration = computed(() => {
+  const ms = logDuration(latest.value)
+  return ms === undefined ? '' : formatLogDuration(ms, locale.value)
+})
+// mainTooltip 返回阶段主行的完整文字，供截断时悬停显示
+const mainTooltip = computed(() =>
+  [
+    logText(stage.value.name),
+    ended.value && progress.value ? progress.value : '',
+    formatLine(latest.value, { message: !ended.value, part: 'inline', duration: false }),
+  ]
+    .filter(Boolean)
+    .join(' '),
+)
+// blocksTooltip 返回阶段原因行的完整文字，供截断时悬停显示
+const blocksTooltip = computed(() =>
+  blocks.value ? formatLine(latest.value, { message: false, part: 'block' }) : '',
+)
 </script>
 
 <template>
-  <div class="stage-log">
-    <div class="stage-heading">
-      <UiDisclosure v-model="open" />
-      <span class="stage-state" :class="`state-${stage.state}`">{{
-        stage.state === 'running' && progress ? progress : t(stateKeys[stage.state])
-      }}</span>
-      <strong>{{ logText(stage.name) }}</strong>
-      <span v-if="ended && progress" class="stage-progress">{{ progress }}</span>
-      <span class="stage-detail"><LogLine :entry="latest" :message="!ended" part="inline" /></span>
-    </div>
-    <p v-if="blocks" class="stage-blocks">
+  <div class="log-op log-op-stage">
+    <UiDisclosure v-model="open" />
+    <span class="log-state" :class="`log-state-${stage.state}`">{{
+      stage.state === 'running' && progress ? progress : t(stateKeys[stage.state])
+    }}</span>
+    <span
+      v-tooltip.overflow="mainTooltip"
+      class="log-op-main"
+      :class="blocks ? 'stage-main-single' : 'stage-main-clamp'"
+      ><strong class="log-op-title">{{ logText(stage.name) }}</strong
+      ><span v-if="ended && progress" class="stage-progress">{{ progress }}</span
+      ><span class="stage-detail"
+        ><LogLine :entry="latest" :message="!ended" part="inline" :duration="false" /></span
+    ></span>
+    <span class="log-op-duration">{{ duration }}</span>
+    <p v-if="blocks" v-tooltip.overflow="blocksTooltip" class="log-op-row stage-blocks">
       <LogLine :entry="latest" :message="false" part="block" />
     </p>
-    <UiCollapse :open="open">
+    <UiCollapse class="log-op-row log-op-detail" :open="open">
       <ol class="stage-timeline">
         <li v-for="(event, index) in row.events" :key="index">
           <time class="font-mono">{{
@@ -60,74 +91,46 @@ const blocks = computed(() => latest.value.fields?.some(isBlockField) ?? false)
 </template>
 
 <style scoped>
-.stage-heading {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 2px 10px;
-}
-.stage-heading :deep(.ui-disclosure) {
-  align-self: center;
-}
-.stage-heading strong {
-  color: var(--color-fg);
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-.stage-state {
-  align-self: center;
-  border: 1px solid currentColor;
-  border-radius: 4px;
-  padding: 0 6px;
-  line-height: 18px;
-  font-variant-numeric: tabular-nums;
-}
-.state-running {
-  color: var(--color-blue-400);
-}
-.state-completed {
-  color: var(--color-green-400);
-  background: color-mix(in oklab, var(--color-green-400) 8%, transparent);
-}
-.state-cancelled {
-  color: var(--color-yellow-400);
-}
-.state-failed {
-  color: var(--color-red-400);
+.log-op-title {
+  margin-inline-end: 8px;
 }
 .stage-progress {
+  margin-inline-end: 8px;
   color: var(--color-gray-500);
   font-variant-numeric: tabular-nums;
 }
-/* stage-detail 为最近一步的消息与短字段，最多两行，全文在步骤列表中 */
-.stage-detail {
+.stage-main-single {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stage-main-clamp {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
-  min-width: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 .stage-detail :deep(.log-line-message) {
   color: var(--color-gray-300);
 }
-/* stage-blocks 为最近一步另起一行的错误等长字段，最多两行，全文在步骤列表中 */
+/* stage-blocks 为最近一步另起一行的错误或原因字段，单行截断，悬停或步骤列表中看全文 */
 .stage-blocks {
-  display: -webkit-box;
   overflow: hidden;
   margin: 2px 0 0;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.stage-blocks :deep(.log-field-block) {
+  display: inline;
+  margin-inline-end: 8px;
+}
+/* stage-timeline 从行首开始，左边线对齐展开箭头的中线 */
 .stage-timeline {
   border-left: 1px solid var(--color-line);
   padding-left: 12px;
-  margin: 6px 0 6px 6px;
+  margin: 6px 0 6px 9px;
 }
 .stage-timeline li {
   display: flex;

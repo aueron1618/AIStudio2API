@@ -2,6 +2,7 @@ package aistudio
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -10,7 +11,6 @@ import (
 	"net/url"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +29,10 @@ const (
 	firefoxPingThreshold = 58 * time.Second
 	// firefoxPingTimeout 是 Firefox network.http.http2.ping-timeout，PING 超过该时长未应答时关闭连接
 	firefoxPingTimeout = 8 * time.Second
+	// nssTLSGREASEECHInner 是 NSS 为 TCP ClientHello 的 GREASE ECH 估算的内层 ClientHello 基础长度
+	nssTLSGREASEECHInner = 217
+	// firefoxConnectionTimeout 是 Firefox network.http.connection-timeout，直连 TCP 拨号在系统未先放弃时的上限
+	firefoxConnectionTimeout = 90 * time.Second
 	// firefoxTLSHandshakeTimeout 是 Firefox network.http.tls-handshake-timeout
 	firefoxTLSHandshakeTimeout = 30 * time.Second
 	// browserIdleConnTimeout 是 Firefox network.http.http2.timeout，空闲 HTTP/2 连接保留该时长后关闭
@@ -43,7 +47,16 @@ const (
 	firefoxWindowUpdateThreshold = 4 << 20
 	// firefoxMaxPersistentConns 是 Firefox network.http.max-persistent-connections-per-server：一类请求对一个主机的已建立与建立中连接数上限
 	firefoxMaxPersistentConns = 6
+	// firefoxPreflightCacheSize 是 Firefox nsPreflightCache 的条目上限
+	firefoxPreflightCacheSize = 100
+	// firefoxPreflightDefaultMaxAge 是 Firefox Access-Control-Max-Age 缺省或为空时的缓存有效期
+	firefoxPreflightDefaultMaxAge = 5 * time.Second
+	// firefoxPreflightMaxAgeLimit 是 Firefox Access-Control-Max-Age 的上限秒数（24 小时）
+	firefoxPreflightMaxAgeLimit = 86400
 )
+
+// firefoxDirectDialer 是直连拨号器，按 Firefox network.http.connection-timeout 设置 90 秒上限
+var firefoxDirectDialer = &net.Dialer{Timeout: firefoxConnectionTimeout}
 
 // firefoxHTTP2Settings 是 Firefox 158 在每条 HTTP/2 连接开头发送的 SETTINGS
 var firefoxHTTP2Settings = map[http2.SettingID]uint32{
@@ -64,7 +77,8 @@ var firefoxHTTP2SettingsOrder = []http2.SettingID{
 // firefoxPseudoHeaderOrder 是 Firefox 请求 HEADERS 帧的伪头顺序
 var firefoxPseudoHeaderOrder = []string{":method", ":path", ":authority", ":scheme"}
 
-// firefoxStreamPriority 返回 Firefox 为请求的 HEADERS 帧写入的优先级：页面文档、用户输入中发起的请求（Priority: u=0）与预载脚本（Priority: u=1）为 41，字体为 31，Priority: u=4, i 的图片为 12，其余页面图片为 11，Priority: u=6 的预取与 sendBeacon 为 1，其余（包括 Priority: u=6 的网站图标）为 21，线上权重各加 1
+// firefoxStreamPriority 返回 Firefox 按请求目的地与 Priority 头为 HEADERS 帧写入的优先级
+// Weight 为帧中的权重字节，实际权重为它加 1
 func firefoxStreamPriority(header fhttp.Header) http2.PriorityParam {
 	priority, destination := header.Get("Priority"), header.Get("Sec-Fetch-Dest")
 	switch {
@@ -103,7 +117,6 @@ var firefoxRequestHeaderOrder = []string{
 	"x-user-agent",
 	"content-length",
 	"origin",
-	"alt-used",
 	"sec-fetch-storage-access",
 	"cookie",
 	"upgrade-insecure-requests",
@@ -150,8 +163,60 @@ var gapiRequestHeaderOrder = []string{
 	"te",
 }
 
+// noStoreFetchHeaderOrder 是 Firefox 158 发出页面脚本以 fetch 的 cache: "no-store" 发出的请求（带 Pragma 与 Cache-Control）的请求头顺序，没有正文的 POST 把 content-length 写在 te 之前
+var noStoreFetchHeaderOrder = []string{
+	"user-agent",
+	"accept",
+	"accept-language",
+	"accept-encoding",
+	"content-type",
+	"referer",
+	"content-length",
+	"origin",
+	"sec-fetch-storage-access",
+	"cookie",
+	"sec-fetch-dest",
+	"sec-fetch-mode",
+	"sec-fetch-site",
+	"priority",
+	"pragma",
+	"cache-control",
+	"te",
+}
+
 // gapiHosts 是官网页面 gapi 请求的主机
 var gapiHosts = map[string]bool{"clients6.google.com": true, "content.googleapis.com": true}
+
+// feedbackHost 是页面 HaTS 问卷代理 iframe 与问卷请求的主机
+const feedbackHost = "feedback-pa.clients6.google.com"
+
+// feedbackRequestHeaderOrder 是 Firefox 158 载入问卷代理 iframe、从中发出问卷请求的请求头顺序
+var feedbackRequestHeaderOrder = []string{
+	"user-agent",
+	"accept",
+	"accept-language",
+	"accept-encoding",
+	"x-clientdetails",
+	"authorization",
+	"x-goog-authuser",
+	"x-requested-with",
+	"x-javascript-user-agent",
+	"x-goog-api-key",
+	"content-type",
+	"x-origin",
+	"x-referer",
+	"x-goog-encode-response-if-executable",
+	"content-length",
+	"origin",
+	"referer",
+	"cookie",
+	"upgrade-insecure-requests",
+	"sec-fetch-dest",
+	"sec-fetch-mode",
+	"sec-fetch-site",
+	"priority",
+	"te",
+}
 
 // browserManagedHeaders 是浏览器自行附加、不进入 CORS 预检 access-control-request-headers 的请求头
 var browserManagedHeaders = map[string]struct{}{
@@ -163,11 +228,46 @@ var browserManagedHeaders = map[string]struct{}{
 type browserRoundTripper struct {
 	transport *http2.Transport
 	pool      *firefoxConnPool
-	// http3 在直连时按 Alt-Svc 把请求切换到 HTTP/3，经代理时为 nil
-	http3 *firefoxHTTP3
-	mu    sync.Mutex
-	// preflights 按 URL 记录跨域请求（方法与脚本设置的头集合）的 CORS 预检缓存到期时刻
-	preflights map[string]map[string]time.Time
+	mu        sync.Mutex
+	// preflights 按 preflightCacheKey 记录 CORS 预检缓存
+	preflights map[string]preflightGrant
+	// preflightSeq 递增记录预检缓存条目的最近使用顺序
+	preflightSeq uint64
+}
+
+// preflightGrant 是一个 URL 的 CORS 预检缓存：预检响应允许的方法与请求头（小写）各自的到期时刻与最近使用序号，与 Firefox nsPreflightCache 相同
+type preflightGrant struct {
+	methods map[string]time.Time
+	headers map[string]time.Time
+	used    uint64
+}
+
+// allows 判断缓存是否覆盖请求：GET 与 POST 不查方法，其余方法与每个脚本设置的请求头都在有效期内
+func (grant preflightGrant) allows(method string, headers []string, now time.Time) bool {
+	if method != stdhttp.MethodGet && method != stdhttp.MethodPost && !now.Before(grant.methods[method]) {
+		return false
+	}
+	for _, name := range headers {
+		if !now.Before(grant.headers[name]) {
+			return false
+		}
+	}
+	return true
+}
+
+// purgeExpired 删除缓存项中已到期的方法与请求头，全部清空时返回 true
+func (grant preflightGrant) purgeExpired(now time.Time) bool {
+	for method, expiry := range grant.methods {
+		if !now.Before(expiry) {
+			delete(grant.methods, method)
+		}
+	}
+	for name, expiry := range grant.headers {
+		if !now.Before(expiry) {
+			delete(grant.headers, name)
+		}
+	}
+	return len(grant.methods) == 0 && len(grant.headers) == 0
 }
 
 type browserResponseBody struct {
@@ -176,10 +276,10 @@ type browserResponseBody struct {
 	trailer stdhttp.Header
 }
 
-// newBrowserRoundTripper 创建与当前 Camoufox 网络形状一致的传输：经代理时只用 HTTP/2，直连时按 Alt-Svc 改用 HTTP/3
+// newBrowserRoundTripper 创建与当前 Camoufox 网络形状一致的 HTTP/2 传输
 func newBrowserRoundTripper(proxyURL string) (stdhttp.RoundTripper, error) {
 	proxyURL = strings.TrimSpace(proxyURL)
-	var proxyDialer proxy.ContextDialer = &net.Dialer{}
+	var proxyDialer proxy.ContextDialer = firefoxDirectDialer
 	sessions := &firefoxSessionCache{sessions: map[firefoxSessionPeer][]*tls.ClientSessionState{}}
 	if proxyURL != "" {
 		parsed, err := url.Parse(proxyURL)
@@ -199,9 +299,9 @@ func newBrowserRoundTripper(proxyURL string) (stdhttp.RoundTripper, error) {
 		}
 	}
 	pool := &firefoxConnPool{
-		dial: func(address string, anonymous bool, timing *connectionTiming) (net.Conn, error) {
+		dial: func(ctx context.Context, address string, anonymous bool, timing *connectionTiming) (net.Conn, error) {
 			proxyDialer := timing.dialer(proxyDialer, sessions.tunnel)
-			return dialBrowserTLS(proxyDialer, sessions, address, anonymous)
+			return dialBrowserTLS(ctx, proxyDialer, sessions, address, anonymous)
 		},
 		conns:       map[string][]*http2.ClientConn{},
 		experienced: map[*http2.ClientConn]bool{},
@@ -223,11 +323,7 @@ func newBrowserRoundTripper(proxyURL string) (stdhttp.RoundTripper, error) {
 		StreamWindowUpdate:         firefoxStreamWindowUpdate,
 		WindowUpdateThreshold:      firefoxWindowUpdateThreshold,
 	}
-	roundTripper := &browserRoundTripper{preflights: map[string]map[string]time.Time{}, transport: pool.transport, pool: pool}
-	if proxyURL == "" {
-		roundTripper.http3 = newFirefoxHTTP3(pool)
-	}
-	return roundTripper, nil
+	return &browserRoundTripper{preflights: map[string]preflightGrant{}, transport: pool.transport, pool: pool}, nil
 }
 
 // connectionTimingKey 是请求 context 中记录该请求自己建立连接各阶段时刻的 *connectionTiming
@@ -282,10 +378,10 @@ func (dialer tracedDialer) DialContext(ctx context.Context, network, address str
 	return conn, err
 }
 
-// firefoxConnPool 按 Firefox 选择 HTTP/2 连接，匿名请求、携带凭据的请求与 HTTP/3 备用连接分开建连
+// firefoxConnPool 按 Firefox 选择 HTTP/2 连接，匿名请求与携带凭据的请求分开建连
 type firefoxConnPool struct {
 	transport *http2.Transport
-	dial      func(address string, anonymous bool, timing *connectionTiming) (net.Conn, error)
+	dial      func(ctx context.Context, address string, anonymous bool, timing *connectionTiming) (net.Conn, error)
 	mu        sync.Mutex
 	conns     map[string][]*http2.ClientConn
 	// experienced 记录握手完成后又分派过请求的连接，即 Firefox 的 IsExperienced
@@ -296,28 +392,41 @@ type firefoxConnPool struct {
 	added chan struct{}
 }
 
+// requestClass 标记请求在连接池中的类别：匿名请求（CORS 预检）与携带凭据的请求按类别建连，优先复用本类连接
+type requestClass struct {
+	anonymous bool
+}
+
+type requestClassKey struct{}
+
+func withRequestClass(ctx context.Context, class requestClass) context.Context {
+	return context.WithValue(ctx, requestClassKey{}, class)
+}
+
+func requestClassOf(ctx context.Context) requestClass {
+	class, _ := ctx.Value(requestClassKey{}).(requestClass)
+	return class
+}
+
 // poolKey 是地址与请求类别组成的连接池键
 func poolKey(address string, class requestClass) string {
 	if class.anonymous {
 		address += "|anonymous"
 	}
-	if class.fallback {
-		address += "|fallback"
-	}
 	return address
 }
 
 func (pool *firefoxConnPool) GetClientConn(request *fhttp.Request, address string) (*http2.ClientConn, error) {
-	return pool.get(request.Context(), address, true)
+	return pool.get(request.Context(), address)
 }
 
-// get 返回 context 所标类别下能接受新请求的连接，没有时取另一类已复用过的连接，仍没有时拨号并使用自己拨出的连接；dispatch 表示返回的连接将承载请求
-func (pool *firefoxConnPool) get(ctx context.Context, address string, dispatch bool) (*http2.ClientConn, error) {
+// get 返回 context 所标类别下能接受新请求的连接，没有时取另一类已复用过的连接，仍没有时拨号并使用自己拨出的连接
+func (pool *firefoxConnPool) get(ctx context.Context, address string) (*http2.ClientConn, error) {
 	class := requestClassOf(ctx)
 	key := poolKey(address, class)
-	inverted := poolKey(address, requestClass{anonymous: !class.anonymous, fallback: class.fallback})
+	inverted := poolKey(address, requestClass{anonymous: !class.anonymous})
 	pool.mu.Lock()
-	conn := pool.availableLocked(key, inverted, dispatch)
+	conn := pool.availableLocked(key, inverted)
 	for conn == nil && len(pool.conns[key])+pool.dialing[key] >= firefoxMaxPersistentConns {
 		added := pool.added
 		pool.mu.Unlock()
@@ -327,7 +436,7 @@ func (pool *firefoxConnPool) get(ctx context.Context, address string, dispatch b
 			return nil, ctx.Err()
 		}
 		pool.mu.Lock()
-		conn = pool.availableLocked(key, inverted, dispatch)
+		conn = pool.availableLocked(key, inverted)
 	}
 	if conn != nil {
 		pool.mu.Unlock()
@@ -339,13 +448,25 @@ func (pool *firefoxConnPool) get(ctx context.Context, address string, dispatch b
 	if timing != nil {
 		timing.dialed = true
 	}
-	raw, err := pool.dial(address, class.anonymous, timing)
+	return pool.connect(ctx, address, class, timing)
+}
+
+// connect 拨出一条 class 类别的连接并放入池中，调用方已为它计入 dialing，拨号随 ctx 取消而中止
+func (pool *firefoxConnPool) connect(ctx context.Context, address string, class requestClass, timing *connectionTiming) (*http2.ClientConn, error) {
+	var conn *http2.ClientConn
+	raw, err := pool.dial(ctx, address, class.anonymous, timing)
 	if err == nil {
-		conn, err = pool.transport.NewClientConn(raw)
-		if err != nil {
+		if ctx.Err() != nil {
 			_ = raw.Close()
+			err = ctx.Err()
+		} else {
+			conn, err = pool.transport.NewClientConn(raw)
+			if err != nil {
+				_ = raw.Close()
+			}
 		}
 	}
+	key := poolKey(address, class)
 	pool.mu.Lock()
 	pool.dialing[key]--
 	if err == nil {
@@ -356,11 +477,29 @@ func (pool *firefoxConnPool) get(ctx context.Context, address string, dispatch b
 	return conn, err
 }
 
-// availableLocked 返回本类能接受新请求的最早连接，没有时返回另一类已复用过的连接；dispatch 时把取到的本类连接记为已复用
-func (pool *firefoxConnPool) availableLocked(key string, inverted string, dispatch bool) *http2.ClientConn {
+// speculate 与 Firefox 为需要预检的跨域请求预先连接实际请求所属的连接类别一样，本类没有连接或拨号且另一类没有可复用的已复用连接时在后台拨出一条
+func (pool *firefoxConnPool) speculate(address string, class requestClass) {
+	key := poolKey(address, class)
+	inverted := poolKey(address, requestClass{anonymous: !class.anonymous})
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if len(pool.conns[key])+pool.dialing[key] > 0 {
+		return
+	}
+	if slices.ContainsFunc(pool.conns[inverted], func(conn *http2.ClientConn) bool {
+		return pool.experienced[conn] && conn.CanTakeNewRequest()
+	}) {
+		return
+	}
+	pool.dialing[key]++
+	go func() { _, _ = pool.connect(context.Background(), address, class, nil) }()
+}
+
+// availableLocked 返回本类能接受新请求的最早连接并把它记为已复用，没有时返回另一类已复用过的连接
+func (pool *firefoxConnPool) availableLocked(key string, inverted string) *http2.ClientConn {
 	for _, conn := range pool.conns[key] {
 		if conn.CanTakeNewRequest() {
-			pool.experienced[conn] = pool.experienced[conn] || dispatch
+			pool.experienced[conn] = true
 			return conn
 		}
 	}
@@ -370,28 +509,6 @@ func (pool *firefoxConnPool) availableLocked(key string, inverted string, dispat
 		}
 	}
 	return nil
-}
-
-// idle 报告该类别是否已有能接受新请求的连接
-func (pool *firefoxConnPool) idle(address string, class requestClass) bool {
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-	return slices.ContainsFunc(pool.conns[poolKey(address, class)], (*http2.ClientConn).CanTakeNewRequest)
-}
-
-// retire 让该类别的连接在已有请求结束后关闭，之后的请求不再复用它们
-func (pool *firefoxConnPool) retire(address string, class requestClass) {
-	pool.mu.Lock()
-	conns := pool.conns[poolKey(address, class)]
-	delete(pool.conns, poolKey(address, class))
-	for _, conn := range conns {
-		delete(pool.experienced, conn)
-	}
-	pool.notifyLocked()
-	pool.mu.Unlock()
-	for _, conn := range conns {
-		go func() { _ = conn.Shutdown(context.Background()) }()
-	}
 }
 
 func (pool *firefoxConnPool) MarkDead(dead *http2.ClientConn) {
@@ -460,6 +577,26 @@ func (cache *firefoxSessionCache) take(peer firefoxSessionPeer) (*tls.ClientSess
 	return nil, 0
 }
 
+// resumptionPSKLength 返回以编码为 raw（utls SessionState.Bytes）的 TLS 1.3 客户端会话恢复时 pre_shared_key 扩展的长度，会话不是 TLS 1.3 或票据已过期时为 0
+func resumptionPSKLength(raw []byte, ticket int) int {
+	if binary.BigEndian.Uint16(raw) != tls.VersionTLS13 || time.Now().After(time.Unix(int64(binary.BigEndian.Uint64(raw[len(raw)-12:])), 0)) {
+		return 0
+	}
+	binder := 32
+	if binary.BigEndian.Uint16(raw[3:]) == tls.TLS_AES_256_GCM_SHA384 {
+		binder = 48
+	}
+	return 2 + 2 + ticket + 4 + 2 + 1 + binder
+}
+
+// nssGREASEECHPayload 是 NSS 按内层基础长度 inner 与 pre_shared_key 扩展长度 psk 算出的 GREASE ECH 密文长度（不含 AEAD 标签），按 RFC 9849 补齐到 32 字节的整数倍
+func nssGREASEECHPayload(inner int, psk int) uint16 {
+	if psk > 0 {
+		inner += 4 + psk
+	}
+	return uint16(inner + 31 - (inner-1)%32)
+}
+
 // put 把服务器下发的票据存到 peer 名下，已满时丢弃最早收到的一张
 func (cache *firefoxSessionCache) put(peer firefoxSessionPeer, session *tls.ClientSessionState) {
 	cache.mu.Lock()
@@ -488,23 +625,33 @@ func (sessions handshakeSessions) Put(_ string, session *tls.ClientSessionState)
 	}
 }
 
-// dialBrowserTLS 以 Firefox ClientHello 建立 TLS 连接并要求协商 HTTP/2，按 Firefox 取票据的时机在建 socket 时与 CONNECT 隧道建立后取用会话票据
-func dialBrowserTLS(dialer proxy.ContextDialer, sessions *firefoxSessionCache, address string, anonymous bool) (net.Conn, error) {
+// dialBrowserTLS 以 Firefox ClientHello 建立 TLS 连接并要求协商 HTTP/2，拨号与 TLS 握手随 ctx 取消而中止（握手另套 30 秒上限），按 Firefox 取票据的时机在建 socket 时与 CONNECT 隧道建立后取用会话票据
+func dialBrowserTLS(ctx context.Context, dialer proxy.ContextDialer, sessions *firefoxSessionCache, address string, anonymous bool) (net.Conn, error) {
 	host, _, _ := net.SplitHostPort(address)
 	peer := firefoxSessionPeer{host: host, anonymous: anonymous}
 	session, psk := sessions.take(peer)
-	raw, err := dialer.DialContext(context.Background(), "tcp", address)
+	raw, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = raw.Close()
 		return nil, err
 	}
 	if sessions.tunnel {
 		session, psk = sessions.take(peer)
 	}
 	connection := tls.UClient(raw, &tls.Config{ServerName: host, OmitEmptyPsk: true, ClientSessionCache: handshakeSessions{sessions, peer, session}}, firefox158ClientHello(psk), false, false, false)
-	ctx, cancel := context.WithTimeout(context.Background(), firefoxTLSHandshakeTimeout)
+	handshakeCtx, cancel := context.WithTimeout(ctx, firefoxTLSHandshakeTimeout)
 	defer cancel()
-	if err := connection.HandshakeContext(ctx); err != nil {
+	if err := connection.HandshakeContext(handshakeCtx); err != nil {
 		_ = connection.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
 	if protocol := connection.ConnectionState().NegotiatedProtocol; protocol != http2.NextProtoTLS {
@@ -514,7 +661,7 @@ func dialBrowserTLS(dialer proxy.ContextDialer, sessions *firefoxSessionCache, a
 	return connection, nil
 }
 
-// RoundTrip 按缓存先发 CORS 预检再发送请求，context 标为匿名类别的请求经不带凭据的连接发送，请求在收到响应头前失败时清除该 URL 的预检缓存
+// RoundTrip 按缓存先发 CORS 预检再发送请求，context 标为匿名类别的请求经不带凭据的连接发送，请求在收到响应头前失败时清除它的预检缓存
 func (transport *browserRoundTripper) RoundTrip(request *stdhttp.Request) (*stdhttp.Response, error) {
 	err := transport.ensurePreflight(request)
 	var upstream *fhttp.Request
@@ -529,6 +676,7 @@ func (transport *browserRoundTripper) RoundTrip(request *stdhttp.Request) (*stdh
 	}
 	upstream.Host = request.Host
 	upstream.ContentLength = request.ContentLength
+	upstream.GetBody = request.GetBody
 	upstream.Header = make(fhttp.Header, len(request.Header)+2)
 	for name, values := range request.Header {
 		upstream.Header[name] = append([]string(nil), values...)
@@ -537,8 +685,10 @@ func (transport *browserRoundTripper) RoundTrip(request *stdhttp.Request) (*stdh
 	upstream.Header[fhttp.HeaderOrderKey] = orderedHeaderNames(upstream.Header, request.URL.Host)
 	response, err := transport.roundTrip(upstream, requestClassOf(request.Context()).anonymous)
 	if err != nil {
+		target := request.URL.String()
 		transport.mu.Lock()
-		delete(transport.preflights, request.URL.String())
+		delete(transport.preflights, preflightCacheKey(target, false))
+		delete(transport.preflights, preflightCacheKey(target, true))
 		transport.mu.Unlock()
 		return nil, err
 	}
@@ -563,26 +713,10 @@ func (transport *browserRoundTripper) RoundTrip(request *stdhttp.Request) (*stdh
 	}, nil
 }
 
-// roundTrip 执行上游请求，anonymous 表示不携带凭据的请求（CORS 预检与 CSP 报告）：直连时先按 Alt-Svc 选择 HTTP/3，其余经 HTTP/2 发送并记录响应的 Alt-Svc
+// roundTrip 经 HTTP/2 以 Firefox 的 HEADERS 帧优先级执行上游请求，anonymous 表示不携带凭据的请求（CORS 预检与 CSP 报告），请求 context 结束时中止拨号并立即返回
 func (transport *browserRoundTripper) roundTrip(request *fhttp.Request, anonymous bool) (*fhttp.Response, error) {
-	request = request.WithContext(withRequestClass(request.Context(), requestClass{anonymous: anonymous}))
-	if transport.http3 == nil {
-		return transport.roundTripHTTP2(request)
-	}
-	response, http2Request, err := transport.http3.send(request, anonymous)
-	if http2Request == nil {
-		return response, err
-	}
-	response, err = transport.roundTripHTTP2(http2Request)
-	if err == nil {
-		transport.http3.observe(request.URL.Hostname(), response.Header)
-	}
-	return response, err
-}
-
-// roundTripHTTP2 经 HTTP/2 以 Firefox 的 HEADERS 帧优先级执行上游请求，请求 context 结束时立即返回，未完成的拨号在后台结束
-func (transport *browserRoundTripper) roundTripHTTP2(request *fhttp.Request) (*fhttp.Response, error) {
-	request = request.WithContext(http2.WithHeaderPriority(request.Context(), firefoxStreamPriority(request.Header)))
+	ctx := withRequestClass(request.Context(), requestClass{anonymous: anonymous})
+	request = request.WithContext(http2.WithHeaderPriority(ctx, firefoxStreamPriority(request.Header)))
 	type result struct {
 		response *fhttp.Response
 		err      error
@@ -594,6 +728,9 @@ func (transport *browserRoundTripper) roundTripHTTP2(request *fhttp.Request) (*f
 	}()
 	select {
 	case value := <-done:
+		if value.err != nil && request.Context().Err() != nil {
+			return nil, request.Context().Err()
+		}
 		return value.response, value.err
 	case <-request.Context().Done():
 		go func() {
@@ -628,9 +765,6 @@ func (body *browserResponseBody) syncTrailer() {
 
 func (transport *browserRoundTripper) CloseIdleConnections() {
 	transport.pool.shutdown()
-	if transport.http3 != nil {
-		transport.http3.shutdown()
-	}
 }
 
 func standardHeader(source fhttp.Header) stdhttp.Header {
@@ -641,7 +775,34 @@ func standardHeader(source fhttp.Header) stdhttp.Header {
 	return result
 }
 
-// ensurePreflight 为带 Origin 的跨域 cors 请求按 Firefox 的流程先发 CORS 预检，结果按 Access-Control-Max-Age（上限 24 小时）缓存；no-cors 请求与只带安全头的 GET、HEAD、POST 不预检
+// preflightCacheKey 返回 URL 与是否匿名的 CORS 预检缓存键，与 Firefox nsPreflightCache 一样区分是否携带凭据
+func preflightCacheKey(target string, anonymous bool) string {
+	if anonymous {
+		return "anonymous " + target
+	}
+	return target
+}
+
+// parsePreflightMaxAge 按 Firefox nsCORSPreflightListener::AddResultToCache 解析 Access-Control-Max-Age：空值按 5 秒，纯数字按秒封顶 24 小时，0 或含非数字字符时不缓存
+func parsePreflightMaxAge(value string) (time.Duration, bool) {
+	if value == "" {
+		return firefoxPreflightDefaultMaxAge, true
+	}
+	var seconds uint64
+	for i := range len(value) {
+		ch := value[i]
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+		seconds = min(seconds*10+uint64(ch-'0'), firefoxPreflightMaxAgeLimit)
+	}
+	if seconds == 0 {
+		return 0, false
+	}
+	return time.Duration(seconds) * time.Second, true
+}
+
+// ensurePreflight 为带 Origin 的跨域 cors 请求按 Firefox 的流程先发 CORS 预检：携带凭据的请求先在后台预先拨出带凭据的连接，预检走匿名连接，预检响应允许的方法与请求头按 Access-Control-Max-Age（上限 24 小时、缓存上限 100 条）逐个缓存；no-cors 请求与只带安全头的 GET、HEAD、POST 不预检
 func (transport *browserRoundTripper) ensurePreflight(request *stdhttp.Request) error {
 	origin, err := url.Parse(request.Header.Get("Origin"))
 	if request.Method == stdhttp.MethodOptions || request.Header.Get("Sec-Fetch-Mode") == "no-cors" || err != nil || origin.Host == "" || origin.Host == request.URL.Host {
@@ -652,13 +813,27 @@ func (transport *browserRoundTripper) ensurePreflight(request *stdhttp.Request) 
 		return nil
 	}
 	target := request.URL.String()
-	requestHeaders := strings.Join(unsafe, ",")
-	key := request.Method + " " + requestHeaders
+	class := requestClassOf(request.Context())
+	key := preflightCacheKey(target, class.anonymous)
+	now := time.Now()
 	transport.mu.Lock()
-	expiry, cached := transport.preflights[target][key]
+	grant, exists := transport.preflights[key]
+	if exists {
+		transport.preflightSeq++
+		grant.used = transport.preflightSeq
+		transport.preflights[key] = grant
+	}
+	cached := exists && grant.allows(request.Method, unsafe, now)
 	transport.mu.Unlock()
-	if cached && time.Now().Before(expiry) {
+	if cached {
 		return nil
+	}
+	if !class.anonymous {
+		port := request.URL.Port()
+		if port == "" {
+			port = "443"
+		}
+		transport.pool.speculate(net.JoinHostPort(request.URL.Hostname(), port), class)
 	}
 	preflight, err := fhttp.NewRequestWithContext(request.Context(), stdhttp.MethodOptions, target, nil)
 	if err != nil {
@@ -672,7 +847,7 @@ func (transport *browserRoundTripper) ensurePreflight(request *stdhttp.Request) 
 	}
 	preflight.Header.Set("Accept", "*/*")
 	preflight.Header.Set("Access-Control-Request-Method", request.Method)
-	preflight.Header.Set("Access-Control-Request-Headers", requestHeaders)
+	preflight.Header.Set("Access-Control-Request-Headers", strings.Join(unsafe, ","))
 	preflight.Header.Set("Priority", "u=4")
 	preflight.Header.Set("Te", "trailers")
 	preflight.Header[fhttp.HeaderOrderKey] = orderedHeaderNames(preflight.Header, request.URL.Host)
@@ -685,15 +860,47 @@ func (transport *browserRoundTripper) ensurePreflight(request *stdhttp.Request) 
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return fmt.Errorf("CORS 预检返回 HTTP %d", response.StatusCode)
 	}
-	maxAge := 5 * time.Second
-	if seconds, err := strconv.Atoi(response.Header.Get("Access-Control-Max-Age")); err == nil {
-		maxAge = min(time.Duration(seconds)*time.Second, 24*time.Hour)
+	maxAge, ok := parsePreflightMaxAge(response.Header.Get("Access-Control-Max-Age"))
+	if !ok {
+		return nil
 	}
+	storedAt := time.Now()
+	expiry := storedAt.Add(maxAge)
 	transport.mu.Lock()
-	if transport.preflights[target] == nil {
-		transport.preflights[target] = map[string]time.Time{}
+	grant, exists = transport.preflights[key]
+	if !exists {
+		if len(transport.preflights) >= firefoxPreflightCacheSize {
+			for cachedKey, cachedGrant := range transport.preflights {
+				if cachedGrant.purgeExpired(storedAt) {
+					delete(transport.preflights, cachedKey)
+				}
+			}
+			if len(transport.preflights) >= firefoxPreflightCacheSize {
+				var oldestKey string
+				var oldestUsed uint64
+				for cachedKey, cachedGrant := range transport.preflights {
+					if oldestKey == "" || cachedGrant.used < oldestUsed {
+						oldestKey, oldestUsed = cachedKey, cachedGrant.used
+					}
+				}
+				delete(transport.preflights, oldestKey)
+			}
+		}
+		grant = preflightGrant{methods: map[string]time.Time{}, headers: map[string]time.Time{}}
 	}
-	transport.preflights[target][key] = time.Now().Add(maxAge)
+	transport.preflightSeq++
+	grant.used = transport.preflightSeq
+	for _, method := range strings.Split(response.Header.Get("Access-Control-Allow-Methods"), ",") {
+		if method = strings.TrimSpace(method); method != "" {
+			grant.methods[method] = expiry
+		}
+	}
+	for _, name := range strings.Split(response.Header.Get("Access-Control-Allow-Headers"), ",") {
+		if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
+			grant.headers[name] = expiry
+		}
+	}
+	transport.preflights[key] = grant
 	transport.mu.Unlock()
 	return nil
 }
@@ -724,6 +931,9 @@ func requestHeaderOrder(host string) []string {
 	if gapiHosts[host] {
 		return gapiRequestHeaderOrder
 	}
+	if host == feedbackHost {
+		return feedbackRequestHeaderOrder
+	}
 	if host != waaHost && host != clearcutHost {
 		return firefoxRequestHeaderOrder
 	}
@@ -736,6 +946,13 @@ func requestHeaderOrder(host string) []string {
 // orderedHeaderNames 返回按 Firefox 顺序排列的全部请求头名，顺序表之外的头按字母序排在最后；跨源样式表引用的字体在 CORS 加上 origin 之后才写入 referer
 func orderedHeaderNames(headers fhttp.Header, host string) []string {
 	order := requestHeaderOrder(host)
+	if headers.Get("Pragma") != "" {
+		order = noStoreFetchHeaderOrder
+		if headers.Get("Content-Type") == "" {
+			order = slices.DeleteFunc(slices.Clone(order), func(name string) bool { return name == "content-length" })
+			order = slices.Insert(order, slices.Index(order, "te"), "content-length")
+		}
+	}
 	if headers.Get("Sec-Fetch-Dest") == "font" && !strings.HasPrefix(headers.Get("Referer"), headers.Get("Origin")+"/") {
 		order = slices.DeleteFunc(slices.Clone(order), func(name string) bool { return name == "origin" })
 		order = slices.Insert(order, slices.Index(order, "referer"), "origin")
@@ -756,7 +973,8 @@ func orderedHeaderNames(headers fhttp.Header, host string) []string {
 	return append(slices.Clone(order), remaining...)
 }
 
-// firefox158ClientHello 返回以 tls-client 的 Firefox 148 档案为底、密码套件与支持的组按 Firefox 158 排列、GREASE ECH 按 NSS 选套件与长度的 ClientHello；psk 为 pre_shared_key 扩展长度，非 0 时与 Firefox 的 TLS 1.3 会话恢复一样去掉 session_ticket、末尾加 pre_shared_key
+// firefox158ClientHello 返回 Firefox 158 的 ClientHello，以 tls-client 的 Firefox 148 档案为底
+// psk 为 pre_shared_key 扩展长度，非 0 时去掉 session_ticket、末尾加 pre_shared_key
 func firefox158ClientHello(psk int) tls.ClientHelloID {
 	base := profiles.Firefox_148
 	hello := base.GetClientHelloId()
@@ -789,7 +1007,7 @@ func firefox158ClientHello(psk int) tls.ClientHelloID {
 				typed.Curves = []tls.CurveID{tls.X25519MLKEM768, tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521}
 			case *tls.GREASEEncryptedClientHelloExtension:
 				typed.CandidateCipherSuites = []tls.HPKESymmetricCipherSuite{{KdfId: dicttls.HKDF_SHA256, AeadId: dicttls.AEAD_AES_128_GCM}, {KdfId: dicttls.HKDF_SHA256, AeadId: dicttls.AEAD_CHACHA20_POLY1305}}
-				typed.CandidatePayloadLens = []uint16{nssGREASEECHPayload(nssTLSGREASEECHInner, psk, false)}
+				typed.CandidatePayloadLens = []uint16{nssGREASEECHPayload(nssTLSGREASEECHInner, psk)}
 			}
 		}
 		if psk > 0 {

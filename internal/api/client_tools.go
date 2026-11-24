@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 )
@@ -109,8 +110,7 @@ func functionCallArguments(arguments string) json.RawMessage {
 	if arguments == "" {
 		return json.RawMessage(`{}`)
 	}
-	var object map[string]json.RawMessage
-	if json.Unmarshal([]byte(arguments), &object) == nil && object != nil {
+	if strings.HasPrefix(strings.TrimLeft(arguments, " \t\r\n"), "{") && json.Valid([]byte(arguments)) {
 		return json.RawMessage(arguments)
 	}
 	encoded, _ := json.Marshal(map[string]string{"_raw": arguments})
@@ -132,6 +132,10 @@ func responsesToolKind(tools []responsesTool, name string) string {
 		case "computer_use_preview", "computer":
 			if name == "computer" {
 				return tool.Type
+			}
+		case "tool_search":
+			if tool.Execution == "client" && name == clientToolSearch {
+				return "tool_search"
 			}
 		case "namespace":
 			for _, inner := range tool.Tools {

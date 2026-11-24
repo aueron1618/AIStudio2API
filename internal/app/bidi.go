@@ -23,6 +23,7 @@ func (service *trackedService) OpenBidi(ctx context.Context, request aistudio.Bi
 	if request.AccountID == "" && len(request.AllowedAccountIDs) == 0 {
 		request.AllowedAccountIDs, err = service.bidiCandidates(requestCtx, request.Model, request.ModelAccessScope)
 		if err != nil {
+			err = endedRequestError(requestCtx, err)
 			api.SetAccessLogError(ctx, err)
 			cancel()
 			return nil, err
@@ -51,12 +52,14 @@ func (service *trackedService) OpenBidi(ctx context.Context, request aistudio.Bi
 		)
 		return recovered, recoveryErr
 	}
-	requestCtx = aistudio.ContextWithAccountSelectionObserver(requestCtx, func(account *aistudio.Account) {
+	requestCtx = aistudio.ContextWithAccountSelectionObserver(requestCtx, func(lease *aistudio.AccountLease) {
+		account := lease.Account()
 		workerGenerations[account.ID] = service.workers.WorkerGeneration(account.ID)
 		api.SetAccessLogTarget(ctx, request.Model, account.Config.Label)
 	})
 	session, err := service.service.(aistudio.BidiService).OpenBidi(requestCtx, request)
 	if err != nil {
+		err = endedRequestError(requestCtx, err)
 		api.SetAccessLogError(ctx, err)
 		cancel()
 		return nil, err
@@ -131,7 +134,7 @@ func (service *trackedService) bidiRequestContext(ctx context.Context) (context.
 		service.lifecycleMu.Unlock()
 		return nil, nil, service.stoppedError()
 	}
-	requestCtx, cancel := context.WithCancel(ctx)
+	requestCtx, cancel := context.WithCancel(aistudio.ContextWithServiceRun(ctx, service.dataContext))
 	stopData := context.AfterFunc(service.dataContext, cancel)
 	context.AfterFunc(requestCtx, func() {
 		stopData()

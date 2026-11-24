@@ -220,7 +220,8 @@ func TestAssistantModelAliasesUseBuildRoutes(t *testing.T) {
 	if err := pool.SetCatalog(account.ID, aistudio.BenefitTierFree, models); err != nil {
 		t.Fatal(err)
 	}
-	service := &trackedService{pool: pool, models: models, modelMapping: []config.ModelAlias{{Alias: "friendly", Model: "shared-build(high)"}}}
+	service := &trackedService{pool: pool, models: models}
+	service.SetRequestPolicy([]config.ModelAlias{{Alias: "friendly", Model: "shared-build(high)"}}, config.DefaultMaxAccountSwitches)
 	const antiPrefix = "\u6297\u622a\u65ad-"
 	handler := api.NewHandler(service, api.Config{AntiTruncation: func() bool { return true }})
 	for _, prefix := range []string{"/v1", "/build/v1"} {

@@ -3,6 +3,7 @@ package api
 import (
 	"cmp"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"mime"
@@ -120,6 +121,17 @@ func interactionStep(event aistudio.Event, audio outputAudioFormat) (map[string]
 		return nil, nil, nil
 	}
 	return map[string]any{"type": "model_output", "content": []map[string]any{content}}, content, nil
+}
+
+// interactionCallStream 返回函数调用步骤的 step.start 内容与 arguments_delta 增量，start 带空参数对象，增量以 JSON 字符串携带完整参数
+func interactionCallStream[V any](step map[string]V) (map[string]any, map[string]any) {
+	start := make(map[string]any, len(step))
+	for key, value := range step {
+		start[key] = value
+	}
+	start["arguments"] = map[string]any{}
+	arguments, _ := json.Marshal(step["arguments"])
+	return start, map[string]any{"type": "arguments_delta", "arguments": string(arguments)}
 }
 
 // interactionWordInfos 把转录逐词时间投影为 word_info 注释，下标为词在 text 中的字节位置加 offset
@@ -310,14 +322,37 @@ func interactionSteps(result generationResult, audio outputAudioFormat, summarie
 	return steps, nil
 }
 
+// interactionTextDelta 返回正文 step.delta 的 SSE 帧，字节与按官方字段顺序编码的同一事件相同，eventID 为空时不写 event_id；其他事件返回 false
+func interactionTextDelta(kind string, value map[string]any, eventID string) ([]byte, bool) {
+	delta, _ := value["delta"].(map[string]any)
+	index, indexed := value["index"].(int)
+	text, texted := delta["text"].(string)
+	if kind != "step.delta" || len(value) != 2 || len(delta) != 2 || delta["type"] != "text" || !indexed || !texted {
+		return nil, false
+	}
+	frame := append(appendJSONString(append(sseFrameStart(kind, 96+len(text)), `{"delta":{"type":"text","text":`...), text), '}')
+	if eventID != "" {
+		frame = append(append(append(frame, `,"event_id":"`...), eventID...), '"')
+	}
+	frame = strconv.AppendInt(append(frame, `,"event_type":"step.delta","index":`...), int64(index), 10)
+	return append(frame, "}\n\n"...), true
+}
+
 // streamInteraction 输出创建、步骤增量、步骤结束与交互终态，返回生成失败的错误；客户端流的响应头由调用方写出
 func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, request interactionRequest, generate aistudio.GenerateRequest, audioExpected bool, previous responseHistory, current []aistudio.Content, created string, events <-chan aistudio.Event) error {
 	sequence := 0
 	send := func(kind string, value map[string]any) error {
-		value["event_type"] = kind
+		eventID := ""
 		if request.stream != nil {
 			sequence++
-			value["event_id"] = strconv.Itoa(sequence)
+			eventID = strconv.Itoa(sequence)
+		}
+		if frame, ok := interactionTextDelta(kind, value, eventID); ok {
+			return writeSSEFrame(w, frame)
+		}
+		value["event_type"] = kind
+		if eventID != "" {
+			value["event_id"] = eventID
 		}
 		return writeSSE(w, kind, officialOrder("interactions", value))
 	}
@@ -409,7 +444,10 @@ func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, reque
 			if kind == "thought" {
 				start["summary"] = []any{}
 			}
-			if standalone {
+			switch {
+			case kind == "function_call":
+				start, delta = interactionCallStream(step)
+			case standalone:
 				start = maps.Clone(step)
 				delete(start, "signature")
 			}
@@ -483,7 +521,7 @@ func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, reque
 
 // interactionErrorEvent 返回交互流的 error 事件正文，eventID 非空时带 event_id
 func interactionErrorEvent(err error, eventID string) map[string]any {
-	event := map[string]any{"event_type": "error", "error": map[string]any{"code": geminiErrorStatus(err), "message": err.Error()}}
+	event := map[string]any{"event_type": "error", "error": map[string]any{"code": geminiErrorStatus(err), "message": publicReason(err)}}
 	if eventID != "" {
 		event["event_id"] = eventID
 	}

@@ -23,6 +23,7 @@ export type AccountState =
 export interface Account {
   id: string
   label: string
+  note?: string
   enabled: boolean
   state: AccountState
   proxy: string
@@ -34,9 +35,23 @@ export interface Account {
   message: string
   // pairing_renewed_at 是远程添加的账户最近一次由原电脑续签的时间
   pairing_renewed_at?: string
-  // transition 是账户启停的后台收尾阶段：draining 等待在途请求结束并关闭 Worker，syncing 同步模型目录
-  transition?: 'draining' | 'syncing'
+  // transition 是账户正在进行的后台操作：draining 停用收尾并关闭 Worker，syncing 同步模型目录，saving 保存配置，refreshing 立即刷新
+  transition?: 'draining' | 'syncing' | 'saving' | 'refreshing'
+  // transition_step 是后台操作当前的步骤：等该账户的在途请求结束、读取权益与模型目录、核对验证状态
+  transition_step?: 'waiting' | 'catalog' | 'verifying'
+  // transition_index 与 transition_total 是立即刷新当前步骤的序号与步数
+  transition_index?: number
+  transition_total?: number
+  // transition_since 是进入当前后台阶段的时刻
+  transition_since?: string
+  // active_requests 是账户上进行中的请求数
   active_requests: number
+  // catalog_error 是已有模型目录的账户最近一次目录同步失败的原因
+  catalog_error?: string
+  // verification_required 表示账户因 Google 要求完成账户验证而受限，可在账户页打开验证页扫码
+  verification_required?: boolean
+  // device_bound_session 表示账户会话带 __Secure-1PSIDRTS 且缺少本地与远程续签材料，约 2 小时内失效
+  device_bound_session?: boolean
 }
 
 // AccountExit 是一个账户出口代理的公网 IP 与按 IP 定位的国家，proxy 为空时是直连，查询失败时 error 为原因
@@ -67,6 +82,7 @@ export interface AccountRefresh {
 
 export interface AccountDraft {
   label: string
+  note: string
   enabled: boolean
   proxy: string
   locale: string
@@ -84,8 +100,20 @@ export interface ChromeImportProfile {
   profile: string
   display_name: string
   email: string
+  // imported 表示该邮箱已存在于账户列表中
+  imported?: boolean
+  // benefit_tier 是账户已知或检测出的权益等级
+  benefit_tier?: string
   // restricted 是账户服务受限的原因，受限的账户不能导入
   restricted: string
+}
+
+// ChromeProfileTier 是按需检测单个本机 Chrome 账号权益的流式结果
+export interface ChromeProfileTier {
+  id: string
+  benefit_tier?: string
+  restricted?: string
+  error?: string
 }
 
 export interface PairingToken {
@@ -117,12 +145,14 @@ export interface AccountTaskItem {
   state: 'pending' | 'running' | 'done' | 'failed'
   code?: string
   error?: string
+  // step 是处理中的账户当前的步骤：等待登录、读取浏览器里的登录状态、检查 AI Studio 访问、保存账户、核对验证状态、等待扫码验证
+  step?: 'login' | 'reading' | 'checking' | 'saving' | 'verifying' | 'verify'
 }
 
-// AccountTask 是在服务端运行的添加或重新登录账户任务，view 为显示登录画面的登录窗口 ID
+// AccountTask 是在服务端运行的添加、重新登录、验证或刷新账户任务，view 为显示登录或验证画面的窗口 ID；刷新任务中账户的 label 为账户 ID
 export interface AccountTask {
   id: string
-  kind: 'login' | 'relogin' | 'chrome' | 'cookies' | 'browser'
+  kind: 'login' | 'relogin' | 'verify' | 'chrome' | 'cookies' | 'browser' | 'refresh'
   view?: string
   state: 'running' | 'done' | 'failed'
   items: AccountTaskItem[]
@@ -149,6 +179,10 @@ export interface CookieBrowser {
   error: string
   // restricted 是账户服务受限的原因，受限的账户不能导入
   restricted: string
+  // sign_in_required 为真时该账户已导入且需要重新登录，导入时原地更新它的认证状态
+  sign_in_required: boolean
+  // benefit_tier 是识别阶段读取到的账户权益等级
+  benefit_tier?: string
 }
 
 interface AccountCounters {
@@ -159,7 +193,7 @@ interface AccountCounters {
   auth_required: number
 }
 
-// PreparationStatus 是 Camoufox 或出口 IP 库是否就绪、是否正在下载或解压、正在进行的下载与最近一次准备失败的原因
+// PreparationStatus 是 Camoufox 是否就绪、是否正在下载或解压、正在进行的下载与最近一次准备失败的原因
 export interface PreparationStatus {
   ready: boolean
   preparing: boolean
@@ -175,10 +209,24 @@ export interface ServiceStatus {
   active_requests: number
   accounts: AccountCounters
   camoufox: PreparationStatus
-  // geoip 是识别出口所在地的 IP 库的准备状态，结构与 camoufox 相同
-  geoip: PreparationStatus
   chrome_import: boolean
+  // transition 是生成服务正在进行的启动或停止步骤
+  transition?: ServiceTransition
+  // transition_since 是进入当前步骤的时刻
+  transition_since?: string
+  // time 是生成这份状态的服务端时刻
+  time: string
 }
+
+// ServiceTransition 是生成服务的启动步骤（检测代理池、等待 Camoufox 下载、等待首个账户读取模型目录、开始预热）与停止步骤（停止在途请求、等待模型目录同步停止、关闭 Worker）
+export type ServiceTransition =
+  | 'probe_proxies'
+  | 'wait_camoufox'
+  | 'wait_catalog'
+  | 'start_prewarm'
+  | 'cancel_requests'
+  | 'wait_catalog_stop'
+  | 'close_workers'
 
 export interface UpdateStatus {
   current: string
@@ -193,6 +241,8 @@ export interface UpdateStatus {
   error?: string
   updating: boolean
   progress?: UpdateProgress
+  // log_dir 是服务日志目录的绝对路径
+  log_dir: string
 }
 
 // UpdateProgress 是进行中的在线更新的阶段与发行包的已下载和总字节数，总字节数未知时为 0
@@ -249,6 +299,8 @@ interface RequestLog {
   input_files?: number
   parameters?: Record<string, string>
   first_event_ms?: number
+  proof_ms?: number
+  proof_phases?: ProofPhases & { settings_skipped?: number }
   upstream_bytes?: number
   channel?: UpstreamChannel
   usage?: {
@@ -368,6 +420,10 @@ export interface RequestSummary {
   channel?: UpstreamChannel
   state: RequestState
   started_at: string
+  // sent_at 是最近一次取得账户发往上游的时刻
+  sent_at?: string
+  // last_data_at 是最近一次收到上游输出的时刻
+  last_data_at?: string
 }
 
 // FirstEventLatency 是一个模型与通道近期原请求首事件等待的 p95 与样本数
@@ -406,9 +462,12 @@ export interface ServiceConfig {
   auto_continuation: boolean
   continuation_rewrite: boolean
   continuation_prompt: string
+  user_message_rewrite: 'off' | 'traditional' | 'martian'
+  thinking_guard: boolean
   strip_thought_signatures: boolean
   first_event_hedge: string
   first_event_hedge_models: string
+  first_event_timeout: string
   auth_states: string
   listen_addr: string
   preview_listen_addr: string
@@ -487,7 +546,7 @@ interface UsageGroup extends UsageStats {
   key: string
 }
 
-interface UsagePair extends UsageStats {
+export interface UsagePair extends UsageStats {
   account: string
   model: string
 }
@@ -515,7 +574,6 @@ export interface UsageReport {
   stack_by: UsageDimension
   series: UsageSeries[]
   groups: Record<UsageDimension | 'status', UsageGroup[]>
-  pairs: UsagePair[]
   options: Record<UsageDimension, string[]>
 }
 
@@ -524,6 +582,14 @@ interface RequestAttempt {
   channel: string
   error: string
   duration_ms: number
+}
+
+// ProofPhases 是 WAA 耗时的分项毫秒数
+export interface ProofPhases {
+  lock_ms: number
+  interaction_ms: number
+  refresh_ms: number
+  compute_ms: number
 }
 
 export interface UsageRecord {
@@ -541,6 +607,8 @@ export interface UsageRecord {
   duration_ms: number
   first_event_ms: number
   queue_ms: number
+  proof_ms: number
+  proof_phases: ProofPhases
   input_tokens: number
   cached_tokens: number
   reasoning_tokens: number

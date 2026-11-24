@@ -44,13 +44,23 @@ func (admin configStartAdmin) StopService(context.Context) (api.AdminStatus, err
 	return api.AdminStatus{State: "STOPPED"}, nil
 }
 
-func configTestGeneration(ctx context.Context, path string, cfg config.Config) *runtimeGeneration {
+func newTestRequestRegistry(t *testing.T) *requestRegistry {
+	t.Helper()
+	registry := newRequestRegistry()
+	t.Cleanup(registry.close)
+	return registry
+}
+
+func configTestGeneration(t *testing.T, ctx context.Context, path string, cfg config.Config) *runtimeGeneration {
+	t.Helper()
 	pool := aistudio.NewAccountPool(nil, cfg.PerAccountConcurrency)
-	requests := newRequestRegistry(ctx)
+	requests := newTestRequestRegistry(t)
 	service := &configTestService{trackedService: &trackedService{pool: pool, requests: requests}}
 	service.SetAutoContinuation(cfg.AutoContinuation)
+	mapping, _ := config.ParseModelMapping(cfg.ModelMapping)
+	service.SetRequestPolicy(mapping, cfg.MaxAccountSwitches)
 	admin := &runtimeAdmin{configPath: path, config: cfg, pool: pool, requests: requests, service: service.trackedService}
-	admin.applyRoutingConfig(cfg)
+	admin.ApplyAccountSelection(cfg)
 	return &runtimeGeneration{
 		service: service, admin: configStartAdmin{admin}, config: cfg,
 		lifecycleCancel: func() {}, closeRuntime: func() error { return nil },
@@ -69,7 +79,7 @@ func TestInitialRuntimeReuseAndReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			initial := configTestGeneration(t.Context(), path, cfg)
+			initial := configTestGeneration(t, t.Context(), path, cfg)
 			built, closed := 0, 0
 			initial.closeRuntime = func() error { closed++; return nil }
 			manager := &runtimeManager{
@@ -77,9 +87,10 @@ func TestInitialRuntimeReuseAndReplacement(t *testing.T) {
 				activeManagement: cfg, requests: initial.service.(*configTestService).requests,
 				factory: func(_ context.Context, lifecycle context.Context, cfg config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
 					built++
-					return configTestGeneration(lifecycle, path, cfg), nil
+					return configTestGeneration(t, lifecycle, path, cfg), nil
 				},
 			}
+			manager.settings.Store(requestSettingsOf(cfg))
 			if changed {
 				cfg.AutoContinuation = !cfg.AutoContinuation
 				if err := cfg.Save(path); err != nil {
@@ -120,7 +131,7 @@ func TestAdminConfig(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	pool := aistudio.NewAccountPool(nil, 1)
-	admin := &runtimeAdmin{configPath: path, requests: newRequestRegistry(ctx), pool: pool, service: &trackedService{pool: pool}}
+	admin := &runtimeAdmin{configPath: path, requests: newTestRequestRegistry(t), pool: pool, service: &trackedService{pool: pool}}
 	value, err := admin.RuntimeConfig(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +186,7 @@ func TestAutoContinuationConfigIsImmediateAndPreservesOmittedField(t *testing.T)
 	}
 	pool := aistudio.NewAccountPool(nil, 1)
 	service := &trackedService{pool: pool}
-	admin := &runtimeAdmin{configPath: path, requests: newRequestRegistry(t.Context()), pool: pool, service: service}
+	admin := &runtimeAdmin{configPath: path, requests: newTestRequestRegistry(t), pool: pool, service: service}
 	value, err := admin.RuntimeConfig(t.Context())
 	if err != nil || value.AutoContinuation == nil || !*value.AutoContinuation {
 		t.Fatalf("missing enabled default in management DTO: %+v, %v", value, err)
@@ -225,8 +236,9 @@ func TestLocalRuntimeConfigEnvironmentLocksAndDTO(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := &runtimeManager{
-		activeManagement: saved, current: configTestGeneration(t.Context(), path, saved), logs: &logOutput{},
+		activeManagement: saved, current: configTestGeneration(t, t.Context(), path, saved), logs: &logOutput{},
 	}
+	manager.settings.Store(requestSettingsOf(saved))
 	value, err := manager.RuntimeConfig(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -284,6 +296,40 @@ func TestContinuationControlsHaveIndependentRestartBoundaries(t *testing.T) {
 	}
 }
 
+func TestRequestPolicySaveAppliesWithoutRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	cfg := config.Default()
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	generation := configTestGeneration(t, t.Context(), path, cfg)
+	manager := &runtimeManager{activeManagement: cfg, current: generation, logs: &logOutput{}}
+	previous := requestSettingsOf(cfg)
+	manager.settings.Store(previous)
+	value := runtimeConfigDTO(cfg)
+	value.ModelMapping, value.MaxAccountSwitches = "friendly:shared", 2
+	value.NonstreamKeepalive, value.FakeStream = !cfg.NonstreamKeepalive, !cfg.FakeStream
+	value.SearchModelAliases, value.GoogleSearch = !cfg.SearchModelAliases, !cfg.GoogleSearch
+	value.ThinkingGuard, value.UserMessageRewrite = true, "traditional"
+	updated, err := manager.UpdateRuntimeConfig(t.Context(), value)
+	if err != nil || updated.ServiceRestartRequired || updated.ManagementRestartRequired || manager.current != generation {
+		t.Fatalf("request policy required a restart: %+v, %v", updated, err)
+	}
+	service := generation.service.(*configTestService)
+	if service.mappedModel("friendly") != "shared" || service.maxAccountSwitches.Load() != 2 {
+		t.Fatal("saved request policy did not reach the active service")
+	}
+	settings := manager.settings.Load()
+	if settings == previous || *previous != *requestSettingsOf(cfg) || *settings != *requestSettingsOf(generation.config) {
+		t.Fatal("saving request settings mutated the old snapshot or failed to publish the new one")
+	}
+	if settings.modes.NonstreamKeepalive != value.NonstreamKeepalive || settings.modes.FakeStream != value.FakeStream ||
+		settings.searchModelAliases != value.SearchModelAliases || settings.googleSearch != value.GoogleSearch ||
+		!settings.thinkingGuard || settings.userMessageRewrite != "traditional" {
+		t.Fatal("new requests did not receive the saved response, search, guard and rewrite settings")
+	}
+}
+
 func TestAccountTimezoneNormalization(t *testing.T) {
 	for _, test := range []struct {
 		input, want string
@@ -311,8 +357,9 @@ func TestStripThoughtSignaturesConfigAndRestartBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := &runtimeManager{
-		activeManagement: cfg, current: configTestGeneration(t.Context(), path, cfg), logs: &logOutput{},
+		activeManagement: cfg, current: configTestGeneration(t, t.Context(), path, cfg), logs: &logOutput{},
 	}
+	manager.settings.Store(requestSettingsOf(cfg))
 	value, err := manager.RuntimeConfig(t.Context())
 	if err != nil {
 		t.Fatal(err)

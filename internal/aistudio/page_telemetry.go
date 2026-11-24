@@ -22,13 +22,13 @@ type clearcutShape int
 const (
 	// clearcutBeacon 是 sendBeacon 发出的 no-cors 上报，正文为 text/plain，凭据摘要放在 auth 参数
 	clearcutBeacon clearcutShape = iota
-	// clearcutPlain 是带 x-goog-authuser 的 cors 上报，正文为 text/plain
+	// clearcutPlain 是带 x-goog-authuser、不带凭据的 cors 上报，正文为 text/plain
 	clearcutPlain
 	// clearcutGzip 是凭据摘要放在 Authorization 头、带 x-goog-authuser 的 cors 上报，正文为 gzip 压缩的 application/binary
 	clearcutGzip
 )
 
-// sendClearcut 按官网页面的请求形状在后台发出一次 clearcut 上报
+// sendClearcut 按官网页面的请求形状在后台发出一次 clearcut 上报；gzip 正文的界面元素日志批次在本页上一批的请求结束后才发出，按序号顺序到达
 func (runtime *goWAARuntime) sendClearcut(shape clearcutShape, body []byte) {
 	hashes, err := NewSigner().OriginHashes(runtime.cookies())
 	if err != nil {
@@ -58,11 +58,32 @@ func (runtime *goWAARuntime) sendClearcut(shape clearcutShape, body []byte) {
 		headers.Set("Content-Encoding", "gzip")
 		headers.Set("Content-Type", "application/binary")
 	}
-	runtime.schedule(0, func(ctx context.Context) {
-		ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	var previous, done chan struct{}
+	if shape == clearcutGzip {
+		done = make(chan struct{})
+		runtime.elementsMu.Lock()
+		previous, runtime.elementsSent = runtime.elementsSent, done
+		runtime.elementsMu.Unlock()
+	}
+	class := requestClass{anonymous: shape == clearcutPlain}
+	timer := runtime.schedule(0, func(ctx context.Context) {
+		if done != nil {
+			defer close(done)
+		}
+		if previous != nil {
+			select {
+			case <-previous:
+			case <-ctx.Done():
+				return
+			}
+		}
+		ctx, cancel := context.WithTimeout(withRequestClass(ctx, class), time.Minute)
 		defer cancel()
 		runtime.drain(runtime.do(ctx, http.MethodPost, target, body, headers))
 	})
+	if timer == nil && done != nil {
+		close(done)
+	}
 }
 
 // clearcutClient 返回官网页面上报正文的客户端信息，label 为前端构建标签或客户端版本，kind 为日志客户端类别

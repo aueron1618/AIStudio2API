@@ -326,7 +326,11 @@ func TestGeminiContentPolicyHTTP(t *testing.T) {
 						path += "?alt=sse"
 					}
 				}
-				response, raw := protocolTestRequest(t, newProtocolTestServer(t, service), http.MethodPost, path, `{"contents":[{"parts":[{"text":"hi"}]}]}`, nil)
+				var headers http.Header
+				if mode == "sse" {
+					headers = http.Header{"X-Goog-Api-Client": {"gl-node/22 google-genai-sdk/3.1.0"}}
+				}
+				response, raw := protocolTestRequest(t, newProtocolTestServer(t, service), http.MethodPost, path, `{"contents":[{"parts":[{"text":"hi"}]}]}`, headers)
 				started := mode != "unary" && (stage == "after_usage" || stage == "after_text")
 				wantStatus := http.StatusBadGateway
 				if started {

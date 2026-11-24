@@ -1,11 +1,20 @@
-import { computed, reactive } from 'vue'
+import { computed, markRaw, reactive, toRaw } from 'vue'
 import { api } from '@/api'
 import { useConsole } from '@/console'
 import { keepPage } from '@/desktop'
 import { useI18n } from '@/i18n'
-import type { Model } from '@/types'
-import { base64Bytes } from '../bytes'
-import { failureText } from '../request'
+import type { Model, PromptInput } from '@/types'
+import {
+  attachmentURL,
+  copyAttachmentBlob,
+  hasCachedAttachmentBlob,
+  hasSameAttachmentBlob,
+  loadAttachmentBlob,
+  persistAttachment,
+  revokeAttachmentURL,
+  type MediaUploads,
+} from '../media-store'
+import { failureText, hydratePart } from '../request'
 import { newTurnID } from '../session'
 import { createOpenAIVideo, createVideo, waitOpenAIVideo, waitVideo, type InlineImage } from './api'
 import { modelMatches } from '../catalog'
@@ -22,6 +31,7 @@ export const videoProtocols: { value: VideoProtocol; label: string }[] = [
 // VideoFrame 是视频示例代码中的一张帧图片或参考图
 export interface VideoFrame extends InlineImage {
   name: string
+  mediaId?: string
 }
 
 // VideoSettings 是视频示例代码使用的模型与运行设置
@@ -118,6 +128,74 @@ const state = reactive({
   started: 0,
 })
 let controller: AbortController | undefined
+const pendingSaves = new Map<string, PromptInput<VideoData>>()
+const persistedIds = new Set<string>()
+let writing: Promise<void> = Promise.resolve()
+let draining = false
+let savingId: string | null = null
+
+export function frameURL(frame: VideoFrame): string {
+  return attachmentURL({ inlineData: frame })
+}
+
+function framesOf(turn: VideoTurn): VideoFrame[] {
+  return [turn.start, turn.last, ...(turn.references ?? [])].filter(
+    (frame): frame is VideoFrame => frame !== undefined,
+  )
+}
+
+function cloneFrame(frame: VideoFrame): VideoFrame {
+  const copy = markRaw({ ...toRaw(frame) })
+  copyAttachmentBlob(frame, copy)
+  return copy
+}
+
+function cloneTurns(turns: readonly VideoTurn[]): VideoTurn[] {
+  return turns.map((turn) => ({
+    ...toRaw(turn),
+    ...(turn.start && { start: cloneFrame(turn.start) }),
+    ...(turn.last && { last: cloneFrame(turn.last) }),
+    ...(turn.references && { references: turn.references.map(cloneFrame) }),
+    ...(turn.task && { task: { ...turn.task } }),
+    ...(turn.videos && { videos: [...turn.videos] }),
+  }))
+}
+
+// Save frames as media references, but only merge an upload back into the unchanged live frame.
+async function persistFrames(
+  turns: readonly VideoTurn[],
+  live: readonly VideoTurn[] | undefined,
+  uploads: MediaUploads,
+): Promise<void> {
+  for (const turn of turns) {
+    const liveFrames = framesOf(live?.find((item) => item.id === turn.id) ?? turn)
+    for (const [index, frame] of framesOf(turn).entries()) {
+      if (frame.mediaId || (frame.data === '' && !hasCachedAttachmentBlob(frame))) continue
+      const blob = await loadAttachmentBlob({ inlineData: frame })
+      const mediaId = await persistAttachment(frame, uploads)
+      const liveFrame = liveFrames[index]
+      if (
+        liveFrame &&
+        !liveFrame.mediaId &&
+        liveFrame.mimeType === frame.mimeType &&
+        (hasSameAttachmentBlob(liveFrame, blob) ||
+          (frame.data !== '' && liveFrame.data === frame.data))
+      ) {
+        revokeAttachmentURL({ inlineData: liveFrame })
+        Object.assign(liveFrame, { data: '', mediaId })
+      }
+      revokeAttachmentURL({ inlineData: frame })
+      Object.assign(frame, { data: '', mediaId })
+    }
+  }
+}
+
+function releaseFrames(): void {
+  for (const frame of [state.start, state.last, ...state.references])
+    if (frame) revokeAttachmentURL({ inlineData: frame })
+  for (const turn of state.turns)
+    for (const frame of framesOf(turn)) revokeAttachmentURL({ inlineData: frame })
+}
 
 // 关闭桌面窗口时，生成中的视频保留页面
 keepPage(() => state.running)
@@ -185,9 +263,9 @@ function setModel(id: string): void {
   const defaults = defaultSettings(model)
   const settings = state.settings
   const inputs = imageInputs(model)
-  if (!inputs.start) state.start = undefined
-  if (!inputs.last) state.last = undefined
-  if (!inputs.references) state.references = []
+  if (!inputs.start) setStart(undefined)
+  if (!inputs.last) setLast(undefined)
+  if (!inputs.references) clearReferences()
   state.settings = {
     model: defaults.model,
     protocol: settings.protocol,
@@ -212,8 +290,25 @@ function reset(): void {
 
 // setLast 设置或清除尾帧，有尾帧时时长固定为 8 秒
 function setLast(frame: VideoFrame | undefined): void {
+  if (state.last && toRaw(state.last) !== toRaw(frame))
+    revokeAttachmentURL({ inlineData: state.last })
   state.last = frame
   if (frame !== undefined) state.settings.durationSeconds = 8
+}
+
+function setStart(frame: VideoFrame | undefined): void {
+  if (state.start && toRaw(state.start) !== toRaw(frame))
+    revokeAttachmentURL({ inlineData: state.start })
+  state.start = frame
+}
+
+function removeReference(index: number): void {
+  const [frame] = state.references.splice(index, 1)
+  if (frame) revokeAttachmentURL({ inlineData: frame })
+}
+
+function clearReferences(): void {
+  while (state.references.length > 0) removeReference(state.references.length - 1)
 }
 
 // leave 离开当前会话：生成中先保存会话与已创建的视频任务，再停止本页的等待
@@ -225,6 +320,7 @@ function leave(): void {
 // newSession 清空当前会话
 function newSession(): void {
   leave()
+  releaseFrames()
   Object.assign(state, {
     id: null,
     title: '',
@@ -241,12 +337,14 @@ function newSession(): void {
 // load 载入对话库中的视频会话
 function load(id: string, prompt: { title: string; description: string; data: VideoData }): void {
   leave()
+  releaseFrames()
+  persistedIds.add(id)
   Object.assign(state, {
     id,
     title: prompt.title,
     description: prompt.description,
     settings: { ...prompt.data.settings },
-    turns: prompt.data.turns,
+    turns: cloneTurns(prompt.data.turns),
     draft: '',
     start: undefined,
     last: undefined,
@@ -304,41 +402,79 @@ async function generateTitle(model: string, prompt: string): Promise<void> {
 async function save(empty = false): Promise<void> {
   if (state.turns.length === 0 && !empty) return
   state.id ??= newTurnID()
-  await api.savePrompt<VideoData>(state.id, {
+  pendingSaves.set(state.id, {
     title: state.title,
     model: state.settings.model,
     description: state.description,
     turns: state.turns.length,
     data: {
       kind: 'video',
-      settings: state.settings,
-      turns: state.turns,
+      settings: { ...state.settings },
+      turns: cloneTurns(state.turns),
     },
   })
+  if (draining) return writing
+  draining = true
+  writing = (async () => {
+    const uploads: MediaUploads = new Map()
+    try {
+      while (pendingSaves.size > 0) {
+        const [id, prompt] = pendingSaves.entries().next().value!
+        pendingSaves.delete(id)
+        savingId = id
+        await persistFrames(prompt.data.turns, state.id === id ? state.turns : undefined, uploads)
+        await api.savePrompt<VideoData>(id, prompt)
+        persistedIds.add(id)
+      }
+    } finally {
+      savingId = null
+      draining = false
+    }
+  })()
+  await writing
+}
+
+// Do not let an in-flight upload/save recreate a prompt after deletion.
+async function cancelSave(id: string): Promise<boolean> {
+  pendingSaves.delete(id)
+  if (savingId === id) await writing.catch(() => undefined)
+  const existed = persistedIds.has(id)
+  persistedIds.delete(id)
+  return existed
 }
 
 // imagePayload 把帧图片写为 Gemini API 的图片对象
-function imagePayload(frame: VideoFrame): { bytesBase64Encoded: string; mimeType: string } {
-  return { bytesBase64Encoded: frame.data, mimeType: frame.mimeType }
+async function imagePayload(
+  frame: VideoFrame,
+  signal: AbortSignal,
+): Promise<{ bytesBase64Encoded: string; mimeType: string }> {
+  const inline = (await hydratePart({ inlineData: frame }, signal)).inlineData!
+  return { bytesBase64Encoded: inline.data, mimeType: inline.mimeType }
 }
 
 // requestBody 按当前输入与设置组合 predictLongRunning 请求
-function requestBody(): Record<string, unknown> {
-  const instance: Record<string, unknown> = { prompt: state.draft }
-  if (state.start) instance.image = imagePayload(state.start)
-  if (state.last) instance.lastFrame = imagePayload(state.last)
-  if (state.references.length > 0)
-    instance.referenceImages = state.references.map((frame) => ({
-      image: imagePayload(frame),
-      referenceType: 'asset',
-    }))
+async function requestBody(
+  input: VideoTurn,
+  settings: VideoSettings,
+  signal: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const instance: Record<string, unknown> = { prompt: input.prompt ?? '' }
+  if (input.start) instance.image = await imagePayload(input.start, signal)
+  if (input.last) instance.lastFrame = await imagePayload(input.last, signal)
+  if (input.references?.length)
+    instance.referenceImages = await Promise.all(
+      input.references.map(async (frame) => ({
+        image: await imagePayload(frame, signal),
+        referenceType: 'asset',
+      })),
+    )
   return {
     instances: [instance],
     parameters: {
       sampleCount: 1,
-      aspectRatio: state.settings.aspectRatio,
-      durationSeconds: state.settings.durationSeconds,
-      resolution: state.settings.resolution,
+      aspectRatio: settings.aspectRatio,
+      durationSeconds: settings.durationSeconds,
+      resolution: settings.resolution,
     },
   }
 }
@@ -354,18 +490,22 @@ const openAISizes: Record<string, string> = {
 }
 
 // openAIForm 按当前输入与设置组合 OpenAI Videos 请求，起始帧作为 input_reference
-function openAIForm(modelID: string): FormData {
+async function openAIForm(
+  input: VideoTurn,
+  settings: VideoSettings,
+  signal: AbortSignal,
+): Promise<FormData> {
   const form = new FormData()
-  form.set('model', modelID)
-  form.set('prompt', state.draft)
-  form.set('seconds', String(state.settings.durationSeconds))
-  const size = openAISizes[`${state.settings.aspectRatio} ${state.settings.resolution}`]
+  form.set('model', settings.model)
+  form.set('prompt', input.prompt ?? '')
+  form.set('seconds', String(settings.durationSeconds))
+  const size = openAISizes[`${settings.aspectRatio} ${settings.resolution}`]
   if (size) form.set('size', size)
-  if (state.start)
+  if (input.start)
     form.set(
       'input_reference',
-      new Blob([base64Bytes(state.start.data)], { type: state.start.mimeType }),
-      state.start.name,
+      await loadAttachmentBlob({ inlineData: input.start }, signal),
+      input.start.name,
     )
   return form
 }
@@ -396,16 +536,17 @@ async function run(): Promise<void> {
   const model = currentModel.value
   if (state.running || model === undefined || !canRun.value) return
   const openAI = state.settings.protocol === 'openai-videos'
-  const body = openAI ? openAIForm(model.id) : requestBody()
-  state.turns.push({
+  const settings = { ...state.settings }
+  const input: VideoTurn = {
     id: newTurnID(),
     role: 'user',
     created: Date.now(),
     prompt: state.draft,
-    start: state.start,
-    last: state.last,
-    references: state.references.length > 0 ? [...state.references] : undefined,
-  })
+    start: state.start ? cloneFrame(state.start) : undefined,
+    last: state.last ? cloneFrame(state.last) : undefined,
+    references: state.references.length > 0 ? state.references.map(cloneFrame) : undefined,
+  }
+  state.turns.push(input)
   const turn = reactive<VideoTurn>({
     id: newTurnID(),
     role: 'model',
@@ -418,7 +559,11 @@ async function run(): Promise<void> {
   state.started = performance.now()
   const owner = state.turns
   await follow(turn, async (signal) => {
+    const body = openAI
+      ? await openAIForm(input, settings, signal)
+      : await requestBody(input, settings, signal)
     await save()
+    signal.throwIfAborted()
     if (openAI) {
       const video = await createOpenAIVideo(body as FormData, signal)
       await keepTask(
@@ -483,7 +628,7 @@ async function remove(): Promise<void> {
   const id = state.id
   state.running = false
   newSession()
-  if (id !== null) await api.deletePrompt(id)
+  if (id !== null && (await cancelSave(id))) await api.deletePrompt(id)
 }
 
 // useVideo 返回视频页状态与操作
@@ -501,7 +646,10 @@ export function useVideo() {
     ensureModel,
     setModel,
     reset,
+    setStart,
     setLast,
+    removeReference,
+    clearReferences,
     newSession,
     load,
     run,
@@ -509,5 +657,6 @@ export function useVideo() {
     rename,
     remove,
     save,
+    cancelSave,
   }
 }

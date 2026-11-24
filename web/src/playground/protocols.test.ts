@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import { nextTick, reactive } from 'vue'
 import type { Model } from '@/types'
+import { api } from '@/api'
 import { generateCode } from './code'
 import {
-  attachmentBlob,
+  loadAttachmentBlob,
   attachmentURL,
   cacheAttachmentBlob,
   copyAttachmentBlob,
@@ -17,9 +18,10 @@ import { openLiveSocket } from './media/live-socket'
 import { realtimeMusicCode } from './media/music-code'
 import { speechCode } from './media/speech-code'
 import { protocolCall, protocolsFor, protocolSupports } from './protocols'
-import { agentFields, apiKey, apiPart, buildRequest, publicAPIBase } from './request'
-import { defaultSettings } from './session'
-import type { Part, Turn } from './types'
+import { agentFields, apiKey, apiPart, buildRequest, hydratePart, publicAPIBase } from './request'
+import { defaultSettings, usePlayground } from './session'
+import { localAttachment, persistAttachment, type MediaUploads } from './media-store'
+import type { Part, PromptData, Turn } from './types'
 
 vi.mock('@/desktop', () => ({ keepPage: () => {} }))
 vi.mock('@/i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
@@ -57,6 +59,186 @@ const input: Parameters<typeof generateCode>[1] = {
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+})
+
+describe('persistent media and concurrent prompt saves', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {
+      location: new URL('https://example.test'),
+      setTimeout: vi.fn(() => 0),
+      clearTimeout: vi.fn(),
+    })
+    vi.stubGlobal(
+      'FileReader',
+      class {
+        result = ''
+        onload: (() => void) | null = null
+        abort = vi.fn()
+        readAsDataURL(blob: Blob): void {
+          void blob.arrayBuffer().then((bytes) => {
+            this.result = `data:${blob.type};base64,${Buffer.from(bytes).toString('base64')}`
+            this.onload?.()
+          })
+        }
+      },
+    )
+    vi.spyOn(api, 'uploadPromptMedia').mockResolvedValue('fixture-media')
+    vi.spyOn(api, 'savePrompt').mockResolvedValue({
+      id: 'fixture-prompt',
+      title: 'Fixture',
+      model: 'build-only',
+      description: '',
+      created_at: '',
+      updated_at: '',
+    })
+    vi.spyOn(api, 'deletePrompt').mockResolvedValue()
+    usePlayground().newChat()
+  })
+  afterEach(async () => {
+    usePlayground().newChat()
+    await nextTick()
+  })
+
+  it('hydrates stored bytes with declared MIME and keeps signatures out of persistence changes', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new Blob(['real-image'])))
+    vi.stubGlobal('fetch', fetchMock)
+    const part: Part = {
+      inlineData: {
+        data: '',
+        mimeType: 'image/png',
+        mediaId: 'stored/frame',
+        displayName: 'local.png',
+      },
+      thoughtSignature: 'original-signature',
+      fileName: 'local.png',
+    }
+    const controller = new AbortController()
+    const cleanup = vi.spyOn(controller.signal, 'removeEventListener')
+    const hydrated = await hydratePart(part, controller.signal)
+    expect(fetchMock).toHaveBeenCalledWith('/api/prompts/media/stored%2Fframe', {
+      signal: controller.signal,
+    })
+    expect(apiPart(hydrated)).toEqual({
+      inlineData: { data: 'cmVhbC1pbWFnZQ==', mimeType: 'image/png', displayName: 'local.png' },
+      thoughtSignature: 'original-signature',
+    })
+    expect(part.inlineData).toMatchObject({ data: '', mediaId: 'stored/frame' })
+    expect(cleanup).toHaveBeenCalledWith('abort', expect.any(Function))
+  })
+
+  it('leaves old inline history and ordinary final function calls unchanged', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const part: Part = { inlineData: { data: 'eA==', mimeType: 'image/png' } }
+    expect(await hydratePart(part)).toBe(part)
+    expect(apiPart({ functionCall: { name: 'final', args: { text: 'Fixture answer' } } })).toEqual({
+      functionCall: { name: 'final', args: { text: 'Fixture answer' } },
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('does not fetch media after hydration was canceled', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    controller.abort()
+    await expect(
+      hydratePart(
+        { inlineData: { data: '', mimeType: 'image/png', mediaId: 'fixture-media' } },
+        controller.signal,
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('retries a failed upload rather than keeping a rejected media promise', async () => {
+    const uploads: MediaUploads = new Map()
+    const inline = { data: 'eA==', mimeType: 'image/png' }
+    vi.mocked(api.uploadPromptMedia).mockRejectedValueOnce(new Error('offline fixture'))
+    await expect(persistAttachment(inline, uploads)).rejects.toThrow('offline fixture')
+    expect(await persistAttachment(inline, uploads)).toBe('fixture-media')
+    expect(api.uploadPromptMedia).toHaveBeenCalledTimes(2)
+  })
+
+  it('coalesces prompt snapshots without overwriting attachment metadata or reuploading the same bytes', async () => {
+    const playground = usePlayground()
+    playground.session.title = 'Original'
+    playground.session.description = 'Fixture description'
+    playground.session.turns = [
+      {
+        id: 'user',
+        role: 'user',
+        created: 0,
+        parts: [
+          {
+            inlineData: { data: 'eA==', mimeType: 'image/png', displayName: 'original.png' },
+            thoughtSignature: 'saved-signature',
+          },
+        ],
+      },
+    ]
+    let finish!: (id: string) => void
+    vi.mocked(api.uploadPromptMedia).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve
+      }),
+    )
+    const first = playground.save()
+    await vi.waitFor(() => expect(api.uploadPromptMedia).toHaveBeenCalledTimes(1))
+    playground.session.title = 'Intermediate'
+    const second = playground.save()
+    playground.session.turns[0]!.parts[0]!.inlineData!.displayName = 'renamed.png'
+    playground.session.title = 'Latest'
+    const latest = playground.save()
+    finish('first-media')
+    await Promise.all([first, second, latest])
+    expect(api.savePrompt).toHaveBeenCalledTimes(2)
+    expect(api.uploadPromptMedia).toHaveBeenCalledTimes(1)
+    const snapshots = vi.mocked(api.savePrompt).mock.calls.map(([, prompt]) => prompt)
+    expect(snapshots.map((prompt) => prompt.title)).toEqual(['Original', 'Latest'])
+    const stored = (snapshots[1]!.data as PromptData).turns[0]!.parts[0]!
+    expect(stored).toMatchObject({
+      inlineData: { data: '', mediaId: 'first-media', displayName: 'renamed.png' },
+      thoughtSignature: 'saved-signature',
+    })
+    expect(playground.session.turns[0]!.parts[0]).toMatchObject(stored)
+    expect(playground.session.description).toBe('Fixture description')
+    expect(playground.session.saveState).toBe('saved')
+  })
+
+  it('waits for in-flight prompt media and discards queued snapshots before deletion', async () => {
+    const playground = usePlayground()
+    playground.session.turns = [
+      {
+        id: 'user',
+        role: 'user',
+        created: 0,
+        parts: [localAttachment(new Blob(['x'], { type: 'image/png' }))],
+      },
+    ]
+    let finish!: (id: string) => void
+    vi.mocked(api.uploadPromptMedia).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve
+      }),
+    )
+    const first = playground.save()
+    await vi.waitFor(() => expect(api.uploadPromptMedia).toHaveBeenCalledTimes(1))
+    const id = playground.session.id!
+    playground.session.title = 'Queued'
+    const queued = playground.save()
+    const deleting = playground.deletePrompt()
+    expect(api.deletePrompt).not.toHaveBeenCalled()
+    finish('delete-media')
+    await Promise.all([first, queued, deleting])
+    expect(api.savePrompt).toHaveBeenCalledTimes(1)
+    expect(api.deletePrompt).toHaveBeenCalledWith(id)
+    expect(vi.mocked(api.deletePrompt).mock.invocationCallOrder[0]).toBeGreaterThan(
+      vi.mocked(api.savePrompt).mock.invocationCallOrder[0]!,
+    )
+    expect(playground.session.id).toBeNull()
+    expect(playground.session.turns).toEqual([])
+  })
 })
 
 describe('fixed public channel URLs', () => {
@@ -565,10 +747,10 @@ describe('merged media previews', () => {
     }
     cacheAttachmentBlob(inline, blob)
     expect(attachmentURL(reactive(part))).toBe('blob:fixture-original')
-    expect(attachmentBlob(part)).toBe(blob)
+    expect(await loadAttachmentBlob(part)).toBe(blob)
     const clone = { ...inline }
     copyAttachmentBlob(inline, clone)
-    expect(attachmentBlob({ inlineData: clone })).toBe(blob)
+    expect(await loadAttachmentBlob({ inlineData: clone })).toBe(blob)
     expect(attachmentURL({ inlineData: clone })).toBe('blob:fixture-copy')
     expect(createURL).toHaveBeenCalledTimes(2)
     expect(apiPart(part)).toEqual({ fileData: part.fileData })

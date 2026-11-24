@@ -143,6 +143,8 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 			average := api.AverageTokensPerSecond(20, latency)
 			store.Record(Row{ID: "new", Time: now.Add(time.Millisecond), Model: "resolved-model",
 				RequestedModel: "requested-alias", ResponseModel: "response-json-model", CachedTokens: 3, State: "completed",
+				Proof: api.ProofTiming{Total: 15 * time.Millisecond, Lock: time.Millisecond, Interaction: 2 * time.Millisecond,
+					Refresh: 4 * time.Millisecond, Compute: 8 * time.Millisecond},
 				Duration: latency, ReplyTokens: 15, ReasoningTokens: 5, TotalTokens: 20, AverageTokensPerSecond: average})
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
@@ -162,11 +164,17 @@ func TestLedgerModelFieldsMigration(t *testing.T) {
 			if record := page.Items[0]; record.AverageTokensPerSecond != average || record.DurationMS != 1000 {
 				t.Fatalf("existing average was recomputed from rounded duration: %+v", record)
 			}
+			if record := page.Items[0]; record.ProofMS != 15 || record.ProofPhases.LockMS != 1 || record.ProofPhases.InteractionMS != 2 || record.ProofPhases.RefreshMS != 4 || record.ProofPhases.ComputeMS != 8 {
+				t.Fatalf("proof timing lost during combined schema migration: %+v", record)
+			}
 			if record := page.Items[1]; record.ID != "old" || record.Model != "legacy-model" || record.RequestedModel != "" || record.ResponseModel != "" || record.CachedTokens != 0 {
 				t.Fatalf("old record=%+v", record)
 			}
 			if record := page.Items[1]; record.AverageTokensPerSecond != 400 {
 				t.Fatalf("legacy average did not use the existing log calculation: %+v", record)
+			}
+			if record := page.Items[1]; record.ProofMS != 0 || record.ProofPhases != (api.ProofPhasesMS{}) {
+				t.Fatalf("legacy record gained invented proof timing: %+v", record)
 			}
 		})
 	}
@@ -254,6 +262,7 @@ func TestExportRecordsModelColumns(t *testing.T) {
 		"time", "id", "protocol", "path", "model", "account", "channel", "status", "state", "duration_ms", "first_event_ms",
 		"queue_ms", "input_tokens", "cached_tokens", "reasoning_tokens", "reply_tokens", "total_tokens", "tool_calls", "error", "attempts",
 		"requested_model", "response_model",
+		"proof_ms", "proof_lock_ms", "proof_interaction_ms", "proof_refresh_ms", "proof_compute_ms",
 	}
 	if !slices.Equal(records[0], wantHeader) {
 		t.Fatalf("header=%v want=%v", records[0], wantHeader)
@@ -263,5 +272,53 @@ func TestExportRecordsModelColumns(t *testing.T) {
 	}
 	if record := records[2]; record[1] != "old" || record[4] != "legacy-model" || record[13] != "0" || record[19] != "[]" || record[20] != "" || record[21] != "" {
 		t.Fatalf("old record=%v", record)
+	}
+}
+
+func TestLedgerTimeZoneChange(t *testing.T) {
+	local := time.Local
+	t.Cleanup(func() { time.Local = local })
+	logs := func(level, message string, attrs ...any) {
+		if level != "INFO" {
+			t.Errorf("%s %s %v", level, message, attrs)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "requests.db")
+	time.Local = time.FixedZone("UTC+8", 8*60*60)
+	store, err := Open(path, logs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	midnight := time.Now().UTC().Truncate(24 * time.Hour).Add(-48 * time.Hour)
+	at := midnight.Add(15*time.Hour + 30*time.Minute)
+	store.Record(Row{ID: "a", Time: at, Model: "flash", State: "completed", Duration: 2 * time.Second, InputTokens: 10, TotalTokens: 30})
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	zone := time.FixedZone("UTC+9", 9*60*60)
+	time.Local = zone
+	store, err = Open(path, logs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	usage := func(from, to time.Time, bucket time.Duration) api.UsageReport {
+		t.Helper()
+		report, err := store.Usage(context.Background(), api.UsageQuery{From: from, To: to, Bucket: bucket, Location: zone, Stack: "model"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return report
+	}
+	// day 是 at 在 UTC+9 所在本地日的起点
+	day := midnight.Add(15 * time.Hour)
+	if report := usage(day, day.Add(24*time.Hour), 24*time.Hour); report.Totals.Requests != 1 || report.Totals.TotalTokens != 30 || report.Previous.Requests != 0 {
+		t.Fatalf("本地日 totals=%+v previous=%+v", report.Totals, report.Previous)
+	}
+	if report := usage(day, day.Add(time.Hour), time.Hour); report.Totals.Requests != 1 || report.Totals.Duration.AvgMS != 2000 {
+		t.Fatalf("小时 totals=%+v", report.Totals)
+	}
+	if report := usage(at.Add(-time.Minute), at.Add(time.Minute), time.Minute); report.Totals.Requests != 1 || report.Totals.InputTokens != 10 {
+		t.Fatalf("原始记录 totals=%+v", report.Totals)
 	}
 }

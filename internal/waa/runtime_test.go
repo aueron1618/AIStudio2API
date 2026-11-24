@@ -28,7 +28,7 @@ func TestRuntimeCloseReleasesVM(t *testing.T) {
 		t.Fatal("closed runtime retained JS state")
 	}
 	vm.resetIdle()
-	if vm.idle != nil || len(vm.loop.timers) != 0 {
+	if vm.idle != nil || len(vm.loop.tasks) != 0 {
 		t.Fatal("closed runtime retained or rearmed timers")
 	}
 	select {
@@ -36,7 +36,7 @@ func TestRuntimeCloseReleasesVM(t *testing.T) {
 	default:
 		t.Fatal("event loop has not exited")
 	}
-	if err := vm.fillPrompt(t.Context(), "closed"); err == nil {
+	if err := vm.perform(t.Context(), vm.fillPrompt("closed")); err == nil {
 		t.Fatal("closed runtime accepted prompt")
 	}
 }
@@ -309,7 +309,10 @@ func TestRuntimeInputCancellationStopsBusyScript(t *testing.T) {
 			var err error
 			switch operation {
 			case "keyboard":
-				_, err = vm.keyInput(ctx, "prompt", "text", []string{"input"})
+				err = vm.perform(ctx, []action{{run: func() error {
+					_, err := vm.keyInput("prompt", "text", []string{"input"})
+					return err
+				}}})
 			case "pointer":
 				err = vm.Replaced(ctx)
 			case "activation":
@@ -351,5 +354,63 @@ func TestRuntimeMetricsAreDrained(t *testing.T) {
 	vm.Close()
 	if _, err := vm.TakeMetrics(t.Context()); err == nil {
 		t.Fatal("closed runtime accepted a metrics request")
+	}
+}
+
+func TestRuntimeCanceledProofWhileWaitingForOperationLock(t *testing.T) {
+	started := make(chan struct{})
+	vm, err := NewRuntime(t.Context(), Options{
+		Challenge:   Challenge{Program: "test", GlobalName: "fixture"},
+		Interpreter: `var fixture = {a(program, ready) { ready(() => { new Image().src = '/snapshot'; for (;;) {} }, () => {}); }};`,
+		Profile:     Profile{Locale: "en-US", TimeZone: "UTC", PageURL: "https://aistudio.google.com/"},
+		LoadImage:   func(string) bool { close(started); return true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Close()
+	first := make(chan error, 1)
+	go func() { _, err := vm.Proof(t.Context(), "digest", "first"); first <- err }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first proof did not enter its busy snapshot")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	second := make(chan error, 1)
+	go func() { _, err := vm.Proof(ctx, "digest", "second"); second <- err }()
+	select {
+	case err := <-second:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("canceled lock waiter = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled proof remained blocked on the busy operation lock")
+	}
+	if err := <-first; err == nil {
+		t.Fatal("interrupted proof unexpectedly succeeded")
+	}
+	select {
+	case <-vm.loop.exited:
+	default:
+		t.Fatal("canceled lock waiter did not join the JS thread")
+	}
+	if vm.agent != nil || vm.results != nil || vm.idle != nil || len(vm.loop.tasks) != 0 {
+		t.Fatal("canceled lock waiter retained runtime state")
+	}
+}
+
+func TestRuntimeCanceledFutureStart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	vm, err := NewRuntime(ctx, Options{
+		Challenge:   Challenge{Program: "test", GlobalName: "fixture"},
+		Interpreter: `for (;;) {}`,
+		Profile:     Profile{Locale: "en-US", TimeZone: "UTC"},
+		Start:       time.Now().Add(time.Hour),
+	})
+	if vm != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("canceled future start = %v, %v", vm, err)
 	}
 }

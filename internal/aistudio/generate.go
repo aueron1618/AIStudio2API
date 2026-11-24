@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"slices"
@@ -28,23 +29,23 @@ type tokenCountResult struct {
 	err   error
 }
 
-// EncodeGenerateContentRequest 编码 GenerateContent 数组
-func EncodeGenerateContentRequest(request GenerateRequest, defaults GenerationDefaults, runtime RequestContext) ([]byte, error) {
+// EncodeGenerateContentRequest 编码 GenerateContent 数组，返回正文与 WAA proof 字段（field 5）在正文中的起始字节
+func EncodeGenerateContentRequest(request GenerateRequest, defaults GenerationDefaults, runtime RequestContext) ([]byte, int, error) {
 	tools, explicitTools, err := encodeRequestedTools(request.Tools)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	contents, err := encodeContents(request.Contents)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if len(contents) == 0 {
-		return nil, fmt.Errorf("GenerateContent contents 不能为空")
+		return nil, 0, fmt.Errorf("GenerateContent contents 不能为空")
 	}
 	request.Config.MediaResolution = cmp.Or(request.Config.MediaResolution, partMediaResolution(request.Contents))
 	config, err := encodeGenerationConfig(request.Config, defaults)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if config[8] != nil && responseSchemaBeyondPlayground(request.Config, config[8].([]any)) {
 		config[7], config[8] = "application/json", nil
@@ -60,7 +61,11 @@ func EncodeGenerateContentRequest(request GenerateRequest, defaults GenerationDe
 	}
 	var retrieval []any
 	if len(tools) > 0 {
-		retrieval = encodeRetrievalConfig(request.Tools.ToolConfig.Retrieval, runtime.Timezone)
+		timezone := ""
+		if slices.ContainsFunc(tools, groundingTool) {
+			timezone = runtime.Timezone
+		}
+		retrieval = encodeRetrievalConfig(request.Tools.ToolConfig.Retrieval, timezone)
 	}
 	length := 11
 	if request.turnToken != "" {
@@ -77,7 +82,7 @@ func EncodeGenerateContentRequest(request GenerateRequest, defaults GenerationDe
 	wire[1] = contents
 	safety, err := resolveSafetySettings(request.SafetySettings, defaults.ImageRoute)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if len(safety) > 0 {
 		wire[2] = encodeSafetySettings(safety)
@@ -106,7 +111,13 @@ func EncodeGenerateContentRequest(request GenerateRequest, defaults GenerationDe
 	if defaults.ContinuedOutputTokens > 0 && request.continuationToken != "" {
 		wire[16] = request.continuationToken
 	}
-	return json.Marshal(wire)
+	return marshalWAAArray(wire, 5)
+}
+
+// groundingTool 判断编码后的工具是 Google 搜索或地图检索工具，账户时区只随这两类工具发送
+func groundingTool(tool any) bool {
+	fields, _ := tool.([]any)
+	return len(fields) > 3 && fields[3] != nil || len(fields) > 10 && fields[10] != nil
 }
 
 // encodeRetrievalConfig 编码 ToolConfig.retrieval_config：用户坐标、语言代码与时区，都未设置时为 nil
@@ -317,7 +328,7 @@ func encodeGenerationConfig(config GenerationConfig, defaults GenerationDefaults
 		wire[7] = config.ResponseMIMEType
 	}
 	if settings.responseSchema != nil {
-		wire[8] = playgroundSchema(settings.responseSchema)
+		wire[8] = playgroundSchema(settings.responseSchema, true, true)
 	}
 	if !defaults.ImageRoute {
 		wire[13] = int64(1)
@@ -758,7 +769,7 @@ func validateGenerateEntry(request GenerateRequest, entry modelEntry) error {
 	if err := validateTranscriptionConfig(request.Config.TranscriptionConfig, entry.model); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
-	if entry.defaults.InteractionStream || entry.defaults.InteractionTask {
+	if stream, task := interactionRoute(entry.model, entry.defaults, ChannelPlayground); stream || task {
 		return nil
 	}
 	if _, err := encodeGenerationConfig(applyModelMediaDefaults(request.Config, entry.model), entry.defaults); err != nil {
@@ -783,13 +794,28 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 	if err != nil {
 		return nil, err
 	}
+	channel := ChannelPlayground
+	if build {
+		channel = ChannelBuild
+	}
+	interaction, task := interactionRoute(entry.model, entry.defaults, channel)
 	apiKey, _ := ctx.Value(apiKeyContextKey{}).(string)
 	assistant := entry.model.Capabilities["assistant_route"]
-	restoring := request.restoreModelTurns && !build && !assistant && !entry.defaults.InteractionStream && !entry.defaults.InteractionTask
-	if restoring {
-		request.Contents, request.turnToken = c.turns.restore(apiKey, request.Contents)
+	if chineseRewriteEligible(request, entry) {
+		request, err = applyChineseRewrite(request)
+		if err != nil {
+			return nil, err
+		}
 	}
-	history := request.Contents
+	if thinkingGuardEligible(request, entry) {
+		request = applyThinkingGuard(request, entry)
+	}
+	restoring := request.restoreModelTurns && !build && !assistant && !interaction && !task
+	if restoring {
+		var tip turnLink
+		request.Contents, request.turnToken, tip = c.turns.restore(apiKey, request.Contents)
+		request.turnChain = turnChain{contents: request.Contents, tip: tip}
+	}
 	if err := validateVideoParts(request.Contents); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
@@ -803,15 +829,13 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 			return nil, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 		}
 	}
-	interaction := entry.defaults.InteractionStream && !build
-	task := entry.defaults.InteractionTask && !build
 	if request.AntiTruncation && (interaction || task) {
 		return nil, fmt.Errorf("%w: anti-truncation transport is not supported by the Interaction generation route", ErrInvalidArgument)
 	}
 	if interaction {
 		request.Tools = Tools{}
 	}
-	request, contract, err := prepareToolRequest(request)
+	request, contract, err := prepareToolRequest(request, true)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
@@ -870,9 +894,18 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 	if matcher != nil {
 		stopTokenCount, cancelTokenCount = c.countStopInput(ctx, request)
 	}
+	releaseLease := func() error { return nil }
+	if leased {
+		releaseLease = lease.Retain()
+	}
 	events := make(chan Event, 8)
 	go func() {
 		defer close(events)
+		defer func() {
+			if err := releaseLease(); err != nil {
+				slog.Warn("账户租约释放失败", "account", request.AccountID, "error", err)
+			}
+		}()
 		defer cancelTokenCount()
 		closeOnCancel := func(response *RPCResponse) func() bool {
 			return context.AfterFunc(ctx, func() {
@@ -1014,6 +1047,11 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 				}
 				emittedText = text
 			}
+			if err != nil {
+				reportRegeneration(ctx, regenerated+1, err.Error())
+			} else {
+				reportRegeneration(ctx, regenerated+1, fmt.Sprintf("结束原因 %s", finish.FinishReason))
+			}
 			stopClose()
 			_ = response.Body.Close()
 			if emittedText != "" {
@@ -1149,10 +1187,27 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 			_ = send(*finish)
 		}
 		if restoring && trailing == nil {
-			c.turns.store(apiKey, history, turn)
+			c.turns.store(apiKey, request.turnChain.tip, turn)
 		}
 	}()
 	return contract.forward(ctx, events), nil
+}
+
+// nonTextGeneration keeps text-only prompt controls separate from media routes.
+func nonTextGeneration(request GenerateRequest, entry modelEntry) bool {
+	if entry.defaults.ImageRoute ||
+		entry.model.Capabilities["image_route"] ||
+		entry.model.Capabilities["speech_route"] ||
+		entry.model.Capabilities["video_route"] ||
+		entry.model.Capabilities["music_route"] ||
+		entry.model.Capabilities["transcription_output"] {
+		return true
+	}
+	if request.Config.ImageConfig != nil || request.Config.SpeechConfig != nil || request.Config.VideoConfig != nil || request.Config.TranscriptionConfig != nil {
+		return true
+	}
+	return slices.Contains(request.Config.ResponseModalities, ResponseModalityImage) ||
+		slices.Contains(request.Config.ResponseModalities, ResponseModalityAudio)
 }
 
 // calledFunction 表示本次生成已输出函数调用，上游的函数调用 Part 总是完整到达
@@ -1501,11 +1556,11 @@ func (c *Client) sendPlayground(ctx context.Context, request GenerateRequest, en
 		entry.defaults.ContinuedOutputTokens = 0
 		request.continuationRound, request.continuationToken = 0, ""
 	}
-	body, err := EncodeGenerateContentRequest(request, entry.defaults, runtime)
+	body, proofAt, err := EncodeGenerateContentRequest(request, entry.defaults, runtime)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
-	response, err := c.doProtected(ctx, request, body)
+	response, err := c.doProtected(ctx, request, body, proofAt)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1595,7 +1650,7 @@ func (c *Client) decodePlaygroundRounds(ctx context.Context, request GenerateReq
 		}
 		request.continuationRound++
 		request.continuationToken = decoder.continuation
-		body, err := EncodeGenerateContentRequest(request, defaults, runtime)
+		body, proofAt, err := EncodeGenerateContentRequest(request, defaults, runtime)
 		if err != nil {
 			return err
 		}
@@ -1605,7 +1660,7 @@ func (c *Client) decodePlaygroundRounds(ctx context.Context, request GenerateReq
 		reportContinuationRound(ctx)
 		reportUpstreamMode(ctx, "GenerateContent", "stream", request.continuationRound, "")
 		closeRound()
-		response, err := c.doProtected(ctx, request, body)
+		response, err := c.doProtected(ctx, request, body, proofAt)
 		for err != nil && retryableAccountError(err) {
 			if c.autoContinuationDisabled.Load() {
 				return finishDisabled()
@@ -1630,11 +1685,11 @@ func (c *Client) decodePlaygroundRounds(ctx context.Context, request GenerateReq
 					return fmt.Errorf("读取 AI Studio 请求上下文: %w", err)
 				}
 			}
-			if body, err = EncodeGenerateContentRequest(request, defaults, runtime); err != nil {
+			if body, proofAt, err = EncodeGenerateContentRequest(request, defaults, runtime); err != nil {
 				return err
 			}
 			reportUpstreamMode(ctx, "GenerateContent", "stream", request.continuationRound, "")
-			response, err = c.doProtected(ctx, request, body)
+			response, err = c.doProtected(ctx, request, body, proofAt)
 		}
 		if errors.Is(err, errAutoContinuationDisabled) {
 			return finishDisabled()
@@ -1675,7 +1730,7 @@ func mergeContinuedUsage(previous Usage, next Usage) Usage {
 // DecodeGenerateStream 按网络到达顺序解码 GenerateContent repeated 帧
 func DecodeGenerateStream(source io.Reader, decoder *FrameDecoder, emit func(Event) error) error {
 	return decodeGenerateItems(source, func(raw json.RawMessage) error {
-		events, err := decoder.Decode(raw)
+		events, err := decoder.decodeValid(raw)
 		if err != nil {
 			return err
 		}

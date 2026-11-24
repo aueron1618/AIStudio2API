@@ -63,7 +63,7 @@ export function readTab<T extends string>(
   return allowed.includes(value as T) ? (value as T) : fallback
 }
 
-// useTabParam 同步页签、可选的浏览器记忆与地址栏，切换时清除上一页面的查询参数。
+// useTabParam 同步页签与浏览器记忆，切换时保留共享的账户与通道参数。
 export function useTabParam<T extends string>(
   allowed: readonly T[],
   fallback: T,
@@ -82,7 +82,8 @@ export function useTabParam<T extends string>(
     if (next === tab.value) return
     tab.value = next
     const url = new URL(window.location.href)
-    url.search = ''
+    for (const key of new URLSearchParams(url.search).keys())
+      if (key !== 'account' && key !== 'channel') url.searchParams.delete(key)
     if (next !== fallback) url.searchParams.set('tab', next)
     window.history.pushState(null, '', url)
   }

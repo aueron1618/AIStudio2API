@@ -2,7 +2,7 @@ package aistudio
 
 import "context"
 
-// RequestPhase 表示受保护请求的当前准备阶段
+// RequestPhase 表示受保护请求的当前准备阶段，Camoufox 界面运行在页面发出 GenerateContent 之前以 camoufoxnative.GenerateStep 的步骤说明为阶段
 type RequestPhase string
 
 const (
@@ -18,9 +18,13 @@ type requestPhaseContextKey struct{}
 
 type upstreamModeContextKey struct{}
 
+type serviceRunContextKey struct{}
+
+type regenerationContextKey struct{}
+
 type continuationContextKey struct{}
 
-// ContextWithContinuationObserver 在自动续写开始新一轮时调用 observer
+// ContextWithContinuationObserver reports a new automatic continuation round.
 func ContextWithContinuationObserver(ctx context.Context, observer func()) context.Context {
 	return context.WithValue(ctx, continuationContextKey{}, observer)
 }
@@ -28,6 +32,40 @@ func ContextWithContinuationObserver(ctx context.Context, observer func()) conte
 func reportContinuationRound(ctx context.Context) {
 	if observer, ok := ctx.Value(continuationContextKey{}).(func()); ok {
 		observer()
+	}
+}
+
+// ContextWithServiceRun 记下生成服务本次运行的上下文，服务停止时它被取消
+func ContextWithServiceRun(ctx context.Context, run context.Context) context.Context {
+	return context.WithValue(ctx, serviceRunContextKey{}, run)
+}
+
+// ServiceStopped 返回 ctx 所属的生成服务是否已停止，ctx 没有记下服务运行时为 false
+func ServiceStopped(ctx context.Context) bool {
+	run, ok := ctx.Value(serviceRunContextKey{}).(context.Context)
+	return ok && run.Err() != nil
+}
+
+// afterServiceStop 在 ctx 所属的生成服务停止时调用 stop，服务已停止时在返回前调用，返回撤销注册的函数；ctx 没有记下服务运行时不调用
+func afterServiceStop(ctx context.Context, stop func()) func() bool {
+	run, ok := ctx.Value(serviceRunContextKey{}).(context.Context)
+	if !ok {
+		return func() bool { return false }
+	}
+	if run.Err() != nil {
+		stop()
+	}
+	return context.AfterFunc(run, stop)
+}
+
+// ContextWithRegenerationObserver 在流在完成前中断、流尾为 5xx 或上游异常结束而重新生成之前调用 observer，attempt 从 1 起，reason 为中断错误或结束原因
+func ContextWithRegenerationObserver(ctx context.Context, observer func(attempt int, reason string)) context.Context {
+	return context.WithValue(ctx, regenerationContextKey{}, observer)
+}
+
+func reportRegeneration(ctx context.Context, attempt int, reason string) {
+	if observer, ok := ctx.Value(regenerationContextKey{}).(func(int, string)); ok {
+		observer(attempt, reason)
 	}
 }
 

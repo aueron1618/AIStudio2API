@@ -43,8 +43,8 @@ func TestAccountTaskLifecycleInterruptsLockedLogin(t *testing.T) {
 			}
 			manager := &runtimeManager{
 				lifecycle: ctx, current: generation, configPath: path, activeManagement: cfg,
-				requests: newRequestRegistry(ctx), factory: func(_ context.Context, lifecycle context.Context, cfg config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
-					return configTestGeneration(lifecycle, path, cfg), nil
+				requests: newTestRequestRegistry(t), factory: func(_ context.Context, lifecycle context.Context, cfg config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
+					return configTestGeneration(t, lifecycle, path, cfg), nil
 				},
 			}
 			taskCtx := manager.AccountTaskContext()
@@ -119,16 +119,16 @@ func TestAccountTaskCloseCancelsAndJoinsRuntimeReplacement(t *testing.T) {
 	if err := cfg.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	current := configTestGeneration(ctx, path, cfg)
+	current := configTestGeneration(t, ctx, path, cfg)
 	entered, canceled, release, nextClosed := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	manager := &runtimeManager{
-		lifecycle: ctx, configPath: path, activeManagement: cfg, current: current, requests: newRequestRegistry(ctx),
+		lifecycle: ctx, configPath: path, activeManagement: cfg, current: current, requests: newTestRequestRegistry(t),
 		factory: func(launch context.Context, lifecycle context.Context, cfg config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
 			close(entered)
 			<-launch.Done()
 			close(canceled)
 			<-release
-			next := configTestGeneration(lifecycle, path, cfg)
+			next := configTestGeneration(t, lifecycle, path, cfg)
 			next.closeRuntime = func() error { close(nextClosed); return nil }
 			return next, nil
 		},

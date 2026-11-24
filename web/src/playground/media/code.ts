@@ -63,13 +63,12 @@ interface VideoCodeInput {
   resolutions: readonly string[]
 }
 
-// VideoImage 是示例代码中的一张输入图片：本地文件名与 MIME
 interface VideoImage {
   file: string
   mimeType: string
 }
 
-// videoImages 返回起始帧、尾帧与参考图在示例代码中的本地文件
+// Use local file placeholders in examples; never embed a stored media ID or private frame bytes.
 function videoImages(input: VideoCodeInput): {
   start?: VideoImage
   last?: VideoImage
@@ -95,11 +94,10 @@ function videoPrompt(input: VideoCodeInput): string {
 function videoPython(input: VideoCodeInput): string {
   const { settings } = input
   const images = videoImages(input)
-  const hasImage = images.start !== undefined
   const pyImage = (image: VideoImage) =>
     `types.Image.from_file(location="${image.file}", mime_type="${image.mimeType}")`
   const config = [
-    hasImage
+    images.start
       ? '    # person_generation is not allowed for image-to-video generation'
       : '    person_generation="dont_allow", # supported values: "dont_allow" or "allow_adult" or "allow_all"',
     `    aspect_ratio="${settings.aspectRatio}",${supported(input.aspectRatios)}`,
@@ -255,7 +253,7 @@ main();
 `
 }
 
-// videoRest 按官网写法生成 predictLongRunning 的 bash 示例，图片在运行时以 base64 写入请求
+// videoRest 按官网写法生成 predictLongRunning 的 bash 示例
 function videoRest(input: VideoCodeInput): string {
   const { settings } = input
   const images = videoImages(input)
@@ -344,7 +342,7 @@ function openAIVideoSize({ aspectRatio, resolution }: VideoSettings): string {
   return aspectRatio === '9:16' ? `${short}x${long}` : `${long}x${short}`
 }
 
-// videoOpenAIPython 生成 OpenAI Python SDK 视频示例，起始帧作为 input_reference
+// videoOpenAIPython 生成 OpenAI Python SDK 视频示例
 function videoOpenAIPython(input: VideoCodeInput): string {
   const images = videoImages(input)
   return `import os
@@ -371,7 +369,7 @@ else:
 `
 }
 
-// videoOpenAITypescript 生成 OpenAI TypeScript SDK 视频示例，起始帧作为 input_reference
+// videoOpenAITypescript 生成 OpenAI TypeScript SDK 视频示例
 function videoOpenAITypescript(input: VideoCodeInput): string {
   const images = videoImages(input)
   return `import OpenAI${images.start ? ', { toFile }' : ''} from 'openai';

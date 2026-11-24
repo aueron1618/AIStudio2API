@@ -99,19 +99,21 @@ func accountTestEnvironment(ctx context.Context, _ string, locale, timezone stri
 func newAccountTestAdmin(t *testing.T) *runtimeAdmin {
 	t.Helper()
 	pool := aistudio.NewAccountPool(nil, 1)
-	registry := newRequestRegistry(t.Context())
+	registry := newTestRequestRegistry(t)
 	workers := newAccountWorkerManager(pool, nil, registry, "", "", time.Second, 0, 1, 1)
 	t.Cleanup(func() { _ = workers.Close() })
 	service := &trackedService{
 		lifecycle: t.Context(), catalog: &cookieCatalogStub{pool: pool}, pool: pool, requests: registry,
 		workers: workers, timeout: time.Second, modelRetries: make(map[string]struct{}),
 	}
-	return &runtimeAdmin{
+	admin := &runtimeAdmin{
 		lifecycle: t.Context(), config: config.Default(), pool: pool, workers: workers, service: service,
 		store: aistudio.NewAccountStore(t.TempDir()), requests: registry,
 		checkAccess:        func(context.Context, *aistudio.StorageState, string, int) error { return nil },
 		resolveEnvironment: accountTestEnvironment,
 	}
+	admin.accountCommit = func() (*runtimeAdmin, func()) { return admin, func() {} }
+	return admin
 }
 
 func TestRestrictedCookieImportPersistsAndRejectsReimport(t *testing.T) {
@@ -158,7 +160,7 @@ func TestCookieDiscoveryKeepsImportedAndRestrictedAccountsDistinct(t *testing.T)
 		{Email: "Existing@Example.Test", AuthUser: 0},
 		{Email: "restricted@example.test", AuthUser: 1},
 		{AuthUser: 2, Restricted: "age requirement"},
-	}, map[string]string{"existing@example.test": ""}, map[string]string{"restricted@example.test": "service restricted"})
+	}, []aistudio.AccountStatus{{ID: "existing@example.test"}}, map[string]string{"restricted@example.test": "service restricted"})
 	if len(entries) != 3 || !entries[0].Imported || entries[0].Restricted != "" || entries[1].Imported || entries[1].Restricted != "service restricted" || entries[2].Restricted != "age requirement" {
 		t.Fatalf("discovery lost import or restriction metadata: %+v", entries)
 	}
@@ -192,7 +194,7 @@ func TestAdminCookieImportPublishAndRollback(t *testing.T) {
 			}
 			root := t.TempDir()
 			pool := aistudio.NewAccountPool(nil, 1)
-			registry := newRequestRegistry(ctx)
+			registry := newTestRequestRegistry(t)
 			workers := newAccountWorkerManager(pool, nil, registry, "", "", time.Second, 0, 1, 1)
 			defer workers.Close()
 			if test.failWorker {
@@ -349,7 +351,7 @@ func TestAdminCookieImportValidation(t *testing.T) {
 			pool := aistudio.NewAccountPool([]*aistudio.Account{{ID: "existing@example.com", Config: aistudio.DefaultAccountConfig("existing@example.com")}}, 1)
 			cfg := config.Default()
 			cfg.Proxy = "http://127.0.0.1:1234"
-			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), login: driver, requests: newRequestRegistry(ctx), config: cfg, globalProxy: cfg.Proxy}
+			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), login: driver, requests: newTestRequestRegistry(t), config: cfg, globalProxy: cfg.Proxy}
 			admin.checkAccess = func(context.Context, *aistudio.StorageState, string, int) error {
 				t.Fatal("rejected browser import attempted a network access check")
 				return nil
@@ -427,7 +429,7 @@ func TestAdminHTTPCookieImportValidation(t *testing.T) {
 			if test.waitDeadline {
 				cfg.InitTimeout = time.Millisecond
 			}
-			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), requests: newRequestRegistry(ctx), config: cfg, globalProxy: "http://127.0.0.1:1234"}
+			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(root), requests: newTestRequestRegistry(t), config: cfg, globalProxy: "http://127.0.0.1:1234"}
 			admin.resolveEnvironment = accountTestEnvironment
 			admin.checkAccess = func(context.Context, *aistudio.StorageState, string, int) error {
 				t.Fatal("rejected HTTP import attempted a network access check")
@@ -802,7 +804,7 @@ func TestAdminCookieCDPUsesSameVerification(t *testing.T) {
 			defer cancel()
 			driver := &cookieLoginStub{result: aistudio.IsolatedLoginResult{Email: "existing@example.com", StorageState: state}}
 			pool := aistudio.NewAccountPool([]*aistudio.Account{{ID: "existing@example.com", Config: aistudio.DefaultAccountConfig("existing@example.com")}}, 1)
-			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(t.TempDir()), login: driver, requests: newRequestRegistry(ctx)}
+			admin := &runtimeAdmin{pool: pool, store: aistudio.NewAccountStore(t.TempDir()), login: driver, requests: newTestRequestRegistry(t)}
 			admin.checkAccess = func(context.Context, *aistudio.StorageState, string, int) error {
 				t.Fatal("duplicate CDP import attempted a network access check")
 				return nil

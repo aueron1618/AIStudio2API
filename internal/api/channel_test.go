@@ -81,3 +81,29 @@ func TestChannelRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiAliasCatalogKeepsFixedChannel(t *testing.T) {
+	for _, route := range []struct{ prefix, only, other string }{
+		{"/v1", "playground-only", "build-only"},
+		{"/build/v1", "build-only", "playground-only"},
+	} {
+		t.Run(route.prefix, func(t *testing.T) {
+			handler := NewHandler(&channelTestService{}, Config{APIKey: "secret"})
+			for _, path := range []string{"/models", "/models/" + route.other} {
+				request := httptest.NewRequest(http.MethodGet, route.prefix+path, nil)
+				request.Header.Set("X-Goog-API-Key", "secret")
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				if path != "/models" {
+					if response.Code != http.StatusNotFound {
+						t.Fatalf("Gemini auth exposed another channel's model: %d %s", response.Code, response.Body)
+					}
+					continue
+				}
+				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"models":`) || !strings.Contains(response.Body.String(), route.only) || strings.Contains(response.Body.String(), route.other) {
+					t.Fatalf("Gemini catalog alias changed fixed channel: %d %s", response.Code, response.Body)
+				}
+			}
+		})
+	}
+}

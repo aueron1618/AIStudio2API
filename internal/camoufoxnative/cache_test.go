@@ -14,9 +14,12 @@ func TestRemoveAccountCacheRetainsLockAndActiveContents(t *testing.T) {
 	if err := RemoveAccountCache(storage); err != nil {
 		t.Fatal(err)
 	}
-	directory, lock, err := lockAccountCache(storage)
+	directory, lock, pending, err := lockAccountCache(storage)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if pending {
+		t.Fatal("fresh cache unexpectedly waited for retirement")
 	}
 	t.Cleanup(func() { _ = releaseAccountCache(lock) })
 	path := filepath.Join(directory, "entry")
@@ -47,9 +50,12 @@ func TestRemoveAccountCacheRetainsLockAndActiveContents(t *testing.T) {
 	if err != nil || !os.SameFile(before, after) {
 		t.Fatal("cleanup removed the shared cache lock inode")
 	}
-	_, next, err := lockAccountCache(storage)
+	_, next, pending, err := lockAccountCache(storage)
 	if err != nil || next == nil {
 		t.Fatalf("cleanup did not release its cache lock: %v", err)
+	}
+	if pending {
+		t.Fatal("released cache unexpectedly waited for retirement")
 	}
 	if err := releaseAccountCache(next); err != nil {
 		t.Fatal(err)

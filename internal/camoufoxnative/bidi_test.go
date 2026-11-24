@@ -104,7 +104,7 @@ func newBiDiTestClient(t *testing.T) (*bidiClient, *websocket.Conn, <-chan bidiT
 		_ = connection.Close()
 		_ = peer.Close()
 	})
-	return newBiDiClient(connection), peer, commands
+	return newBiDiClient(connection, nil), peer, commands
 }
 
 func startBiDiTestCommand(client *bidiClient, ctx context.Context, method string) <-chan bidiResponse {

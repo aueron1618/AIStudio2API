@@ -132,9 +132,12 @@ func (auth *adminAuth) handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		limit := int64(1 << 20)
-		if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/prompts/") {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/prompts/media":
+			limit = openAIFileMaxBytes
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/prompts/"):
 			limit = maxPublicBodyBytes
-		} else if r.Method == http.MethodPost && r.URL.Path == "/api/accounts/import/cookies" {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/accounts/import/cookies":
 			limit = int64(maxCookieImportRequestBytes)
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, limit)

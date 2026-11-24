@@ -22,6 +22,11 @@ func TestRestrictedAccountSkipsRenewalAndInPlaceImport(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			state.SetAuthExtension(aistudio.AuthExtension{
+				Source: aistudio.AuthSource{Browser: "chrome", Email: "restricted@example.test"},
+				OAuth:  &aistudio.ChromeOAuthMaterial{GaiaID: "restricted-gaia", RefreshToken: "restricted-oauth"},
+				Bound:  &aistudio.BoundSession{ID: "restricted-bound", RefreshURL: "https://accounts.google.com/RotateBoundCookies"},
+			})
 			created, err := admin.addAccount(t.Context(), accountTestConfig("restricted@example.test"), state, "", "renewal-fixture")
 			if err != nil {
 				t.Fatal(err)
@@ -39,7 +44,7 @@ func TestRestrictedAccountSkipsRenewalAndInPlaceImport(t *testing.T) {
 				return chromeauth.Verification{}, nil
 			}
 			_, renewErr := admin.RenewAccountCookies(t.Context(), created.ID, "renewal-fixture", state.Cookies)
-			_, importErr := admin.updateImportedAccount(t.Context(), created.ID, 0, state, "")
+			_, importErr := admin.updateImportedAccount(t.Context(), created.ID, 0, "", state, "")
 			for _, err := range []error{renewErr, importErr} {
 				var operation *adminOperationError
 				if !errors.As(err, &operation) || operation.code != "account_restricted" {
@@ -51,10 +56,21 @@ func TestRestrictedAccountSkipsRenewalAndInPlaceImport(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer lease.Release()
-			refresher := &authRuntimeRefresher{pool: admin.pool, chromeHas: func(string) bool {
-				t.Fatal("restricted account inspected Chrome credentials")
-				return true
-			}}
+			refresher := &authRuntimeRefresher{
+				pool: admin.pool,
+				refresh: func(context.Context, aistudio.AuthSource, aistudio.ChromeOAuthMaterial, string) ([]aistudio.StateCookie, *aistudio.BoundSession, error) {
+					t.Fatal("restricted account attempted OAuth renewal")
+					return nil, nil, nil
+				},
+				importCurrent: func(context.Context, aistudio.AuthSource, aistudio.ChromeOAuthMaterial, string) (aistudio.StorageState, error) {
+					t.Fatal("restricted account attempted Chrome credential renewal")
+					return aistudio.StorageState{}, nil
+				},
+				rotate: func(context.Context, aistudio.StorageState, aistudio.AuthExtension, string) ([]string, error) {
+					t.Fatal("restricted account attempted DBSC renewal")
+					return nil, nil
+				},
+			}
 			ctx := aistudio.ContextWithAccountLease(t.Context(), lease)
 			if refresher.Available(ctx) || refresher.Refresh(ctx, lease.AuthGeneration()) == nil || refresher.ensureBound(ctx) == nil || refresher.Recover(ctx, camoufoxnative.ErrAuthenticationRequired, lease.AuthGeneration()) == nil {
 				t.Fatal("restricted account entered an OAuth or DBSC renewal path")

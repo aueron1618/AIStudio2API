@@ -141,4 +141,18 @@ describe('management API contracts', () => {
     expect(await api.paths(listing.path)).toEqual(listing)
     expect(fetch).toHaveBeenCalledWith('/api/paths?path=D%3A%5Cfixture%20accounts', undefined)
   })
+
+  it('uploads prompt media as raw bytes with the declared MIME and no inference API key', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{"id":"fixture-media"}'))
+    vi.stubGlobal('fetch', fetchMock)
+    const blob = new Blob(['fixture'], { type: 'application/octet-stream' })
+    expect(await api.uploadPromptMedia(blob, 'audio/wav')).toBe('fixture-media')
+    const [path, init] = fetchMock.mock.calls[0]!
+    expect(path).toBe('/api/prompts/media')
+    expect(init.method).toBe('POST')
+    expect(init.body).toBe(blob)
+    const headers = new Headers(init.headers)
+    expect(headers.get('Content-Type')).toBe('audio/wav')
+    expect(headers.has('Authorization')).toBe(false)
+  })
 })

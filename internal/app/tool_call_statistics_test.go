@@ -180,7 +180,7 @@ func TestGenerateEventCollectorsPreserveToolCalls(t *testing.T) {
 	source <- aistudio.Event{Kind: aistudio.EventText, Text: "partial", AntiTruncationToolCalls: 1}
 	source <- aistudio.Event{Kind: aistudio.EventError, Err: interrupted, AntiTruncationToolCalls: 3}
 	close(source)
-	replay, count, err := collectGenerateEvents(t.Context(), source, nil)
+	replay, count, err := collectGenerateEvents(t.Context(), source, nil, nil)
 	if !errors.Is(err, interrupted) || replay != nil || count != 3 {
 		t.Fatalf("discarded partial generation lost calls: count=%d replay=%v error=%v", count, replay, err)
 	}

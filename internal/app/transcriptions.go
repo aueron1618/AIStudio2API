@@ -32,6 +32,7 @@ func (service *trackedService) Transcribe(
 	}, cancel)
 	request.CandidateAccountIDs, err = service.transcriptionCandidates(requestCtx, request.Model)
 	if err != nil {
+		err = endedRequestError(requestCtx, err)
 		api.SetAccessLogError(requestCtx, err)
 		service.requests.finish(request.ID, finalRequestState(err))
 		cancel()
@@ -73,12 +74,15 @@ func (service *trackedService) Transcribe(
 		service.requests.logRequestProgress(request.ID, label, "WARN", "WAA Worker 已更新，重放当前请求", "model", modelID)
 		return true, nil
 	}
-	observed := aistudio.ContextWithAccountSelectionObserver(requestCtx, func(account *aistudio.Account) {
+	observed := aistudio.ContextWithAccountSelectionObserver(requestCtx, func(lease *aistudio.AccountLease) {
+		account := lease.Account()
 		workerGenerations[account.ID] = service.workers.WorkerGeneration(account.ID)
+		api.SetAccessLogChannel(requestCtx, string(lease.Channel()))
 		api.SetAccessLogTarget(requestCtx, request.Model, account.Config.Label)
 		service.requests.markRunning(request.ID, account.ID, account.Config.Label)
 	})
 	result, err := service.service.(aistudio.TranscriptionService).Transcribe(observed, request)
+	err = endedRequestError(requestCtx, err)
 	api.SetAccessLogFirstEvent(requestCtx, result.FirstEvent, 0)
 	api.SetAccessLogGenerationResult(
 		requestCtx, &result.Usage, 0,

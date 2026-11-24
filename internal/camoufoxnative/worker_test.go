@@ -677,3 +677,40 @@ func TestCloseUnloadTimeoutStillReleasesWorker(t *testing.T) {
 		}
 	})
 }
+
+func TestRetireCloseJoinsBackgroundBeforeRelease(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fixture := newWorkerPageFixture(t)
+		worker := fixture.worker
+		worker.pending.Add(1)
+		worker.Retire()
+		unload := requireBiDiTestCommand(t, fixture.commands)
+		if unload.Method != "browsingContext.navigate" || unload.Params["url"] != "about:blank" {
+			t.Fatalf("retirement did not unload its owned page: %+v", unload)
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- worker.Close() }()
+		fixture.reply(t, unload)
+		synctest.Wait()
+		time.Sleep(pageUnloadDelay)
+		end := requireBiDiTestCommand(t, fixture.commands)
+		if end.Method != "session.end" {
+			t.Fatalf("retirement did not end its session: %+v", end)
+		}
+		fixture.reply(t, end)
+		synctest.Wait()
+		if len(closed) != 0 || worker.released {
+			t.Error("Close released a retired Worker before background activity ended")
+		}
+		worker.pending.Done()
+		if err := <-closed; err != nil || !worker.released || len(worker.tabs) != 0 {
+			t.Fatalf("retired Close did not finish cleanup: %v", err)
+		}
+		if err := WaitRetired(); err != nil {
+			t.Fatal(err)
+		}
+		if _, retained := retiringCaches.Load(worker); retained {
+			t.Fatal("successful no-cache retirement retained ownership")
+		}
+	})
+}

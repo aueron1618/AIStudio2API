@@ -167,8 +167,8 @@ describe('token usage', () => {
     const headers = fetchMock.mock.calls[0]![1].headers as Headers
     expect(headers.get('content-type')).toBe('application/json')
     expect(headers.get('x-goog-api-key')).toBe('live-key')
-    const body = fetchMock.mock.calls[0]![1].body as Blob
-    expect(JSON.parse(await body.text())).toMatchObject({
+    const body = fetchMock.mock.calls[0]![1].body as BodyInit
+    expect(JSON.parse(await new Response(body).text())).toMatchObject({
       generateContentRequest: { model: 'models/assistant-build', ...request },
     })
   })

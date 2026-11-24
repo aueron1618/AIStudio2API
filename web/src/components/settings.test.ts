@@ -11,6 +11,7 @@ import AccountOrderList from './AccountOrderList.vue'
 import DurationInput from './DurationInput.vue'
 import PairRows from './PairRows.vue'
 import PathList from './PathList.vue'
+import PathPicker from './PathPicker.vue'
 import ModelsTable from './ModelsTable.vue'
 import SettingRow from './SettingRow.vue'
 import SettingsPanel from './SettingsPanel.vue'
@@ -76,6 +77,8 @@ const config: ServiceConfig = {
   build_native_nonstream: false,
   nonstream_keepalive: false,
   fake_stream: false,
+  thinking_guard: false,
+  user_message_rewrite: 'off',
   youtube_links: false,
   search_model_aliases: false,
   discover_hidden_models: false,
@@ -101,6 +104,7 @@ const config: ServiceConfig = {
   proxy_pool: [],
   init_timeout: '2m0s',
   request_timeout: '5m0s',
+  first_event_timeout: '5m0s',
   warm_worker_limit: 0,
   max_active_workers: 1,
   warm_startup_concurrency: 1,
@@ -128,6 +132,33 @@ async function render(component: Component, props: Record<string, unknown>): Pro
 }
 
 describe('merged settings controls', () => {
+  it('includes only the two disabled-by-default roleplay settings in their own section', async () => {
+    route.section = 'sillytavern'
+    const instance = mountSetup<{
+      form: ServiceConfig
+      sections: { id: string; fields: (keyof ServiceConfig)[] }[]
+      changedFields: Set<keyof ServiceConfig>
+    }>(SettingsPanel, { config, accounts: [], models: [], loading: false, error: '' })
+    cleanups.push(instance.unmount)
+    expect(instance.state.sections.find((section) => section.id === 'sillytavern')!.fields).toEqual(
+      ['thinking_guard', 'user_message_rewrite'],
+    )
+    expect(instance.state.form.thinking_guard).toBe(false)
+    expect(instance.state.form.user_message_rewrite).toBe('off')
+    expect(instance.state.changedFields.size).toBe(0)
+    const html = await render(SettingsPanel, {
+      config,
+      accounts: [],
+      models: [],
+      loading: false,
+      error: '',
+    })
+    expect(html).toContain('id="setting-thinking-guard"')
+    expect(html).toContain('aria-checked="false"')
+    expect(html).toContain('aria-labelledby="setting-user-message-rewrite-label"')
+    expect(html).toContain(messages['settings.userMessageRewriteOff'])
+  })
+
   it.each([
     [false, false],
     [false, true],
@@ -473,17 +504,9 @@ describe('merged configuration editors', () => {
       const change = vi.fn()
       const instance = mountSetup<{
         listing: PathListing
-        pickError: string
-        picking: number
-        rows: string[]
+        failure: string
         load: (path: string) => Promise<void>
-        choose: (path: string) => void
-      }>(PathList, {
-        value: ' D:\\one, D:\\two ',
-        inputId: 'path',
-        inputClass: '',
-        onChange: change,
-      })
+      }>(PathPicker, { open: false, start: '' })
       cleanups.push(instance.unmount)
       const first = instance.state.load('D:\\old')
       await instance.state.load(latest.path)
@@ -491,10 +514,16 @@ describe('merged configuration editors', () => {
       else resolve({ path: 'D:\\old', parent: '', entries: [] })
       await first
       expect(instance.state.listing).toEqual(latest)
-      expect(instance.state.pickError).toBe('')
+      expect(instance.state.failure).toBe('')
       expect(change).not.toHaveBeenCalled()
-      instance.state.picking = 1
-      instance.state.choose(latest.path)
+      const editor = mountSetup<{ choose: (index: number, path: string) => void }>(PathList, {
+        value: ' D:\\one, D:\\two ',
+        inputId: 'path',
+        inputClass: '',
+        onChange: change,
+      })
+      cleanups.push(editor.unmount)
+      editor.state.choose(1, latest.path)
       expect(change).toHaveBeenCalledWith('D:\\one,D:\\fixture')
     },
   )
@@ -508,6 +537,10 @@ describe('Cookie import form', () => {
       vi.stubGlobal('window', {
         location: new URL('https://console.example.test'),
         isSecureContext: true,
+        setTimeout,
+        clearTimeout,
+        setInterval,
+        clearInterval,
       })
       const app = createSSRApp(AccountsPanel, {
         accounts: [],
@@ -516,7 +549,8 @@ describe('Cookie import form', () => {
         loading: false,
         error: '',
         camoufox: undefined,
-        geoip: undefined,
+        models: [],
+        cooldowns: [],
       })
       app.directive('tooltip', {})
       app.mixin({

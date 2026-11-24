@@ -61,7 +61,7 @@ func (probe *workerBudgetProbe) create(ctx context.Context, id string, _ camoufo
 }
 
 func (worker *budgetWorker) Prepare(ctx context.Context, request aistudio.ProtectedRequest) (aistudio.PreparedProtectedRequest, error) {
-	return aistudio.PreparedProtectedRequest{Body: request.Body}, ctx.Err()
+	return aistudio.PreparedProtectedRequest{Body: request.Body, ProofAt: request.ProofAt, Proof: request.Proof, PagePrompt: request.PagePrompt}, ctx.Err()
 }
 
 func (worker *budgetWorker) SendProtected(context.Context, aistudio.ProtectedRequest) (*aistudio.RPCResponse, error) {
@@ -149,7 +149,7 @@ func newWorkerBudgetTest(t *testing.T, warm, active, startup, perAccount int) (*
 			t.Fatal(err)
 		}
 	}
-	manager := newAccountWorkerManager(pool, accounts, newRequestRegistry(t.Context()), "", "", 5*time.Second, warm, active, startup)
+	manager := newAccountWorkerManager(pool, accounts, newTestRequestRegistry(t), "", "", 5*time.Second, warm, active, startup)
 	probe := &workerBudgetProbe{}
 	manager.newWorker = probe.create
 	t.Cleanup(func() {
@@ -168,8 +168,8 @@ func newWorkerBudgetTest(t *testing.T, warm, active, startup, perAccount int) (*
 func assertWorkerBudget(t *testing.T, manager *accountWorkerManager, probe *workerBudgetProbe, live int) {
 	t.Helper()
 	probe.mu.Lock()
-	if probe.live != live || probe.peak > manager.activeLimit() || probe.startupPeak > manager.startup.size() || probe.starting != 0 {
-		t.Errorf("budget: live=%d want=%d peak=%d/%d startup=%d/%d starting=%d events=%v", probe.live, live, probe.peak, manager.activeLimit(), probe.startupPeak, manager.startup.size(), probe.starting, probe.events)
+	if probe.live != live || probe.peak > manager.activeLimit() || probe.startupPeak > testStartupLimit(&manager.startup) || probe.starting != 0 {
+		t.Errorf("budget: live=%d want=%d peak=%d/%d startup=%d/%d starting=%d events=%v", probe.live, live, probe.peak, manager.activeLimit(), probe.startupPeak, testStartupLimit(&manager.startup), probe.starting, probe.events)
 	}
 	probe.mu.Unlock()
 	manager.rebalanceMu.Lock()
@@ -417,7 +417,7 @@ func TestWorkerPageCatalogWaitsForBusyWorker(t *testing.T) {
 		t.Fatalf("full catalog did not wait for capacity: %v", err)
 	}
 	assertWorkerBudget(t, manager, probe, 1)
-	if evicted, err := manager.evictIdleWorker(t.Context(), "a@example.test"); err != nil || evicted {
+	if evicted, err := manager.evictIdleWorker(t.Context(), "a@example.test", "test busy eviction"); err != nil || evicted {
 		t.Fatalf("busy worker evicted: %v, %v", evicted, err)
 	}
 	if err := lease.Release(); err != nil {

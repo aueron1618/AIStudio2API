@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import { api } from '@/api'
 import { createOpenAIVideo, createVideo, waitOpenAIVideo, waitVideo } from './api'
-import { defaultSettings, useVideo, type VideoData } from './video'
+import { defaultSettings, frameURL, useVideo, type VideoData, type VideoFrame } from './video'
+import { localAttachment } from '../media-store'
 import type { Model } from '@/types'
 
 vi.mock('@/desktop', () => ({ keepPage: () => {} }))
 vi.mock('@/i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
-vi.mock('@/api', () => ({ api: { savePrompt: vi.fn(), deletePrompt: vi.fn() } }))
+vi.mock('@/api', () => ({
+  api: { savePrompt: vi.fn(), deletePrompt: vi.fn(), uploadPromptMedia: vi.fn() },
+}))
 vi.mock('../session', () => ({ newTurnID: () => crypto.randomUUID() }))
 vi.mock('../title', () => ({ requestTitle: vi.fn().mockResolvedValue('') }))
 vi.mock('./api', () => ({
@@ -41,6 +44,18 @@ vi.mock('@/console', async () => {
 
 const video = useVideo()
 
+function loadFrame(frame: VideoFrame, id = 'saved-video'): void {
+  video.load(id, {
+    title: 'Original',
+    description: 'Fixture description',
+    data: {
+      kind: 'video',
+      settings: { ...video.state.settings },
+      turns: [{ id: 'input', role: 'user', created: 0, prompt: 'Fixture', start: frame }],
+    },
+  })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(api.savePrompt).mockResolvedValue({
@@ -52,13 +67,29 @@ beforeEach(() => {
     updated_at: '',
   })
   vi.mocked(api.deletePrompt).mockResolvedValue(undefined)
+  vi.mocked(api.uploadPromptMedia).mockResolvedValue('frame-media')
   vi.stubGlobal('window', { location: new URL('https://example.test') })
+  vi.stubGlobal(
+    'FileReader',
+    class {
+      result = ''
+      onload: (() => void) | null = null
+      abort = vi.fn()
+      readAsDataURL(blob: Blob): void {
+        void blob.arrayBuffer().then((bytes) => {
+          this.result = `data:${blob.type};base64,${Buffer.from(bytes).toString('base64')}`
+          this.onload?.()
+        })
+      }
+    },
+  )
   video.newSession()
   video.ensureModel()
   video.reset()
 })
 afterEach(() => {
   video.newSession()
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
 
@@ -152,5 +183,127 @@ describe('retained video sessions', () => {
     await vi.waitFor(() => expect(video.state.running).toBe(false))
     expect(video.state.turns.at(-1)?.videos).toEqual(['/build/v1/videos/job/content'])
     expect(api.deletePrompt).not.toHaveBeenCalled()
+  })
+
+  it.each(['name', 'mimeType'] as const)(
+    'coalesces saves and preserves live frame %s edits during an upload',
+    async (field) => {
+      const original = { name: 'start.png', mimeType: 'image/png', data: 'eA==' }
+      loadFrame(original)
+      let finish!: (id: string) => void
+      vi.mocked(api.uploadPromptMedia).mockReturnValueOnce(
+        new Promise((resolve) => {
+          finish = resolve
+        }),
+      )
+      const first = video.save()
+      await vi.waitFor(() => expect(api.uploadPromptMedia).toHaveBeenCalledTimes(1))
+      video.state.title = 'Intermediate'
+      const second = video.save()
+      const edited = field === 'name' ? 'renamed.png' : 'image/jpeg'
+      video.state.turns[0]!.start![field] = edited
+      video.state.title = 'Latest'
+      const latest = video.save()
+      expect(api.savePrompt).not.toHaveBeenCalled()
+      finish('first-media')
+      await Promise.all([first, second, latest])
+      expect(api.savePrompt).toHaveBeenCalledTimes(2)
+      const snapshots = vi.mocked(api.savePrompt).mock.calls.map(([, prompt]) => prompt)
+      expect(snapshots.map((prompt) => prompt.title)).toEqual(['Original', 'Latest'])
+      const stored = (snapshots[1]!.data as VideoData).turns[0]!.start!
+      expect(stored[field]).toBe(edited)
+      expect(stored.data).toBe('')
+      expect(stored.mediaId).toBe(field === 'name' ? 'first-media' : 'frame-media')
+      expect(video.state.turns[0]!.start).toMatchObject(stored)
+      expect(api.uploadPromptMedia).toHaveBeenCalledTimes(field === 'name' ? 1 : 2)
+      expect(original).toEqual({ name: 'start.png', mimeType: 'image/png', data: 'eA==' })
+      expect(video.state.description).toBe('Fixture description')
+    },
+  )
+
+  it('waits for an in-flight media save and drops queued writes before deleting a video', async () => {
+    const frame = Object.assign(
+      localAttachment(new Blob(['x'], { type: 'image/png' })).inlineData!,
+      {
+        name: 'start.png',
+      },
+    )
+    loadFrame(frame, 'delete-video')
+    let finish!: (id: string) => void
+    vi.mocked(api.uploadPromptMedia).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve
+      }),
+    )
+    const saving = video.save()
+    await vi.waitFor(() => expect(api.uploadPromptMedia).toHaveBeenCalledTimes(1))
+    video.state.title = 'Queued'
+    const queued = video.save()
+    const deleting = video.remove()
+    expect(api.deletePrompt).not.toHaveBeenCalled()
+    finish('delete-frame')
+    await Promise.all([saving, queued, deleting])
+    expect(api.savePrompt).toHaveBeenCalledTimes(1)
+    expect(api.deletePrompt).toHaveBeenCalledWith('delete-video')
+    expect(vi.mocked(api.deletePrompt).mock.invocationCallOrder[0]).toBeGreaterThan(
+      vi.mocked(api.savePrompt).mock.invocationCallOrder[0]!,
+    )
+    expect(video.state.id).toBeNull()
+    expect(video.state.turns).toEqual([])
+  })
+
+  it('hydrates a stored frame with its declared MIME while keeping the submitted input snapshot', async () => {
+    const frame = { name: 'stored.png', mimeType: 'image/png', data: '', mediaId: 'stored/frame' }
+    expect(frameURL(frame)).toBe('/api/prompts/media/stored%2Fframe')
+    video.setStart(frame)
+    video.state.draft = 'Submitted prompt'
+    let finish!: (response: Response) => void
+    const fetchMock = vi.fn().mockReturnValue(
+      new Promise<Response>((resolve) => {
+        finish = resolve
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    vi.mocked(createVideo).mockResolvedValue({ name: 'operations/stored' })
+    vi.mocked(waitVideo).mockResolvedValue(['/v1beta/files/stored:download?alt=media'])
+    const running = video.run()
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    video.state.draft = 'Later input'
+    video.state.settings.durationSeconds = 4
+    finish(new Response(new Blob(['real-image'], { type: 'application/octet-stream' })))
+    await running
+    expect(createVideo).toHaveBeenCalledWith(
+      'video-build',
+      {
+        instances: [
+          {
+            prompt: 'Submitted prompt',
+            image: { bytesBase64Encoded: 'cmVhbC1pbWFnZQ==', mimeType: 'image/png' },
+          },
+        ],
+        parameters: { sampleCount: 1, aspectRatio: '16:9', durationSeconds: 8, resolution: '720p' },
+      },
+      expect.any(AbortSignal),
+    )
+    expect(video.state.turns[0]!.start).toMatchObject({ data: '', mediaId: 'stored/frame' })
+    expect(api.uploadPromptMedia).not.toHaveBeenCalled()
+  })
+
+  it('recycles local frame previews without converting them to inline history', () => {
+    const create = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:frame')
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const frame = Object.assign(
+      localAttachment(new Blob(['x'], { type: 'image/png' })).inlineData!,
+      {
+        name: 'local.png',
+      },
+    )
+    video.setStart(frame)
+    expect(frameURL(frame)).toBe('blob:frame')
+    expect(frameURL(frame)).toBe('blob:frame')
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(frame.data).toBe('')
+    video.setStart(undefined)
+    expect(revoke).toHaveBeenCalledWith('blob:frame')
   })
 })

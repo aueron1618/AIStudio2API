@@ -34,8 +34,9 @@ func TestAPIKeyAccountsLiveSaveUpdatesAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := &runtimeManager{
-		activeManagement: cfg, current: configTestGeneration(t.Context(), path, cfg), logs: &logOutput{},
+		activeManagement: cfg, current: configTestGeneration(t, t.Context(), path, cfg), logs: &logOutput{},
 	}
+	manager.settings.Store(requestSettingsOf(cfg))
 	handler := api.NewHandler(nil, api.Config{APIKey: cfg.ProxyAPIKey, APIKeys: manager.apiKeys})
 	check := func(key, origin string, want int) {
 		t.Helper()
@@ -106,9 +107,10 @@ func TestLiveConfigSaveSurvivesConcurrentStartup(t *testing.T) {
 	}
 	manager := &runtimeManager{
 		lifecycle: ctx, configPath: path, activeManagement: cfg, logs: &logOutput{},
-		current: configTestGeneration(ctx, path, cfg),
+		current: configTestGeneration(t, ctx, path, cfg),
 	}
-	next := configTestGeneration(ctx, path, cfg)
+	manager.settings.Store(requestSettingsOf(cfg))
+	next := configTestGeneration(t, ctx, path, cfg)
 	building, release := make(chan struct{}), make(chan struct{})
 	manager.factory = func(launch, _ context.Context, snapshot config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
 		close(building)

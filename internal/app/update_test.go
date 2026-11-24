@@ -116,7 +116,7 @@ func TestSelfUpdaterReleaseDelivery(t *testing.T) {
 			}))
 			defer server.Close()
 			release.Assets[0].URL = server.URL + "/asset"
-			updater := newSelfUpdater("v1.2.2", "unused-offline-executable", func() string { return "" }, nil, nil)
+			updater := newSelfUpdater("v1.2.2", "unused-offline-executable", func() string { return "" }, newTestRequestRegistry(t), nil)
 			updater.releaseURL = server.URL + "/releases/latest"
 			for _, refresh := range []bool{false, false, true} {
 				status, err := updater.UpdateStatus(t.Context(), refresh)

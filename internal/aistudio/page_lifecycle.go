@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -31,15 +32,30 @@ func (runtime *goWAARuntime) beginHTTP(ctx context.Context) (context.Context, co
 
 // schedule owns both the timer and its bounded callback, including shutdown races.
 func (runtime *goWAARuntime) schedule(delay time.Duration, task func(context.Context)) *time.Timer {
+	return runtime.scheduleContext(runtime.ctx, delay, task)
+}
+
+// Companion work keeps its admission snapshot and lease but outlives caller cancellation.
+func (runtime *goWAARuntime) scheduleContext(source context.Context, delay time.Duration, task func(context.Context)) *time.Timer {
 	runtime.lifecycleMu.Lock()
 	defer runtime.lifecycleMu.Unlock()
 	if runtime.closed {
 		return nil
 	}
+	release := func() error { return nil }
+	if lease, ok := AccountLeaseFromContext(source); ok {
+		release = lease.Retain()
+	}
 	runtime.pending.Add(1)
+	finish := sync.OnceFunc(func() {
+		runtime.pending.Done()
+		if err := release(); err != nil {
+			slog.Warn("账户租约释放失败", "error", err)
+		}
+	})
 	var timer *time.Timer
 	timer = time.AfterFunc(delay, func() {
-		defer runtime.pending.Done()
+		defer finish()
 		runtime.lifecycleMu.Lock()
 		delete(runtime.timers, timer)
 		if runtime.closed {
@@ -47,21 +63,25 @@ func (runtime *goWAARuntime) schedule(delay time.Duration, task func(context.Con
 			return
 		}
 		runtime.lifecycleMu.Unlock()
-		ctx, cancel := context.WithTimeout(runtime.ctx, 2*time.Minute)
+		ctx, stop := runtime.operationContext(context.WithoutCancel(source))
+		defer stop()
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 		task(ctx)
 	})
-	runtime.timers[timer] = struct{}{}
+	runtime.timers[timer] = finish
 	return timer
 }
 
 func (runtime *goWAARuntime) stopTimer(timer *time.Timer) {
 	runtime.lifecycleMu.Lock()
-	if _, owned := runtime.timers[timer]; owned && timer.Stop() {
-		runtime.pending.Done()
-	}
+	finish := runtime.timers[timer]
+	stopped := finish != nil && timer.Stop()
 	delete(runtime.timers, timer)
 	runtime.lifecycleMu.Unlock()
+	if stopped {
+		finish()
+	}
 }
 
 func (runtime *goWAARuntime) after(delay time.Duration, task func()) *time.Timer {

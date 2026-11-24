@@ -1,14 +1,16 @@
 package sqlitedb
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
 
-// TestOpenAppliesSchema 验证已有库打开后与建表语句一致：补上缺少的列，删除未定义的表与索引，空闲页交还文件系统
+// TestOpenAppliesSchema 验证已有库打开后与建表语句一致：补上缺少的列，删除未定义的表与索引，Reclaim 后空闲页交还文件系统
 func TestOpenAppliesSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	old, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(path))
@@ -27,7 +29,7 @@ INSERT INTO legacy SELECT zeroblob(4096) FROM (WITH RECURSIVE n(i) AS (SELECT 1 
 	}
 	schema := `CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, name TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS items_size ON items(size);`
-	db, err := Open(path, schema)
+	db, err := Open(path, schema, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,11 +50,73 @@ CREATE INDEX IF NOT EXISTS items_size ON items(size);`
 	if err := db.QueryRow(`SELECT group_concat(id || '=' || size, ',') FROM (SELECT id, size FROM items ORDER BY id)`).Scan(&sizes); err != nil || sizes != "a=0,b=0" {
 		t.Fatalf("补列后的记录 = %q err=%v", sizes, err)
 	}
+	if err := Reclaim(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
 	var mode, free int
 	if err := db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err != nil || mode != incrementalVacuum {
 		t.Fatalf("auto_vacuum = %d err=%v", mode, err)
 	}
 	if err := db.QueryRow(`PRAGMA freelist_count`).Scan(&free); err != nil || free != 0 {
 		t.Fatalf("freelist_count = %d err=%v", free, err)
+	}
+}
+
+func TestMigrationAndSchemaCleanupAreAtomic(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "commit", true: "rollback"}[fail], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "migration.db")
+			old, err := sql.Open(driverName, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := old.Exec(`CREATE TABLE states (seq INTEGER PRIMARY KEY, id TEXT UNIQUE, data BLOB);
+INSERT INTO states VALUES (7, 'fixture', X'010203');`); err != nil {
+				t.Fatal(err)
+			}
+			if err := old.Close(); err != nil {
+				t.Fatal(err)
+			}
+			const schema = `CREATE TABLE IF NOT EXISTS nodes (seq INTEGER PRIMARY KEY, id TEXT UNIQUE, data BLOB)`
+			sentinel := errors.New("migration failed")
+			db, err := OpenWithMigration(path, schema, 0, func(tx *sql.Tx) error {
+				if _, err := tx.Exec(schema); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(`INSERT INTO nodes SELECT seq, id, data FROM states`); err != nil {
+					return err
+				}
+				if fail {
+					return sentinel
+				}
+				return nil
+			})
+			if fail {
+				if !errors.Is(err, sentinel) || db != nil {
+					t.Fatalf("failed migration returned %v, %v", db, err)
+				}
+				db, err = sql.Open(driverName, path)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			objects, err := schemaObjects(db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, absent := "nodes", "states"
+			if fail {
+				want, absent = absent, want
+			}
+			if objects[want] != "table" || objects[absent] != "" {
+				t.Fatalf("migration left partial schema: %v", objects)
+			}
+			var seq int
+			var data string
+			if err := db.QueryRow(`SELECT seq, hex(data) FROM `+want+` WHERE id = 'fixture'`).Scan(&seq, &data); err != nil || seq != 7 || data != "010203" {
+				t.Fatalf("migration changed ordering or payload: %d, %q, %v", seq, data, err)
+			}
+		})
 	}
 }

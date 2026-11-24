@@ -1,11 +1,16 @@
 package aistudio
 
 import (
+	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"fmt"
+	"io"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -248,7 +253,11 @@ func encodeFunctionDeclaration(declaration FunctionDeclaration) ([]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parameters: %w", err)
 	}
-	inlined := inlineSchemaRefs(raw)
+	ordered, err := normalizeFunctionParameters(schemaWithPropertyOrdering(declaration.Parameters))
+	if err != nil {
+		return nil, fmt.Errorf("parameters: %w", err)
+	}
+	inlined := inlineSchemaRefs(ordered)
 	parameters, encodingError := encodeJSONSchema(inlined)
 	description := declaration.Description
 	if encodingError != nil {
@@ -434,13 +443,157 @@ func decodeFunctionCall(raw json.RawMessage, path string, evidence json.RawMessa
 	return call, nil
 }
 
-// encodeWireStructJSON 与 Build 相同把 JSON 值编码为 Struct，非对象值放在 result 字段
+// encodeWireStructJSON 把 JSON 值编码为 Struct，对象成员按官网页面 JSON.parse 后的键顺序排列，非对象值放在 result 字段
 func encodeWireStructJSON(raw json.RawMessage) ([]any, error) {
-	object, err := buildJSONObject(raw)
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return []any{}, nil
+	}
+	value, err := parseOrderedJSON(trimmed)
 	if err != nil {
 		return nil, fmt.Errorf("必须是 JSON: %w", err)
 	}
-	return encodeWireStruct(object.(map[string]any)), nil
+	object, ok := value.(orderedObject)
+	if !ok {
+		object = orderedObject{{key: "result", value: value}}
+	}
+	return encodeOrderedStruct(object), nil
+}
+
+// orderedMember 是 JSON 对象的一个成员
+type orderedMember struct {
+	key   string
+	value any
+}
+
+// orderedObject 是按 JavaScript 对象键顺序排列成员的 JSON 对象：数组下标形式的键按数值升序在前，其余键按首次出现的顺序，重复的键取最后一个值
+type orderedObject []orderedMember
+
+// parseOrderedJSON 把 raw 读成一个 JSON 值，对象读成 orderedObject，数字为 float64；raw 不是单个合法 JSON 值时返回 json.Unmarshal 的错误
+func parseOrderedJSON(raw []byte) (any, error) {
+	decoder := jsontext.NewDecoder(bytes.NewBuffer(raw), jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	value, err := decodeOrderedJSON(decoder)
+	if _, end := decoder.ReadToken(); err != nil || end != io.EOF {
+		if !json.Valid(raw) {
+			var value any
+			return nil, json.Unmarshal(raw, &value)
+		}
+		return nil, err
+	}
+	return value, nil
+}
+
+// decodeOrderedJSON 从 decoder 读出一个 JSON 值，对象读成 orderedObject，数字为 float64，超出 float64 范围的数字返回 json.Unmarshal 的错误
+func decodeOrderedJSON(decoder *jsontext.Decoder) (any, error) {
+	token, err := decoder.ReadToken()
+	if err != nil {
+		return nil, err
+	}
+	switch token.Kind() {
+	case '[':
+		values := []any{}
+		for decoder.PeekKind() != ']' {
+			value, err := decodeOrderedJSON(decoder)
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, value)
+		}
+		_, err := decoder.ReadToken()
+		return values, err
+	case '{':
+		object := orderedObject{}
+		positions := map[string]int{}
+		for decoder.PeekKind() != '}' {
+			keyToken, err := decoder.ReadToken()
+			if err != nil {
+				return nil, err
+			}
+			key := keyToken.String()
+			value, err := decodeOrderedJSON(decoder)
+			if err != nil {
+				return nil, err
+			}
+			if position, ok := positions[key]; ok {
+				object[position].value = value
+				continue
+			}
+			positions[key] = len(object)
+			object = append(object, orderedMember{key: key, value: value})
+		}
+		if _, err := decoder.ReadToken(); err != nil {
+			return nil, err
+		}
+		slices.SortStableFunc(object, func(left, right orderedMember) int { return compareObjectKeys(left.key, right.key) })
+		return object, nil
+	case '"':
+		return token.String(), nil
+	case '0':
+		number, err := token.Float()
+		if err != nil {
+			return nil, json.Unmarshal([]byte(token.String()), new(float64))
+		}
+		return number, nil
+	case 't':
+		return true, nil
+	case 'f':
+		return false, nil
+	}
+	return nil, nil
+}
+
+// objectKeys 返回 JSON 对象 raw 的键名，按官网页面 JSON.parse 后的键顺序排列，成员值不解码
+func objectKeys(raw []byte) []string {
+	decoder := jsontext.NewDecoder(bytes.NewReader(raw), jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	keys := []string{}
+	seen := map[string]bool{}
+	_, _ = decoder.ReadToken()
+	for decoder.PeekKind() == '"' {
+		token, _ := decoder.ReadToken()
+		if key := token.String(); !seen[key] {
+			seen[key] = true
+			keys = append(keys, key)
+		}
+		_ = decoder.SkipValue()
+	}
+	slices.SortStableFunc(keys, compareObjectKeys)
+	return keys
+}
+
+// compareObjectKeys 按 JavaScript 对象键顺序比较两个键：数组下标形式的键按数值升序排在其余键之前，其余键保持原顺序
+func compareObjectKeys(left, right string) int {
+	leftIndex, leftOK := arrayIndexKey(left)
+	rightIndex, rightOK := arrayIndexKey(right)
+	switch {
+	case leftOK && rightOK:
+		return cmp.Compare(leftIndex, rightIndex)
+	case leftOK:
+		return -1
+	case rightOK:
+		return 1
+	}
+	return 0
+}
+
+// arrayIndexKey 返回 JavaScript 视为数组下标的对象键的数值
+func arrayIndexKey(key string) (uint64, bool) {
+	if key == "" || len(key) > 1 && key[0] == '0' {
+		return 0, false
+	}
+	index, err := strconv.ParseUint(key, 10, 32)
+	return index, err == nil && index < math.MaxUint32
+}
+
+// encodeOrderedStruct 按成员顺序把 orderedObject 编码为 Struct
+func encodeOrderedStruct(object orderedObject) []any {
+	if len(object) == 0 {
+		return []any{}
+	}
+	entries := make([]any, 0, len(object))
+	for _, member := range object {
+		entries = append(entries, []any{member.key, encodeWireValue(member.value)})
+	}
+	return []any{entries}
 }
 
 func encodeWireStruct(object map[string]any) []any {
@@ -471,6 +624,8 @@ func encodeWireValue(value any) []any {
 		return []any{nil, nil, nil, typed}
 	case map[string]any:
 		return []any{nil, nil, nil, nil, encodeWireStruct(typed)}
+	case orderedObject:
+		return []any{nil, nil, nil, nil, encodeOrderedStruct(typed)}
 	case []any:
 		values := make([]any, 0, len(typed))
 		for _, item := range typed {
@@ -482,14 +637,26 @@ func encodeWireValue(value any) []any {
 	}
 }
 
+// wireArray 返回本服务编码的 GenerateContent 正文中数组 raw 的各元素，与 raw 共用字节，raw 不是数组时返回 false
+func wireArray(raw []byte) ([]json.RawMessage, bool) {
+	values, err := splitArray(raw, "$", nil, nil)
+	return values, err == nil
+}
+
 // wireFunctionResult 返回 GenerateContent 正文最后一个 user 轮次只有一个函数响应 Part 时的函数结果 JSON 文本，即官网用户在函数调用块中输入的函数结果
 func wireFunctionResult(body []byte) (string, bool) {
-	var fields []json.RawMessage
-	var contents [][]json.RawMessage
-	if json.Unmarshal(body, &fields) != nil || len(fields) < 2 || json.Unmarshal(fields[1], &contents) != nil || len(contents) == 0 {
+	fields, ok := wireArray(body)
+	if !ok || len(fields) < 2 {
 		return "", false
 	}
-	last := contents[len(contents)-1]
+	contents, ok := wireArray(fields[1])
+	if !ok || len(contents) == 0 {
+		return "", false
+	}
+	last, ok := wireArray(contents[len(contents)-1])
+	if !ok {
+		return "", false
+	}
 	var role string
 	var parts [][]json.RawMessage
 	var response []json.RawMessage

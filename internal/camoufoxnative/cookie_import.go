@@ -24,7 +24,7 @@ func ImportCookies(ctx context.Context, options LoginOptions, storageStateJSON [
 	options.headless, options.View = true, nil
 	importCtx, cancel := context.WithTimeout(ctx, options.Timeout)
 	defer cancel()
-	session, err := startLoginSession(importCtx, options, state)
+	session, err := startLoginSession(importCtx, options, state, "")
 	if err != nil {
 		return LoginResult{}, err
 	}

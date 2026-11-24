@@ -30,6 +30,7 @@ const status: UpdateStatus = {
   mode: 'binary',
   available: true,
   updating: false,
+  log_dir: 'D:\\fixture\\logs',
 }
 let unmount: (() => void) | undefined
 
@@ -38,6 +39,7 @@ function mount() {
   const instance = mountSetup<VersionState>(VersionPanel, {
     status,
     activeRequests: 0,
+    restartStalled: false,
     onRestarting: restarting,
   })
   unmount = instance.unmount

@@ -1,13 +1,47 @@
 import { describe, expect, it, vi } from 'vite-plus/test'
 import { displayModelName, showSeparateToolCalls, useUsageFormat } from './format'
+import { mountSetup } from '@/test-component'
+import LogLine from '../LogLine.vue'
 
 vi.mock('@/i18n', () => ({
-  useI18n: () => ({ locale: { value: 'en' }, t: (key: string) => key }),
+  useI18n: () => ({
+    locale: { value: 'en' },
+    t: (key: string) => key,
+    logText: (text: string) => text,
+  }),
 }))
 
 const prefix = '\u6297\u622a\u65ad-'
 
 describe('usage model display names', () => {
+  it('normalizes log model labels without mutating requested, resolved or response identity', () => {
+    const identity = Object.freeze({
+      requested_model: `models/${prefix}alias(high)-search`,
+      model: `${prefix}resolved-model`,
+      response_model: 'actual-response-model',
+    })
+    const instance = mountSetup<{ fields: { key: string; value: string }[] }>(LogLine, {
+      entry: {
+        time: '2026-11-24T00:00:00Z',
+        level: 'INFO',
+        source: 'fixture',
+        message: 'fixture',
+        event: 'request.completed',
+        fields: Object.entries(identity).map(([key, value]) => ({ key, value })),
+      },
+    })
+    try {
+      const fields = Object.fromEntries(instance.state.fields.map(({ key, value }) => [key, value]))
+      expect(fields.requested_model).toBe('models/alias(high)-search')
+      expect(fields.model).toBe('resolved-model')
+      expect(fields.response_model).toBe('actual-response-model')
+    } finally {
+      instance.unmount()
+    }
+    expect(identity.requested_model).toBe(`models/${prefix}alias(high)-search`)
+    expect(identity.model).toBe(`${prefix}resolved-model`)
+  })
+
   it.each([
     [`${prefix}gemini-2.5-pro`, 'gemini-2.5-pro'],
     [`models/${prefix}gemini-2.5-pro`, 'models/gemini-2.5-pro'],

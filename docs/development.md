@@ -23,6 +23,7 @@ Windows 用户解压发布包后双击 `aistudio2api.exe`。程序启动后自�
 - 启动时窗口先显示启动画面，管理服务就绪后打开管理页面
 - 有系统托盘时，关闭窗口后继续运行：Windows 双击托盘图标显示窗口，Linux 单击托盘图标显示窗口，两者右键打开托盘菜单；macOS 单击菜单栏图标显示窗口、右键打开菜单，点 Dock 图标或从“应用程序”再次打开时显示窗口；菜单可显示窗口、在浏览器中打开管理页面、开关开机自启动或退出；Linux 没有托盘宿主时关闭窗口即退出
 - 再次启动时唤回已运行实例的窗口；`-open-ui=false` 不打开窗口，有托盘宿主时显示托盘图标
+- 页面中的外部链接用系统浏览器打开；拖入窗口的链接与文件由页面中的上传区接收，其余位置的拖放被取消，窗口停留在管理页面
 - 数据目录：Windows 为可执行文件所在目录，macOS 为 `~/Library/Application Support/AIStudio2API/`，Linux 为 `~/.config/AIStudio2API/`（设置 `XDG_CONFIG_HOME` 时为其中的 `AIStudio2API/`）；`.env`、`auth/` 与 `runtime/` 都在数据目录中
 - Windows 桌面版以 `cmd /c start /wait aistudio2api.exe setup` 的形式运行命令时在该控制台中输入输出，命令行等程序结束后返回
 - Windows 在替换运行中的输出文件时可能留下 `aistudio2api.exe~`，它是旧进程占用目标文件期间产生的构建副本
@@ -152,15 +153,25 @@ npm.cmd --prefix web run build
 
 ### 账户与普通启动
 
-管理页面“账户”页的“添加账户”菜单提供从 Chrome 导入、粘贴 Cookie、从指纹浏览器导入、浏览器登录和远程添加，也可以重新登录、立即刷新、编辑、启停和删除账户。浏览器登录会在隔离 Camoufox 中完成并自动读取邮箱。
+管理页面“账户”页的“添加账户”菜单提供从 Chrome 导入、粘贴 Cookie、从指纹浏览器导入、浏览器登录和远程添加，也可以重新登录、立即刷新、编辑、启停和删除账户。浏览器登录会在隔离 Camoufox 中完成并自动读取邮箱。启停账户保存后立即返回，停用后等待在途请求结束并关闭 Worker、启用后载入页面同步模型目录，都在后台完成。
 
-浏览器登录与重新登录的显示方式由服务端按请求决定：Linux 上 `DISPLAY` 与 `WAYLAND_DISPLAY` 都为空，或管理请求来自非回环地址、带 `Forwarded` 或 `X-Forwarded-For` 头时，使用管理页面登录窗口；其余情况在本机打开可见 Camoufox 窗口。管理页面为每次登录生成随机 ID，在 `POST /api/accounts` 或 `POST /api/accounts/{id}/login` 的 body 中以 `view` 带上该 ID，同时连接 `GET /api/login-view/{ID}` 的 WebSocket，两者在服务端取得同一个登录窗口。使用登录窗口时：
+浏览器登录与重新登录的显示方式由服务端按请求决定：
 
-- 隔离 Camoufox 以无头方式启动，Linux 没有 `DISPLAY` 时使用服务启动的 Xvfb，页面保持 Firefox 默认刷新帧率；导航 AI Studio 不等待页面载入，登录窗口显示载入过程
-- 登录窗口连接期间，服务端经 WebDriver BiDi `browsingContext.captureScreenshot` 以 JPEG（质量 0.8）截取最后打开且仍存在的顶层页面，间隔不短于 100 ms，与上一帧相同时不推送；每帧先发 JSON 元数据（页面 context、URL、标题、CSS 视口宽高与 devicePixelRatio），再发 JPEG 二进制。弹窗关闭后画面回到原页面
+- Linux 上 `DISPLAY` 与 `WAYLAND_DISPLAY` 都为空，或管理请求来自非回环地址、带 `Forwarded` 或 `X-Forwarded-For` 头时，使用管理页面登录窗口
+- 其余情况在本机打开可见 Camoufox 窗口
+
+管理页面为每次登录生成随机 ID，在 `POST /api/accounts` 或 `POST /api/accounts/{id}/login` 的 body 中以 `view` 带上该 ID，同时连接 `GET /api/login-view/{ID}` 的 WebSocket，两者在服务端取得同一个登录窗口。使用登录窗口时：
+
+- 隔离 Camoufox 以无头方式启动，Linux 没有 `DISPLAY` 时使用服务启动的 Xvfb，页面保持 Firefox 默认刷新帧率；导航 AI Studio 后立即返回，登录窗口显示载入过程
+- 登录窗口连接期间，服务端经 WebDriver BiDi `browsingContext.captureScreenshot` 以 JPEG（质量 0.8）截取最后打开且仍存在的顶层页面，间隔不短于 100 ms，只推送与上一帧不同的画面；每帧先发 JSON 元数据（页面 context、URL、标题、CSS 视口宽高与 devicePixelRatio），再发 JPEG 二进制。弹窗关闭后画面回到原页面
 - 管理页面把鼠标移动、按下与抬起、滚轮、按键按下与抬起和粘贴文本经同一连接发回，附带画面所属页面；服务端按到达顺序合并成 `input.performActions`：指针为 mouse，滚轮为 wheel，`KeyboardEvent.key` 的命名键映射为 WebDriver 键码点，粘贴文本逐字符按下与抬起；页面已关闭的输入丢弃，输入内容不写日志
 - 会话以 `unhandledPromptBehavior` 让 alert、confirm 与 prompt 保持打开，`browsingContext.userPromptOpened` 时登录窗口显示对话框，用户的选择以 `browsingContext.handleUserPrompt` 不经命令锁发送，打开对话框的输入命令随之返回
 - 隐藏登录窗口或断开 WebSocket 不取消已接收的账户任务，可以用同一 `view` 重新连接；显式 `DELETE /api/accounts/tasks/{id}` 取消任务，等待 Camoufox、profile 与隔离登录目录等执行资源释放后返回 204 并移除任务
+
+登录期间登录用的 Camoufox 退出时，登录以以下错误结束：
+
+- 浏览器以退出码 0 正常退出（关闭了 Camoufox 登录窗口）：`登录窗口已关闭，登录没有完成`
+- 浏览器以其他退出码退出：`登录浏览器意外退出: Camoufox 已退出，退出码 <退出码>`，并附 Camoufox 最近的输出；退出码的含义见 [Camoufox 后端](#camoufox-后端)
 
 `setup` 提供以下五种命令行导入入口：
 
@@ -205,6 +216,8 @@ Chrome 导入先验证真实邮箱，再对同邮箱账户原地更新认证材�
 
 加 `--remote` 时，Chrome 导入、隔离登录、文件导入与 Cookie 导入照常在本机完成，结果凭远程实例账户页“远程添加”生成的配对令牌逐个上传，隔离登录同时上传 Camoufox 指纹。远程账户使用远程实例的默认代理，`--proxy` 只用于本机导入与登录。来源带可续签 Chrome OAuth 材料时，上传完成后命令留在原电脑前台：立即并在每次会话签发 100 分钟后以本机 Chrome 来源与 OAuth 材料签发新会话，经 `PUT /api/pairing/accounts/{account}/cookies` 凭上传响应的 `renewal_token` 更新远程 Cookie，失败时 5 分钟后重试，沿用尚未送达且签发不到 100 分钟的会话；远程返回 401 `pairing_renewal_invalid` 或 404 `account_not_found` 时停止该账户并从记录中删除，其他失败照常重试，每次一行日志。OAuth 与 token 保存在原电脑的 `runtime/remote-renewals.json`（权限 0600），`--remote <origin> --renew` 读取该 origin 的记录恢复续签。服务端不信任上传邮箱、OAuth 或 localStorage，按安全 Cookie 解析和真实 HTTP 验证后提交，只在 `pairing-renewal.json` 保存 token 摘要；不能在服务器独立使用原电脑的设备材料续签。没有可续签 Chrome 来源的导入完成后退出。
 
+`setup` 的代理与账户环境：
+
 - `--proxy` 会同时固定到新账户的初始化、WAA 与业务请求，接受 HTTP、HTTPS 或 SOCKS5 URL，代理认证写在 URL 的 `user:password@` 部分；未指定时导入与登录使用 `PROXY` 中的第一个代理，新账户不设账户代理
 - `--locale` 和 `--timezone` 设置账户环境；未指定的项按 setup 出口（`--proxy`，未指定时为 `PROXY` 中的第一个代理或直连）的地理位置填写，命令输出出口 IP、国家与采用的语言和时区；`--remote` 上传的账户由远程实例按它的出口填写
 
@@ -215,7 +228,21 @@ Camoufox 按以下顺序定位，只使用发行目录 `application.ini` 中 `Ve
 3. 可执行文件旁的同名目录
 4. Windows 本机 Camoufox 缓存
 
-版本不符的候选被跳过；都没有时自动下载当前平台的固定版本。下载失败时，错误给出发行包地址与 `runtime/camoufox/` 的绝对路径，手动下载解压到该目录后不再下载。`CAMOUFOX_PATH` 以外的 Camoufox 在 Windows 上使用前删除 `fonts` 目录中 Twemoji 以外的字体。Camoufox 在报告 WebDriver BiDi 端点前退出时，错误带上退出码与 Camoufox 最后 20 行输出；输出含 `cannot open shared object file` 时，错误只写明退出码与 `ldd` 查到的 Camoufox 及其依赖库缺少的全部系统库，Debian 系发行版另附安装这些库与 Xvfb 的 `apt-get satisfy` 命令。没有 `DISPLAY` 且找不到 Xvfb 时，错误同样附上该命令。
+版本不符的候选被跳过。都没有时自动下载当前平台的固定版本：
+
+- 连接中断、停滞（连续 30 秒没有收到数据）或服务端返回 5xx 时，依次等 1、2、4、8 秒后从断点续传，共尝试 5 次
+- 下载失败时，错误给出发行包地址与 `runtime/camoufox/` 的绝对路径；手动下载并解压到该目录后，之后的启动直接使用它
+
+各平台发行包的字体：
+
+- Windows 发行包的 `fonts` 目录只带 Firefox 自带的 Twemoji，页面使用系统字体
+- Linux 与 macOS 发行包带 Windows 指纹读取的字体分组，Linux 上服务按其中的 `groups.json` 生成 fontconfig
+
+Camoufox 启动失败时的错误：
+
+- Camoufox 在报告 WebDriver BiDi 端点前退出时，错误为 `Camoufox 在报告 BiDi 端点前退出，退出码 <退出码>，最近的输出：` 加 Camoufox 最后 20 行输出，没有输出时只写退出码；退出码的格式与运行中退出相同（见下文）
+- 输出含 `cannot open shared object file` 时，错误只写明退出码与 `ldd` 查到的 Camoufox 及其依赖库缺少的全部系统库；Debian 系发行版另附安装这些库与 Xvfb 的 `apt-get satisfy` 命令
+- 没有 `DISPLAY` 且找不到 Xvfb 时，错误同样附上该命令
 
 日常启动只需运行二进制或 Go 入口，再从管理页面启动生成服务：
 
@@ -248,6 +275,7 @@ internal/waa/            SpiderMonkey WAA：BotGuard VM、Firefox 形状宿主�
 internal/imagecodec/     生成图片的 JPEG 解码、CatmullRom 缩放、PNG 编码与经 cgo 链接 libwebp 的 WebP 编码
 internal/resample/       语音 PCM 的 Kaiser 窗 sinc 多相重采样
 internal/proxydial/      上游代理拨号与带认证代理的本机 SOCKS5 中转
+internal/egress/         经出口在线查询公网 IP、国家与时区，推出出口所在地的语言
 internal/requestdb/      请求用量账本与可选正文的 SQLite 存储
 internal/statedb/        Responses 与 Interactions 续接节点的 SQLite 存储
 internal/promptdb/       Playground 对话的 SQLite 存储
@@ -255,6 +283,7 @@ internal/sqlitedb/       SQLite 打开、按建表语句同步表结构与空闲
 internal/pricing/        用量估算费用使用的 Gemini API 单价表
 internal/chromeauth/     Windows Chrome OAuth/DBSC 发现、导入和续签
 internal/config/         全局配置的读取、校验和原子写回
+internal/i18n/           服务文案的翻译表、系统语言识别与控制台输出翻译
 internal/webui/          嵌入并提供 Vue 构建产物
 internal/desktop/        桌面版窗口、系统托盘、启动画面与 Wails 更新器接入
 web/                     Vue 3、TypeScript、Vite+ 和 Tailwind CSS 源码
@@ -296,7 +325,9 @@ HTTP route
   -> capability-aware account lease
   -> AI Studio array encoder
   -> per-account WAA proof
-  -> Go HTTP transport (default) / fingerprinted Camoufox XHR
+  -> GenerateContent transport
+       spidermonkey (default): Go HTTP via account egress, Firefox headers and account Cookie
+       camoufox: XMLHttpRequest sent by the fingerprinted page, response pushed via WebDriver BiDi
   -> incremental response decoder
   -> canonical events
   -> client protocol response
@@ -304,9 +335,111 @@ HTTP route
 
 WebSocket 入口沿用相同分层：`internal/api` 解码公开协议，`internal/app` 绑定账户和运行状态，`internal/aistudio` 执行 WebChannel 与规范事件转换。公开适配器只消费规范请求与事件；账户文件、WAA 对象、原始数组和资源粘性由 `internal/aistudio` 与 `internal/app` 管理。
 
-Camoufox 由 Go 通过 WebDriver BiDi 直接管理。启动数据面时，服务按 `WARM_WORKER_LIMIT` 逐个准备隔离、无头、长驻的账户 runtime，并在需要其他账户能力时替换最久未用的空闲 runtime。无头 runtime 的软件 vsync 为每秒 60 次，浏览器启动与首次载入官网页面期间页面每秒刷新 60 帧，Worker 就绪后以 `gfx.display.frame-rate-divisor` 每 60 次分发一次，页面每秒刷新 1 帧；界面运行的输入、点击与新开对话期间分频为 1，页面从下一次 vsync 起每秒刷新 60 帧，WebRender 以单通道灰度光栅化字形；官网页面就绪后，服务经 WebDriver BiDi 访问浏览器界面层（Camoufox 以 `MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1` 启动），把标签页的 `renderLayers` 设为 false，标签页不再光栅化与合成，页面的可见状态、焦点、动画帧与定时器不变。WebGL 在所有主机上强制启用，取账户指纹中的 Windows 显卡配置；语音列表在所有主机上只含账户指纹中的语音。非 Windows 主机上，Camoufox 按 Windows 版 Firefox 的字体偏好解析字体名，字体白名单补入已声明字体所在字体文件的其他字体族名，并启用 WebGPU、Windows 10 滚动条样式与 2 声道 AudioContext；`window.innerHeight` 取 `window.outerHeight` 减 Windows 浏览器界面高度 57，站点存储的全局上限固定为 50 GiB；无头时经 WebDriver BiDi 移动主窗口，使页面内容区的屏幕坐标与 Windows 版一致。Linux 上 Camoufox 只加载发行包内的 Windows 字体（字形微调为 `hintslight`），按 Windows 字体替换表解析字体名；macOS 上服务在启动 Camoufox 前把 Windows 字体替换名写入发行包字体的 name 表，并给这些字体的 PostScript 名加 `-Windows` 后缀，避免与系统同名字体冲突。没有 `DISPLAY` 的 Linux 主机上，每个无头 Camoufox 使用服务启动的 Xvfb 虚拟显示，WebGL 经 Mesa GLX 软件渲染，Camoufox 退出时一并结束该 Xvfb。每个 runtime 使用关闭时删除的临时 profile，HTTP 磁盘缓存写入账户目录的 `camoufox-cache/`，同一账户重启时复用官网静态资源；同一账户同时存在的第二个 runtime 使用临时 profile 内的缓存。创建临时 profile 的进程在 profile 内持有锁文件，运行时装配时删除锁已释放的遗留 profile。Windows 上每个 Camoufox 进程树加入服务进程持有的 Job，服务进程退出时由系统一并结束。每个 runtime 以临时对话打开官网新对话页 `/prompts/new_chat?model=<模型>&temporary=true`：页面脚本之前注入的预载脚本取得官网应用的 WAA service 对象，页面发出的 MakerSuite 请求提供动态请求头，`GetLoggingContext` 响应提供 `X-Goog-Ext-519733851-Bin`。最后一轮是带文本的 user 轮次的 GenerateContent 在页面界面运行：输入框没有焦点时服务先以可信指针点击输入框（官网新开对话后焦点已在输入框中），再在输入框输入该轮各文本 Part 以空格连接的文本并以可信指针点击 Run；一轮返回 200 且响应正文读完后，服务在后台点击 New chat 并丢弃该对话（临时对话中新开的对话仍是临时对话），下一轮在空白对话中直接输入，期间到达的请求等待该标签页；其余情况下标签页保留该对话，与上一轮的对话相同时点击该轮的 Rerun，在其后追加 model 与 user 两轮时在当前对话中继续，其余对话先点击 New chat 并丢弃当前对话；页面应用生成 proof 并创建 GenerateContent 的 `XMLHttpRequest`，发送时正文换成 Go 编码的业务正文与这份 proof，响应头与响应块由页面经 WebDriver BiDi `script.message` 通道推送给 Go，随后的 CountTokens 与统计上报由页面应用发出；请求取消时点击 Stop。同一账户同时进行的界面请求各用一个标签页。其余受保护请求的正文由 Go 编码，proof 由 WAA service 生成，通过同一固定指纹页面以官网同样的 `XMLHttpRequest` 发送，GenerateContent 带官网点击 Run 时的 `Priority: u=0`，响应同样经 `script.message` 推送给 Go。WebDriver BiDi 命令在同一连接上并发执行：每条命令带唯一 ID，后台读取连接的 goroutine 按 ID 把响应交给等待的调用方，单条命令最长 150 秒；请求取消或超时时调用立即返回，迟到的响应被丢弃，其他命令不受影响。其他 MakerSuite、Drive 与媒体控制面请求继续使用账户固定出口的 Go HTTP transport。
+一次请求中的决策点与负责代码（按请求流转顺序）：
 
-`WAA_BACKEND=spidermonkey` 时不定位、不下载也不启动 Camoufox。每个账户 runtime 在服务进程内请求官网页面、页面 HTML 引用的样式表与脚本、网站图标与 Cloud Console 认证预热 iframe，再请求 `GetLoggingContext` 得到公开请求头，调用 `Waa/Create` 取得 challenge，按 hash 下载并缓存解释器到 `auth/.waa-interpreters/`，在 `internal/waa` 链接的 SpiderMonkey 与 Firefox 形状宿主中执行 program，program 插入的 iframe 由宿主以 Firefox iframe 导航请求；页面子资源与解释器按 Firefox HTTP 缓存的新鲜度与条件请求规则发送，缓存元数据写入账户目录的 `spidermonkey-cache.json`；带页面提示词的 GenerateContent 先在宿主页面的输入框填入提示词并点击 Run，再生成 proof。受保护请求携带 Firefox 请求头与账户 Cookie，由账户固定出口的 Go HTTP transport 发送，响应 Cookie 写回账户状态。账户页的浏览器登录在首次使用时准备 Camoufox。
+| 决策 | 负责文件与函数 |
+| --- | --- |
+| 入口鉴权与账户范围 | `internal/api/middleware.go` `authMiddleware` / `accountContextMiddleware` |
+| 模型映射、后缀与通道路由 | `internal/app/runtime.go` `trackedService.mappedModel`、`internal/aistudio/channel.go` `AccountPool.selectionChannelsLocked` |
+| 模型能力判断 | `internal/aistudio/service.go` `AccountLease.Model`、`internal/aistudio/generate.go` `validateGenerateEntry` |
+| 对话中途的系统消息 | `internal/api/generate.go` `appendWithReminders`、`internal/aistudio/turns.go` `normalizeTurns` |
+| 续写 | `internal/aistudio/turns.go` `normalizeTurns`、`internal/aistudio/generate.go` `Client.decodePlaygroundRounds` |
+| 自动压缩 | `internal/api/responses_compaction.go` `server.generateCompactionSummary`、`internal/api/anthropic_context.go` `server.applyAnthropicContextEdits` |
+| 工具约束与 MCP 白名单 | `internal/aistudio/tool_contract.go` `prepareToolRequest`、`internal/api/openai.go` `restrictMCPServer` |
+| 独立用户文本改写与思考引导 | `internal/aistudio/chinese_rewrite.go` `applyChineseRewrite`、`internal/aistudio/thinking_guard.go` `applyThinkingGuard`；默认 `off` / `false` |
+| 历史回复与状态续接 | `internal/aistudio/model_turns.go` `modelTurnHistory.restore`、`internal/api/responses.go` `server.prepareResponses` |
+| 附件与媒体处理 | `internal/aistudio/upload.go` `PooledService.UploadInlineMediaToLease`、`internal/api/remote_media.go` `inlineRemoteMedia` |
+| 选账户与 Worker 调度 | `internal/app/runtime.go` `trackedService.acquireWarmLease`、`internal/aistudio/accounts.go` `AccountPool.TryAcquireFor` |
+| 备用请求与超时控制 | `internal/app/hedge.go` `trackedService.awaitFirstEvent`、`internal/app/runtime.go` `trackedService.startAttempt` |
+| 换号与换号计数 | `internal/app/runtime.go` `trackedService.generateWithRetry` / `countSwitchFailure` |
+| 冷却判定与冷却放行 | `internal/aistudio/quota.go` `QuotaCooldownForError`、`internal/aistudio/accounts.go` `selectionCooldown` |
+| 认证续签与 DBSC 刷新 | `internal/app/auth_retry.go` `authRuntimeRefresher.do` / `ensureBoundAccount` |
+| WAA 证明 | `internal/aistudio/service.go` `WorkerProtectedTransport.DoProtected`、`internal/aistudio/runtime_native.go` `NativeWorker.Prepare` |
+| 上游出口与连接隔离 | `internal/aistudio/transport_http.go` `MakerSuiteHTTPTransport.clientForAccount`、`internal/aistudio/transport_browser.go` `browserRoundTripper.RoundTrip` |
+| 内容拦截与错误映射 | `internal/aistudio/generate.go` `Client.Generate`、`internal/api/errors.go` `statusFromError` |
+
+### Camoufox 后端
+
+Camoufox 由 Go 通过 WebDriver BiDi 直接管理。启动数据面时，服务按 `WARM_WORKER_LIMIT` 逐个准备隔离、无头、长驻的账户 runtime，并在需要其他账户能力时替换最久未用的空闲 runtime。
+
+无头 runtime 的刷新帧率与绘制：
+
+- 软件 vsync 为每秒 60 次；浏览器启动与首次载入官网页面期间，页面每秒刷新 60 帧
+- Worker 就绪后，`gfx.display.frame-rate-divisor` 设为 60，每 60 次 vsync 分发一次，页面每秒刷新 1 帧；同时服务经 WebDriver BiDi 访问浏览器界面层（Camoufox 以 `MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1` 启动），把标签页的 `renderLayers` 设为 false，标签页停止光栅化与合成，页面的可见状态、焦点、动画帧与定时器照常
+- 界面运行的输入、点击与新开对话期间，分频设为 1、`renderLayers` 设为 true，页面从下一次 vsync 起每秒刷新 60 帧；全部界面操作结束后恢复每秒 1 帧并停止绘制
+- WebRender 以单通道灰度光栅化字形；Windows 上定时器线程在最早的定时器到期时唤醒
+- Worker 就绪 2 秒后与最后一次界面操作 5 分钟后，服务发出 `memory-pressure`，各进程回收 GC 堆与渲染缓存
+
+各主机按账户指纹呈现 Windows 版 Firefox：
+
+- WebGL 在所有主机上强制启用，取账户指纹中的 Windows 显卡配置；语音列表在所有主机上只含账户指纹中的语音
+- 非 Windows 主机上，Camoufox 按 Windows 版 Firefox 的字体偏好解析字体名，字体白名单补入已声明字体所在字体文件的其他字体族名
+- 非 Windows 主机上启用 WebGPU、Windows 10 滚动条样式与 2 声道 48 kHz 的 AudioContext，`prefers-reduced-motion` 为 `no-preference`，站点存储的全局上限固定为 50 GiB；指纹没有 `window.innerHeight` 时取 `window.outerHeight` 减 Windows 浏览器界面高度 85
+- 非 Windows 主机无头运行时，服务经 WebDriver BiDi 移动主窗口，使页面内容区的屏幕坐标与 Windows 版一致
+- Linux 上 Camoufox 只加载发行包内的 Windows 字体（字形微调为 `hintslight`），按 Windows 字体替换表解析字体名
+- macOS 上服务在启动 Camoufox 前把 Windows 字体替换名写入发行包字体的 name 表，并给这些字体的 PostScript 名加 `-Windows` 后缀，与系统同名字体区分；快捷键修饰键为 Control
+- 没有 `DISPLAY` 的 Linux 主机上，每个无头 Camoufox 使用服务启动的 Xvfb 虚拟显示，WebGL 经 Mesa GLX 软件渲染，Camoufox 退出时一并结束该 Xvfb
+
+profile、缓存与进程：
+
+- 每个 runtime 使用关闭时删除的临时 profile；创建临时 profile 的进程在 profile 内持有锁文件，运行时装配时删除锁已释放的遗留 profile
+- HTTP 磁盘缓存写入账户目录的 `camoufox-cache/`，同一账户重启时复用官网静态资源；同一账户同时存在的第二个 runtime 使用临时 profile 内的缓存；账户缓存由后台关闭中的旧 Worker 占用时，新 runtime 在载入页面前等它释放
+- Windows 上每个 Camoufox 进程树加入服务进程持有的 Job，服务进程退出时由系统一并结束
+
+每个 runtime 以临时对话打开官网新对话页 `/prompts/new_chat?model=<模型>&temporary=true`：
+
+- 页面脚本之前注入的预载脚本取得官网应用的 WAA service 对象
+- 页面发出的 MakerSuite 请求提供动态请求头，`GetLoggingContext` 响应提供 `X-Goog-Ext-519733851-Bin`
+
+最后一轮是带文本的 user 轮次，或是回应页面最后一轮函数调用的函数结果时，GenerateContent 在页面界面运行：
+
+- 服务先关闭页面上出现的已知弹层：欢迎对话框、引导浏览浮层与 Cookie 提示条
+- 文本轮次：输入框没有焦点时，服务先以可信指针点击输入框（官网新开对话后焦点已在输入框中）；再把该轮各文本 Part 以空格连接的文本开头写入剪贴板，以可信键盘按 Ctrl+V 粘贴到输入框，最后以可信指针点击 Run。写入的开头最多 25000 个 UTF-16 码元，与官网把更长的粘贴转为文本附件的长度相同
+- 文本含官网粘贴时转为附件的 Google 文档、云端硬盘、YouTube 或 Figma 链接时按 Ctrl+Shift+V，官网按住 Shift 的粘贴保留原文
+- 函数结果：在最后一轮是该函数调用的标签页上，服务把函数结果粘贴到函数调用块中并提交
+- 页面应用生成 proof 并创建 GenerateContent 的 `XMLHttpRequest`，发送时正文换成 Go 编码的业务正文与这份 proof；响应头与响应块由页面经 WebDriver BiDi `script.message` 通道推送给 Go
+- 服务从页面发出这个请求起等待响应，页面仍在处理 Run 点击时也是如此
+- 随后的 CountTokens 与统计上报由页面应用发出
+- 请求取消时点击 Stop；取消在两次界面操作之间生效
+
+一轮结束后标签页上的对话：
+
+- 一轮返回 200、响应正文读完且回答不是函数调用时，服务在后台点击 New chat 并丢弃该对话（临时对话中新开的对话仍是临时对话），下一轮在空白对话中直接输入，期间到达的请求等待该标签页
+- 回答是函数调用时，标签页留在当前对话等待函数结果
+- 上游返回 200 以外的状态时，下一轮在当前对话中直接输入
+- 其余情况下标签页保留该对话：下一轮与上一轮的对话相同时点击该轮的 Rerun，在其后追加 model 与 user 两轮时在当前对话中继续，其余对话先点击 New chat 并丢弃当前对话
+- 同一账户同时进行的界面请求各用一个标签页；全部标签页都在运行对话时，服务在后台新建标签页并载入官网页面，同时等已有标签页空出，先到哪个用哪个
+
+其余受保护请求的正文由 Go 编码，proof 由 WAA service 生成，通过同一固定指纹页面以官网同样的 `XMLHttpRequest` 发送，响应同样经 `script.message` 推送给 Go。其中 GenerateContent 带官网点击 Run 时的 `Priority: u=0`，页面在一次可信 Pause 按键的处理中发出它。
+
+WebDriver BiDi 命令在同一连接上并发执行：
+
+- 每条命令带唯一 ID，后台读取连接的 goroutine 按 ID 把响应交给等待的调用方
+- 单条命令最长 150 秒
+- 请求取消或超时时调用立即返回，迟到的响应被丢弃，其他命令照常执行
+
+Camoufox 运行中与服务的 WebDriver BiDi 连接断开时，服务最多等 5 秒看浏览器进程是否退出，等待中的命令与请求、连接断开后新发的命令都以同一个错误结束：
+
+- 进程已退出：错误为 `Camoufox 已退出，退出码 <退出码>，最近的输出：` 加 Camoufox 最近 20 行输出，没有输出时只写退出码；网页脚本的控制台消息（`JavaScript warning: https://…` 这类行）不计入
+- 进程仍在运行：错误为 `BiDi 连接已断开: <原因>`
+- Windows 上退出码以十六进制显示，如 `0xC0000409` 为浏览器崩溃；浏览器进程被其他程序强制结束时退出码由该程序决定，`taskkill /F` 为 `0x00000001`，PowerShell `Stop-Process` 为 `0xFFFFFFFF`；其他系统为十进制退出码，进程被信号结束时为信号名
+
+其他 MakerSuite、Drive 与媒体控制面请求使用账户固定出口的 Go HTTP transport。
+
+### SpiderMonkey 后端
+
+`WAA_BACKEND=spidermonkey` 时 WAA 全部在服务进程内完成，生成服务不需要 Camoufox；账户页的浏览器登录在首次使用时准备 Camoufox。每个账户 runtime 依次：
+
+1. 在服务进程内请求官网页面、页面 HTML 引用的样式表与脚本、网站图标与 Cloud Console 认证预热 iframe
+2. 请求 `GetLoggingContext` 得到公开请求头
+3. 调用 `Waa/Create` 取得 challenge，按 hash 下载解释器并缓存到 `auth/.waa-interpreters/`
+4. 在 `internal/waa` 链接的 SpiderMonkey 与 Firefox 形状宿主中执行 program；program 插入的 iframe 由宿主以 Firefox iframe 导航请求
+
+运行中：
+
+- 页面子资源与解释器按 Firefox HTTP 缓存的新鲜度与条件请求规则发送，缓存元数据写入账户目录的 `spidermonkey-cache.json`
+- 带页面提示词的 GenerateContent 先在宿主页面的输入框填入提示词并点击 Run，再生成 proof
+- 受保护请求携带 Firefox 请求头与账户 Cookie，由账户固定出口的 Go HTTP transport 发送，响应 Cookie 写回账户状态
 
 默认 `WAA_BACKEND=spidermonkey`、`WARM_WORKER_LIMIT=0`，不创建常驻热池；显式启动或刷新所需的目录页面仍占用统一活动与启动预算。两个后端都固定以 `temporary=true` 打开页面，移除 `TEMPORARY_CHAT` 与额外 Hello 预热生成。可选 Camoufox 的 BiDi 并发命令用唯一 ID 分发，取消不关闭其他调用共享的连接。读取响应遵循请求 context；UTF-8 分块最多 64 KiB，编码/BiDi 队列最多 8 块 credit，但 XHR 原生 `responseText` 仍累积完整响应。512 KiB 不是浏览器或整进程内存上限，见 [运行时内存](memory.md)。
 
@@ -324,25 +457,25 @@ Camoufox 由 Go 通过 WebDriver BiDi 直接管理。启动数据面时，服务
 | `PROXY_API_KEY` | 公开 API 访问密钥，多个用逗号分隔；Web 保存后立即用于新请求，无需重启 | 空 |
 | `API_KEY_ACCOUNTS` | 逗号分隔，每项以最后一个 `:` 分成 `PROXY_API_KEY` 中的 key 与以 `\|` 分隔的账户 ID，该 key 的请求与文件上传只在这些账户中选号，未列出的 key 可用全部账户，不在 `PROXY_API_KEY` 中的项不起作用；与 key 列表一起保存后立即生效，已准入请求的原账户上限不会因后续修改而扩大 | 空 |
 | `AUTO_START` | 管理服务就绪后自动启动生成服务；失败记录 `ERROR` 日志，管理服务继续运行，账户与配置以外的原因失败时以 5 秒起、翻倍至 5 分钟的间隔重试，手动启动或停止后不再重试 | `false` |
-| `HIDE_DOCK_ICON` | macOS 桌面版以 Accessory 激活策略启动，只显示菜单栏图标；设置页保存后管理页面向桌面壳发送 `dock:hide` 或 `dock:show`，桌面壳在主线程切换激活策略 |
+| `HIDE_DOCK_ICON` | macOS 桌面版以 Accessory 激活策略启动，只显示菜单栏图标；设置页保存后管理页面向桌面壳发送 `dock:hide` 或 `dock:show`，桌面壳在主线程切换激活策略 | `false` |
 | `REQUEST_BODY_LOG` | 保存公开 API 的 POST 请求与响应正文，各截断到 64 KiB，只保留最近 1000 条；保存后立即生效 | `false` |
 | `LOG_FILE` | 同时把服务日志写入 `runtime/logs/aistudio2api.log`，单文件 10 MB 轮转；保存后立即生效 | `true` |
 | `LOG_MAX_TOTAL_MB` | 日志目录总量上限，超出时删除最旧的文件，不小于 20；保存后立即生效 | `500` |
 | `ADMIN_AUTH_ENABLED` | 管理员账号密码登录开关 | `false` |
 | `ADMIN_USERNAME` | 管理员账号 | `admin` |
-| `ADMIN_PASSWORD` | 管理员密码，开启登录时必填 | 空 |
-| `PROXY` | setup 与未设置账户代理时使用的出口，多个代理用逗号分隔组成代理池；留空时生成服务使用系统代理 | 空 |
+| `ADMIN_PASSWORD` | 管理员密码 | 空 |
+| `PROXY` | 全局出口代理或代理池 | 空 |
 | `INIT_TIMEOUT` | 单账户初始化超时 | `2m` |
-| `REQUEST_TIMEOUT` | 单次请求最大执行时间，自动续写每轮重新计时 | `30m` |
+| `REQUEST_TIMEOUT` | 上游连续没有数据的最长时间；从请求开始计时，每次收到上游数据重新计时，持续输出时不限制总时长 | `30m` |
 | `WARM_WORKER_LIMIT` | 常驻预热账户数，0 表示按需启动 | `0` |
 | `MAX_ACTIVE_WORKERS` | 活动 Worker 容量上限，必须为正数且不小于热池目标 | `1` |
 | `WARM_STARTUP_CONCURRENCY` | 同时冷启动的 Worker 数，两种后端均适用；常驻预热逐个启动 | `1` |
 | `PER_ACCOUNT_CONCURRENCY` | 单账号同时执行的请求数 | `1` |
 | `ROUTING_STRATEGY` | 账户轮询 `round-robin` 或粘性优先 `fill-first` | `round-robin` |
 | `ACCOUNT_ORDER` | 逗号分隔的账户 ID，`fill-first` 依次使用并按此顺序预热，未列出的账户排在后面并按 ID 排序；保存后立即生效 | 空 |
-| `MAX_ACCOUNT_SWITCHES` | 一个请求因上游 401、403、404、5xx、连接断开等非额度失败换号的次数上限，`0` 为不换号；额度失败不计入；保存后停止再启动生成服务生效 | `3` |
+| `MAX_ACCOUNT_SWITCHES` | 一个请求因上游 403、404、5xx、连接断开、首字超时等非额度失败换号的次数上限，`0` 为不换号；登录失效与额度失败不计入；保存后立即生效 | `3` |
 | `UPSTREAM_CHANNELS` | 保留 Playground 与 Build 固定入口；旧 Build 代理的生成已被上游停用，返回其原始错误 | `playground,build` |
-| `MODEL_MAPPING` | 逗号分隔，每项以最后一个 `:` 分成别名与模型 ID | 空 |
+| `MODEL_MAPPING` | 逗号分隔，每项以最后一个 `:` 分成别名与模型 ID；保存后用于新请求与模型列表 | 空 |
 | `MODEL_CHANNELS` | 逗号分隔，每项以最后一个 `:` 分成模型 ID 与通道 `playground` 或 `build`；保存后立即生效 | 空 |
 | `MODEL_ACCOUNTS` | 逗号分隔，每项以最后一个 `:` 分成模型 ID 与以 `\|` 分隔的账户 ID，该模型的自动选号只在这些账户中进行并与 `API_KEY_ACCOUNTS` 取交集，指定账户与绑定文件的请求不受限，未列出的模型可用全部账户；保存后立即生效 | 空 |
 | `BUILD_NATIVE_NONSTREAM` | 自动路由的非流式请求优先 Build 原生单次调用；固定 URL 优先 | `true` |
@@ -350,15 +483,18 @@ Camoufox 由 Go 通过 WebDriver BiDi 直接管理。启动数据面时，服务
 | `FAKE_STREAM` | 流式请求按非流式取得完整结果后再以流式输出 | `false` |
 | `YOUTUBE_LINKS` | 用户消息文本中的 YouTube 链接作为视频外部媒体发送 | `false` |
 | `STRIP_THOUGHT_SIGNATURES` | 发往上游前去掉对话历史中的思考签名，函数调用带 `skip_thought_signature_validator`；保存后停止再启动生成服务生效 | `false` |
-| `SEARCH_MODEL_ALIASES` | 为支持搜索的模型提供 `-search` 型号，使用该型号时启用 Google 搜索；保存后停止再启动生成服务生效 | `true` |
+| `SEARCH_MODEL_ALIASES` | 为支持搜索的模型提供 `-search` 型号，使用该型号时启用 Google 搜索；保存后用于新请求与模型列表 | `true` |
 | `DISCOVER_HIDDEN_MODELS` | 同步账户模型目录时读取账户页面载入的官网前端主程序，找出推荐模型页指向、`ListModels` 没有列出的模型，经上游 `CountTokens` 确认可用后加入该账户目录，条目复制自同类已列出的推荐模型、ID 与名称为模型 ID 并带 `hidden: true`；被 `ListModels` 列出后使用官方条目；保存后停止再启动生成服务生效 | `false` |
-| `GOOGLE_SEARCH` | 为 OpenAI、Anthropic、Gemini 与 Interactions 的生成请求启用 Google 搜索，包含普通型号与携带函数工具的请求；保存后停止再启动生成服务生效 | `false` |
+| `GOOGLE_SEARCH` | 为 OpenAI、Anthropic、Gemini 与 Interactions 的生成请求启用 Google 搜索，包含普通型号与携带函数工具的请求；保存后用于新请求 | `false` |
 | `ANTI_TRUNCATION` | 公开 `抗截断-` 模型变体开关；目录、生成与计数请求在管理页保存后立即使用新值，与自动续写独立 | `false` |
 | `CONTINUATION_REWRITE` | 以 assistant 轮结尾的请求在不支持原生续写的模型上改写为续写请求，规则见 [协议规范](protocol.md)；保存后停止再启动生成服务生效 | `true` |
 | `AUTO_CONTINUATION` | Playground 分轮自动续写；关闭时不再发下一轮，管理页保存立即生效，包括尚未触发下一轮的在途请求；与输入前缀改写独立 | `true` |
 | `CONTINUATION_PROMPT` | 改写时与末尾 assistant 正文一起写入系统指令的续写提示词；键存在且为空时末尾 assistant 正文作为最后一轮 user；保存后停止再启动生成服务生效 | 内置英文续写句 |
+| `THINKING_GUARD` | 独立思考引导，仅作用于支持思考的文本生成，强度至多 `low`、预算至多 1024 token，不抬高更低设置，非文本请求不变；保存后用于新请求 | `false` |
+| `USER_MESSAGE_REWRITE` | 仅改写 user 消息文本中的中文，不改 tools、assistant 或非文本内容；`off`、`traditional`、`martian`，并追加默认简体中文回复指令；保存后用于新请求 | `off` |
 | `FIRST_EVENT_HEDGE` | 首字超时备用请求：`off`、`auto`（各模型与通道近 24 小时原请求首字等待的 p95）或正整数秒 | `off` |
 | `FIRST_EVENT_HEDGE_MODELS` | 发起备用请求的模型 ID，逗号分隔；仍受空闲 Worker 和单账户并发预算约束 | `gemini-4-argon` |
+| `FIRST_EVENT_TIMEOUT` | `off` 或正整数秒；每次尝试从取得账户起到首个语义事件独立计时，到时取消并换号，计入换号上限、不冷却账户，无可换账户时返回 504；不适用于后台请求或 Agent 后台任务 | `off` |
 | `WAA_BACKEND` | WAA 后端 `camoufox` 或 `spidermonkey`，旧配置 `go` 自动迁移 | `spidermonkey` |
 | `MEDIA_OUTPUT` | Chat Completions 与 Messages 正文中生成媒体的引用方式 `inline` 或 `url` | `inline` |
 | `MEDIA_BASE_URL` | 媒体 URL 的服务地址，`http` 或 `https`；留空时取请求的协议与 Host | 空 |
@@ -371,21 +507,23 @@ Camoufox 由 Go 通过 WebDriver BiDi 直接管理。启动数据面时，服务
 | --- | --- |
 | `auth_states`、`proxy`、`init_timeout`、`request_timeout` | 下一次启动生成服务时使用的保存值 |
 | `warm_worker_limit`、`max_active_workers`、`warm_startup_concurrency`、`per_account_concurrency` | 保存后立即作用于当前生成服务的容量参数 |
-| `max_account_switches` | 下一次启动生成服务时使用的非额度错误换号上限 |
+| `max_account_switches` | 保存后立即作用于换号判断的非额度错误换号上限 |
 | `waa_backend`、`build_native_nonstream` | 下一次启动生成服务时使用的 WAA 与自动路由非流式配置 |
 | `routing_strategy`、`account_order`、`model_channels`、`model_accounts` | 保存后立即应用的路由策略、账户顺序、模型通道与账户约束；固定 URL 仍优先 |
 | `upstream_channels` | 下一次启动生成服务时使用的通道启用范围 |
-| `nonstream_keepalive`、`fake_stream` | 下一次启动生成服务时使用的非流式保活与假流式设置 |
+| `nonstream_keepalive`、`fake_stream` | 保存后立即作用于新请求的非流式保活与假流式设置 |
 | `youtube_links` | 下一次启动生成服务时使用的 YouTube 链接识别设置 |
 | `strip_thought_signatures` | 下一次启动生成服务时使用的历史思考签名剥离设置 |
-| `search_model_aliases` | 下一次启动生成服务时使用的搜索后缀型号开关 |
+| `search_model_aliases` | 保存后立即作用于新请求与模型列表的搜索后缀型号开关 |
 | `discover_hidden_models` | 下一次启动生成服务时使用的官网隐藏模型探测开关 |
-| `google_search` | 下一次启动生成服务时使用的全模型 Google 搜索开关 |
+| `google_search` | 保存后立即作用于新请求的全模型 Google 搜索开关 |
 | `continuation_rewrite`、`continuation_prompt` | 下一次启动生成服务时使用的末尾 assistant 轮改写开关与续写提示词 |
 | `anti_truncation`、`auto_continuation` | 两个独立热开关；保存后立即生效，旧客户端省略 `auto_continuation` 时保留当前值 |
 | `proxy_api_key`、`api_key_accounts` | 保存后同时热更新的认证 key 列表与账户绑定；`APIKeys` 回调为每个请求读取一致快照，已准入请求保留原账户上限 |
-| `first_event_hedge`、`first_event_hedge_models` | 下一次启动生成服务时使用的首字超时备用请求设置与模型范围 |
-| `model_mapping` | 下一次启动生成服务时使用的模型别名映射 |
+| `first_event_hedge`、`first_event_hedge_models`、`first_event_timeout` | 下一次启动生成服务时使用的首字超时备用请求与单次首字超时设置 |
+| `media_output`、`media_base_url` | 保存后立即作用于新请求的媒体引用方式与媒体服务地址 |
+| `model_mapping` | 保存后立即作用于新请求与模型列表的模型别名映射 |
+| `thinking_guard`、`user_message_rewrite` | 独立选项，保存后作用于新请求；默认 `false` / `off`，不影响非文本内容 |
 | `auto_start` | 下一次启动管理进程时是否自动启动生成服务 |
 | `hide_dock_icon` | macOS 桌面版是否隐藏 Dock 图标，保存后立即生效 |
 | `request_body_log` | 保存后立即决定是否保存请求与响应正文 |
@@ -394,16 +532,33 @@ Camoufox 由 Go 通过 WebDriver BiDi 直接管理。启动数据面时，服务
 | `admin_password_set` | 是否已配置管理密码 |
 | `listen_addr` | 保存的监听地址，管理进程重启后生效 |
 | `active_listen_addr`、`active_proxy_api_key` | 当前生效的监听地址和 API 密钥 |
+| `preview_listen_addr` | 保存的 API 试用页预览来源监听地址，管理进程重启后生效 |
+| `active_preview_listen_addr` | 当前管理进程实际使用的预览来源地址 |
 | `reserved_listen_addr` | 被 Windows 保留而改用 `active_listen_addr` 的监听地址，没有改用时为空 |
 | `active_proxy` | 当前生成服务使用的出口，代理池为逗号分隔的全部代理，`proxy` 为空时为系统代理，没有系统代理时为空 |
 | `proxy_pool` | 当前生成服务的代理池：每个代理的地址、是否可用、绑定账户数、最近检测时间与最近错误 |
 | `management_restart_required` | 保存的监听地址、预览地址或管理登录配置与当前管理进程不同；API key 修改不要求重启 |
 | `service_restart_required` | 保存的生成服务配置与当前生成服务实例不同 |
-| `environment`、`invalid` | 只读的环境变量锁定信息与普通无效配置提示 |
+| `environment` | 取自进程环境变量、覆盖 `.env` 的配置键 |
+| `invalid` | 取值无效而按默认值运行的项，每项为 `key`、`value` 与 `reason` |
 
-`PROXY` 含多个代理时组成代理池。启动生成服务时、载入页面与预热 Worker 之前，先经每个代理建立到 `aistudio.google.com:443` 的隧道检测，检测失败的代理不参与分配；未设置账户代理的账户保留运行状态 `proxy` 中仍可用的绑定，其余账户依次绑定到绑定账户最少的可用代理并写入运行状态。添加或导入账户时，登录使用该账户将绑定的代理。生成请求或 Worker 启动经代理出现网络错误（Go 传输层错误、页面 `NetworkError`，或 Worker 载入 AI Studio 期间连不上代理）时累计到请求发出或 Worker 启动时账户绑定的代理，成功一次清零；连续 3 次且存在其他可用代理时该代理标为不可用，其账户改绑到其他可用代理，并在独占租约下按新出口重建请求头客户端与 Worker。代理池每 5 分钟重新检测全部代理，检测失败的代理标为不可用，每次检测后绑定在不可用代理上的账户改绑到可用代理，检测成功的代理重新参与新账户的分配。在管理端清空账户代理时，账户原有的代理池绑定不可用则先改绑到可用代理，再按新出口重建请求头客户端与 Worker。只有一个代理时网络错误不改绑。账户出口的优先级为账户代理、代理池绑定、系统代理、直连。
+`PROXY` 含多个代理时组成代理池。账户出口的优先级为账户代理、代理池绑定、系统代理、直连。
 
 配置保存使用临时文件、`Sync` 和原子替换。监听地址、预览地址和管理登录配置在管理进程重启后应用；API key 列表、账户绑定、容量、路由策略、模型通道、抗截断/自动续写及日志等表中注明的即时项保存后生效，其余生成配置在 Stop/Start 后应用。新请求使用最新 key 快照，已准入请求的账户上限与后续当前绑定取交集，不因 key 轮换或撤销而扩大权限。已有显式请求超时与 `UPSTREAM_CHANNELS=playground,build` 不因旧默认值迁移而被删除，正数热池和用户并发配置同样保留。
+
+分配：
+
+- 启动生成服务时，在载入页面与预热 Worker 之前，先经每个代理建立到 `aistudio.google.com:443` 的隧道检测（15 秒超时），检测失败的代理不参与分配
+- 未设置账户代理的账户保留运行状态 `proxy` 中仍可用的绑定，其余账户依次绑定到绑定账户最少的可用代理并写入运行状态
+- 添加或导入账户时，登录使用该账户将绑定的代理
+
+故障与改绑：
+
+- 生成请求或 Worker 启动经代理出现网络错误时，错误累计到请求发出或 Worker 启动时账户绑定的代理，成功一次清零；网络错误包括 Go 传输层错误、页面 `NetworkError`，以及 Worker 载入 AI Studio 期间连不上代理
+- 连续 3 次且存在其他可用代理时，该代理标为不可用，其账户改绑到其他可用代理，并在独占租约下按新出口重建请求头客户端与 Worker；只有一个代理时网络错误不改绑
+- 代理池每 5 分钟重新检测全部代理：检测失败的代理标为不可用，每次检测后绑定在不可用代理上的账户改绑到可用代理，检测成功的代理重新参与新账户的分配
+- 在管理端清空账户代理时，账户原有的代理池绑定不可用则先改绑到可用代理，再按新出口重建请求头客户端与 Worker
+
 
 管理登录开启后，`/api` 使用独立的 HttpOnly、SameSite=Strict 会话 Cookie：
 
@@ -436,7 +591,13 @@ POST /api/control/start
   -> 剩余目录同步与热池预热继续在后台运行
 ```
 
-配置读取、校验、生成服务实例创建失败或启用前取消时，当前已停止实例保持不变。切换到新实例后启动失败时，该实例进入 `STOPPED`，管理端返回结构化错误。账户的 ListModels 响应与 Build 模型目录在每次成功刷新后写入账户目录的 `catalog.json`，载入账户时只采用目录指纹与 `runtime-state.json` 一致的缓存，新的生成服务实例因此可以用上次同步的目录立即预热，请求编码所需的模型条目也从缓存恢复；`catalog.json` 同时记录同步时刻，启动时只在后台刷新没有一致缓存或最近一次同步已满 24 小时的账户，其余账户沿用缓存，由每 24 小时的巡检刷新。预热逐个启动账户的 Worker：候选账户的目录就绪后启动，上一个 Worker 启动结束后再启动下一个。
+配置读取、校验、生成服务实例创建失败或启用前取消时，当前已停止实例保持不变。切换到新实例后启动失败时，该实例进入 `STOPPED`，管理端返回结构化错误。
+
+模型目录缓存与预热：
+
+- 账户的 ListModels 响应与 Build 模型目录在每次成功刷新后写入账户目录的 `catalog.json`；载入账户时只采用目录指纹与 `runtime-state.json` 一致的缓存，新的生成服务实例用上次同步的目录立即预热，请求编码所需的模型条目也从缓存恢复
+- `catalog.json` 同时记录同步时刻；启动时只在后台刷新没有一致缓存或最近一次同步已满 24 小时的账户，其余账户沿用缓存，由每 24 小时的巡检刷新
+- 预热逐个启动账户的 Worker：候选账户的目录就绪后启动，上一个 Worker 启动结束后再启动下一个
 
 模型目录刷新与当前生成服务共用 context（Go 取消信号）。启动失败、取消或 Stop 后等待刷新退出的上界为 2 秒；未完成的 lifecycle transition（启动或停止操作）最多等待 12 秒。超时与 Worker 清理错误通过 `errors.Join` 保留在同一错误链中。
 
@@ -446,18 +607,36 @@ POST /api/control/start
 | --- | --- | --- |
 | `account.json` | label、enabled、proxy、locale、timezone、auth_user | 创建或编辑账户时写入 |
 | `storage-state.json` | Cookie、localStorage 与可选 Chrome OAuth/DBSC 续签材料 | 合并 `Set-Cookie`、DBSC 刷新或认证续签后原子写回 |
-| `camoufox-fingerprint.json` | 账户固定的浏览器指纹、语言与时区 | 首次运行生成，空值、窗口几何与字体按 Camoufox 官方启动器规则规范化，语音、WebGL 与媒体设备按真实 Windows 用户的分布生成；重新登录和 WAA runtime 继续复用 |
+| `camoufox-fingerprint.json` | 账户固定的浏览器指纹、语言、时区与点击和粘贴的事件节奏 | 首次运行生成，空值、窗口几何与字体按 Camoufox 官方启动器规则规范化，语音、WebGL 与媒体设备按真实 Windows 用户的分布生成，事件节奏按官网页面上可信点击与粘贴的事件间隔分布生成；重新登录和 WAA runtime 继续复用 |
 | `runtime-state.json` | 权益等级、模型资格、冷却与资源账户绑定 | 权益同步、首次模型结果或资源变化后原子写回 |
 | `catalog.json` | 最近一次同步的 ListModels 响应、Build 模型目录、官网隐藏模型与同步时刻 | 每次目录刷新成功后原子写回 |
 | `camoufox-cache/` | 该账户 Camoufox 的 HTTP 磁盘缓存（上限 32 MB，JS 字节码以 zlib 压缩存放）与 Firefox 启动缓存 | WAA runtime 运行期间独占写入，随账户目录删除 |
 
 `runtime-state.json` 的 `model_access` value 为 `{state,checked_at,reason?}`，成功状态为 `verified`；`cooldowns` value 为 `{until,reason?,level?}`，`level` 记录套餐限额的递增档位，旧状态省略时按未递增处理；`resources` value 保存 kind、name、mime、size、purpose、created_at 与可选 video 元数据。Drive file、视频任务、视频产物和 Bidi 恢复 token 保持创建账户粘性。视频任务保存公开 video object 的 model、seconds、size 与 UTC 创建时间，重启后可恢复这些字段及已绑定产物，不恢复未完成的生成。Veo 专用实现已移除，旧未完 Veo 任务不能继续轮询上游执行；已绑定文件仍按原账户读取。
 
+载入账户时，缺少 `account.json` 或 `storage-state.json`、或这两个文件与 `runtime-state.json` 无法读取解析的账户目录被跳过，其余账户照常载入；服务日志记下该目录与原因，管理端账户列表把它列为不可用、原因写明出错的文件，删除它即删除该目录。
+
+`runtime-state.json` 的字段：
+
+| 字段 | value |
+| --- | --- |
+| `benefit_tier` | 账户权益：`0` Free、`1` Pro、`2` Ultra、`3` Plus |
+| `catalog_fingerprint` | 目录指纹，与 `catalog.json` 一致时采用目录缓存 |
+| `model_access` | `{state,checked_at,reason?}`，成功状态为 `verified` |
+| `cooldowns` | `{until,reason?,level?,fallback?,rejected_size?,rejected_until?,rejected_level?}` |
+| `resources` | `{kind?,name?,mime?,size?,purpose?,created_at,video?,alias?,sha256?,video_duration?,used_at?,display_name?,expires_at?}` |
+| `proxy` | 从 `PROXY` 代理池分配给账户的代理 |
+| `restricted` | Google 拒绝账户使用 AI Studio 的原因与跳转页 |
+| `assistant` | Build 写代码助手的应用与续接位置，见 [Build 通道](build.md#5-对话与应用) |
+
+- Drive file、视频任务、视频产物和 Bidi 恢复 token 均保持创建账户粘性
+- 视频任务保存的 model、seconds、size 与 UTC 创建时间可在重启后恢复投影，已绑定产物可下载；不恢复未完成的生成
+
 活动请求锁保护跨进程账户租约，短事务锁保护 `runtime-state.json` 合并写回。短事务锁位于 `auth/.leases/<账户>.runtime.lock`，以 25ms 间隔等到锁释放；取得锁后重读磁盘状态，只修改目标字段，原子替换文件，再同步内存与资源索引。取租约时同样在锁内读取所选账户的文件，内容与上次同步或写入时相同则沿用内存状态。接收 context 的资源事务会在取消或 deadline 到达时提前返回。
 
 账户更新以 `account.json` 原子写入为持久提交点。`internal/app` 先准备 `pending`（尚未提交）的固定出口，关闭旧 Worker并锁定该账户的 Worker 配置，再调用 `AccountLease.SaveConfig`；保存成功后依次提交 Worker 配置与固定出口。准备、关闭或保存失败时丢弃 pending 更新；保存后的租约释放错误原样返回，已发布配置继续生效。
 
-账户调度先按每个账户实时 `ListModels` 返回的模型和方法筛选，再选择已经就绪且有并发槽位的 Worker。`ROUTING_STRATEGY=round-robin` 在每个模型的候选账户间轮询，按上次选中的账户 ID 继续；`fill-first` 持续使用 `ACCOUNT_ORDER` 顺序（未列出的账户在后并按 ID 排序）中的首个可用账户，并在并发槽位用满、冷却或不可用时切换。带内联附件的生成请求优先选择已上传其中最多附件的账户，该账户并发槽位用满、冷却或不可用时再按策略选择。生成请求的候选为账户与 `UPSTREAM_CHANNELS` 所启用通道的组合：Playground 按 `ListModels` 与权益判断，Build 按 Build 代理返回的 Gemini API 模型目录与相同权益判断；轮询与粘性在组合间按账户 ID 与通道顺序推进，冷却按通道记录（Build 为 `build:<模型>`），一个通道冷却后同一账户可由另一通道继续，全部启用通道都冷却时按下文的冷却规则排队或返回 429；`-build` 模型只使用 Build 写代码助手通道 `assistant`，冷却 scope 为 `-build` 模型 ID，同一账户同时只运行一个 `-build` 生成，对话续接得上某账户应用中的 trajectory 时该账户优先；通道规格见 [Build 通道](build.md)。并发槽位、Worker 与 WAA 按账户共享；计数、Live、转录与 Drive 文件引用使用 Playground RPC。每个账号最多同时租用 `PER_ACCOUNT_CONCURRENCY` 个请求槽位；首个请求获取跨进程文件锁，最后一个请求释放。WAA proof 由账号 worker 串行生成，`GenerateContent` 由同一 Camoufox 页面并发发送并流式读取（`WAA_BACKEND=spidermonkey` 时由账户 runtime 的 Go HTTP 发送）；请求前使用 Worker 当前 Cookie 生成 Authorization，响应头到达后把 Worker Cookie 原子同步到账户持久状态。其他 MakerSuite HTTP 响应的 Cookie 在响应头到达时与最新账户状态合并。未固定账户的请求遇到可重试的 401、403、404、429、5xx、收到响应前的连接断开或单账户初始化超时时，可以在首个上游语义事件前继续切换尚未尝试的同能力账户，额度以外的失败最多换 `MAX_ACCOUNT_SWITCHES` 次，额度失败不计入；上游以 403、协议错误码 7 拒绝账户（官网不跳转拒绝页的情形）时，该账户在该模型上按连续次数冷却 1、5、15、30、60 分钟，成功一次后从 1 分钟重新开始；Drive 引用随需要临时复制到生成账户，显式账户和视频任务保持账户绑定。Chrome 导入状态保留续签材料，HTTP `401` 时在同一固定出口续签一次、重建该账户 WAA runtime 并重放请求。
+账户调度先按每个账户实时 `ListModels` 返回的模型和方法筛选，再选择已经就绪且有并发槽位的 Worker。
 
 Worker 容量由热池目标、活动上限和单账户并发共同约束。冷启动、临时目录页和页面重载都先预留活动与启动槽位；容量已满时，无论热池是否为零，都先关闭可回收的空闲旧 Worker 再启动替代者，不以 pending Worker 绕过峰值限制。旧实例优先选择对请求模型处于冷却的账户，再按最久未用排序。同账户重载需要独占维护窗口；只有预留了额外活动槽位才允许新旧页面短暂共存，否则先关闭旧页再重建，不侵入其他在途请求。失败、取消和关闭会释放新资源，关闭失败的实体继续占用预算并由后续 Stop 重试。
 
@@ -465,7 +644,90 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。冷�
 
 容量设置保存后立即作用于当前生成服务：超过新的 `MAX_ACTIVE_WORKERS` 时关闭额外空闲 Worker，忙碌实例等待请求结束；常驻数调高时补足预热，等待中的启动与请求按新的启动并发/账户并发放行。`WARM_STARTUP_CONCURRENCY` 对 SpiderMonkey 与 Camoufox 均生效，已有 `.env` 的用户配置不被默认值覆盖。
 
-`FIRST_EVENT_HEDGE` 不为 `off` 时，`FIRST_EVENT_HEDGE_MODELS` 列出的模型的生成请求，原请求从取得账户起等待首个语义事件达到阈值后，为该请求发起一个备用请求：自定义秒数为固定阈值；`auto` 取该模型与通道近 24 小时最近 200 个原请求首字等待的 p95，样本少于 20 个时不发起。原请求的样本为取得账户到首事件的时长，被备用请求取代的原请求按已等时长计入，备用请求不计入；管理进程启动时从请求账本补入近 24 小时的样本。备用请求先用 Worker 已就绪且没有活动请求的其他账户，没有时用原账户的其余并发槽位；引用已上传文件或指定账户的请求只用原账户的其余并发槽位；都没有时每秒复查；同时进行的备用请求最多 4 个；后台 Responses 与 Interaction、Deep Research 与 Antigravity 等经后台任务生成的 agent（`interaction_task`）与 `-build` 写代码助手请求不发起。先出首事件的一方继续，另一方取消上游请求、清理临时文件并释放租约，被取消的请求同样计入上游的每日与每分钟请求额度；账本的 `attempts` 以 `hedge` 标记备用请求，以 `superseded` 标记被取代的一方。
+选号顺序：
+
+- `ROUTING_STRATEGY=round-robin` 在每个模型的候选账户间轮询，按上次选中的账户 ID 继续
+- `fill-first` 持续使用 `ACCOUNT_ORDER` 顺序（未列出的账户在后并按 ID 排序）中的首个可用账户，并在并发槽位用满、冷却或不可用时切换
+- 带内联附件的生成请求优先选择已上传其中最多附件的账户，该账户并发槽位用满、冷却或不可用时再按策略选择
+- 已有生成请求在等待或生成 WAA proof（Camoufox 后端界面运行时到页面发出请求为止）的账户排在其余已就绪账户之后：会话粘性没有指定账户时，请求按策略先在没有 proof 排队的账户中选择，都在排队时再在全部有空槽位的账户中选择
+
+上游通道：
+
+- 生成请求的候选为账户与 `UPSTREAM_CHANNELS` 所启用通道的组合：Playground 按 `ListModels` 与权益判断，Build 按 Build 代理返回的 Gemini API 模型目录与相同权益判断
+- 轮询与粘性在组合间按账户 ID 与通道顺序推进
+- 冷却按通道记录（Build 为 `build:<模型>`），一个通道冷却后同一账户可由另一通道继续；全部启用通道都冷却时按下文的冷却规则排队或返回 429
+- `-build` 模型只使用 Build 写代码助手通道 `assistant`，冷却 scope 为 `-build` 模型 ID，同一账户同时只运行一个 `-build` 生成，对话续接得上某账户应用中的 trajectory 时该账户优先；通道规格见 [Build 通道](build.md)
+- 计数、Live、转录与 Drive 文件引用使用 Playground RPC
+
+并发与 Cookie：
+
+- 并发槽位、Worker 与 WAA 按账户共享
+- 每个账号最多同时租用 `PER_ACCOUNT_CONCURRENCY` 个请求槽位；首个请求获取跨进程文件锁，最后一个请求释放
+- WAA proof 由账号 worker 串行生成，`GenerateContent` 由同一 Camoufox Worker 的页面并发发送并流式读取（`WAA_BACKEND=spidermonkey` 时由账户 runtime 的 Go HTTP 发送）
+- 请求前使用 Worker 当前 Cookie 生成 Authorization，响应头到达后把 Worker Cookie 原子同步到账户持久状态；其他 MakerSuite HTTP 响应的 Cookie 在响应头到达时与最新账户状态合并
+
+换号与重放：
+
+- 未固定账户的请求遇到可重试的 401、403、404、429、5xx、收到响应前的连接断开或单账户初始化超时时，可以在首个上游语义事件前继续切换尚未尝试的同能力账户；额度以外的失败最多换 `MAX_ACCOUNT_SWITCHES` 次，额度失败不计入
+- 上游以 403、协议错误码 7 拒绝账户（官网不跳转拒绝页的情形）时，自上次成功后第一次被拒只换号；没有其他账户可换时在该账户上重试一次；连续第二次被拒起，该账户在该模型上冷却 1、5、15、30、60 分钟，成功一次后重新计数
+- Drive 引用随需要临时复制到生成账户，显式账户和视频任务保持账户绑定
+- Chrome 导入状态保留续签材料，HTTP `401` 时在同一固定出口续签一次、重建该账户 WAA runtime 并重放请求
+
+Worker 容量由热池目标、活动上限和单账户并发共同约束。
+
+启动与替换：
+
+- 活动数低于 `MAX_ACTIVE_WORKERS` 时直接启动并发布新 Worker
+- 容量已满且存在空闲旧实例时，先启动 pending Worker（正在启动、尚未发布的替代 Worker），再关闭旧实例并发布替代 Worker
+- 被替换的空闲实例按以下顺序选择：对请求模型处于冷却（全局或该模型限额）的实例优先，同类中最久未用者优先；其次为最久未用实例
+- 多个冷却实例可并行替换，每次替换预留独立的旧实例，启动期间新旧进程短暂共存
+- 启动失败或取消时现有 Worker 继续服务
+- 旧 Worker 与 pending 回收同时失败时，两份进程与租约均保留为 cleanup pending（仍待关闭）并占用容量槽，后续 Stop 会重试关闭
+
+排队：
+
+- 请求只在取得容量槽位时占用冷账户；没有可立即使用的槽位时释放该账户并重新分类，由任一空闲的热 Worker 或新释放的槽位接收
+- 存在可调度账户但暂时没有空闲槽位的请求按相同选择条件排队，可用账户先按 API key 绑定、指定账户与模型绑定收窄：与前面等待中的请求共用的账户先到先服务，前面的请求用不到的账户直接使用；在租约释放或 Worker 状态变化时唤醒，直到请求超时
+- 候选账户全部处于冷却时，最早恢复时间在 1 分钟内且不晚于请求期限的请求排队等待恢复，更晚的请求直接返回 429，错误信息给出最早恢复时间
+- 有 Worker 的账户在某模型上进入超过 1 分钟的冷却时，若活动与启动中的 Worker 少于 `MAX_ACTIVE_WORKERS`，后台为一个对该模型未冷却、还没有 Worker 的候选账户启动 Worker，冷却账户的 Worker 保留
+
+回收与容量设置：
+
+- 超出 `WARM_WORKER_LIMIT` 的 Worker 空闲 5 分钟后关闭，热池保持目标数量
+- 管理端保存容量设置后立即作用于当前生成服务：Worker 数超过新的 `MAX_ACTIVE_WORKERS` 时立即关闭多出的空闲 Worker，忙碌的在请求结束后的回收检查中关闭；热池少于新的 `WARM_WORKER_LIMIT` 时补足预热；等待中的启动与请求按新的 `WARM_STARTUP_CONCURRENCY` 与 `PER_ACCOUNT_CONCURRENCY` 放行
+
+账户的 WAA runtime 租约由其他进程持有时：
+
+- 该账户退出预热与调度候选，首次 5 秒后重新探测，每次仍被占用时间隔翻倍、上限 1 分钟，每段占用只记录一条日志
+- 指定该账户或只剩该类账户的请求返回账户正在使用的错误
+
+`FIRST_EVENT_HEDGE` 不为 `off` 时，`FIRST_EVENT_HEDGE_MODELS` 列出的模型的生成请求，原请求从取得账户起等待首个语义事件达到阈值后，为该请求发起一个备用请求。
+
+阈值：
+
+- 自定义秒数为固定阈值
+- `auto` 取该模型与通道近 24 小时最近 200 个原请求首字等待的 p95，样本少于 20 个时不发起
+- 原请求的样本为取得账户到首事件的时长，被备用请求取代的原请求按已等时长计入，备用请求不计入；管理进程启动时从请求账本补入近 24 小时的样本
+
+备用请求的账户：
+
+- 先用 Worker 已就绪且没有活动请求的其他账户，没有时用原账户的其余并发槽位
+- 引用已上传文件或指定账户的请求只用原账户的其余并发槽位
+- 都没有时每秒复查；同时进行的备用请求最多 4 个
+- 后台 Responses 与 Interaction、Deep Research 与 Antigravity 等经后台任务生成的 agent（`interaction_task`）与 `-build` 写代码助手请求不发起备用请求
+
+结果：
+
+- 先出首事件的一方继续，另一方取消上游请求、清理临时文件并释放租约
+- 被取消的请求同样计入上游的每日与每分钟请求额度
+- 账本的 `attempts` 以 `hedge` 标记备用请求，以 `superseded` 标记被取代的一方
+
+`FIRST_EVENT_TIMEOUT` 不为 `off` 时，除后台 Responses、后台 Interactions 与经后台任务生成的 agent（`interaction_task`）外，每次生成尝试（含 `-build` 写代码助手）从取得账户起等待首个语义事件达到阈值后，取消该尝试并换号：
+
+- 计入 `MAX_ACCOUNT_SWITCHES`，不冷却账户、不改账户状态、不重建 Worker；没有可换账户或换号用尽时返回 504 并写明 `FIRST_EVENT_TIMEOUT`
+- 与 `FIRST_EVENT_HEDGE` 同开时原请求与备用请求各自计时，一方到期取消不影响另一方继续等待；`REQUEST_TIMEOUT` 管整个请求，更早到期时直接结束请求不换号
+
+同一模型与通道最近两个请求都在本请求开始前 30 秒内以连接断开失败、其间没有请求收到首个事件时，本请求在前两个账户上的尝试也都以连接断开失败就以原错误结束。
 
 故障重置先等待同账户的活动请求释放租约；等待期间该账户暂停接收新请求。客户端取消只结束自身生成请求；账户后台任务需显式 DELETE。页面与 WAA 初始化就绪后才发布 Worker，不再提交 Hello 预热生成；业务请求发送前再次检查账户冷却状态。
 
@@ -485,7 +747,7 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。冷�
 | `busy` | 账户存在独占操作、认证刷新或活动请求；调度仍按 `PER_ACCOUNT_CONCURRENCY` 判断剩余槽位 |
 | `cooldown` | 账户的全局 `*` 冷却仍有效；模型 `scope`（状态记录范围）冷却只影响对应请求的候选分类 |
 | `auth_required` | 账户级认证失败，需要重新登录或续签 |
-| `restricted` | Google 拒绝账户使用 AI Studio（服务受限、年龄要求或 Workspace 停用），原因写入 `runtime-state.json`；启动、调度与巡检跳过，手动刷新读取成功后恢复；上游要求验证账户时，手动刷新另发一次生成请求，这次生成成功后恢复，其他结果保持受限并返回原因 |
+| `restricted` | Google 拒绝账户使用 AI Studio（服务受限、年龄要求或 Workspace 停用），原因写入 `runtime-state.json`；启动、调度与巡检跳过，手动刷新读取成功后恢复；上游要求验证账户时，手动刷新另发一次生成请求，这次生成成功后恢复，其他结果保持受限并返回原因；账户状态改为就绪时直接清除受限记录，下一次请求仍被上游拒绝时重新标为受限 |
 | `unavailable` | 当前运行时无法使用账户 |
 | `disabled` | 账户配置已停用 |
 
@@ -502,7 +764,9 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。冷�
 | Live 音频或图像 | `bidi-media:<modelID>` | `SendMedia` 开始一次模型资格检查并更新媒体 scope |
 | Robotics | `bidi-media:<modelID>` | `SendText` 开始一次模型资格检查，`turn_complete` 更新成功 |
 
-`ModelAccessKey(scope, model)` 会移除 `models/` 前缀；空 scope 返回规范模型 ID，非空 scope 返回 `<scope>:<canonicalModelID>`。Bidi setup 使用 lease（账户租约）时间，会话内每个 qualifying turn（一次模型资格检查）分配严格递增的 attempt 时间，`turn_complete` 消费对应 attempt。普通流式生成在规范 `EventFinish` 到达时写 `verified`；此前的 text、reasoning、tool、usage 和首事件用于输出与性能统计，终态前断流、取消或错误保持原验证状态。
+- `ModelAccessKey(scope, model)` 会移除 `models/` 前缀；空 scope 返回规范模型 ID，非空 scope 返回 `<scope>:<canonicalModelID>`
+- Bidi setup 使用 lease（账户租约）时间，会话内每个 qualifying turn（一次模型资格检查）分配严格递增的 attempt 时间，`turn_complete` 消费对应 attempt
+- 普通流式生成在规范 `EventFinish` 到达时写 `verified`；此前的 text、reasoning、tool、usage 和首事件用于输出与性能统计，终态前断流、取消或错误保持原验证状态
 
 模型目录通过 `PageCatalogProvider.PageCatalog(ctx, accountID, reload)` 读取账户页面载入的 `GetLoggingContext`、`GetAiStudioBenefitTier` 与 `ListModels` 响应。有可复用 Worker 时读取当前目录，显式刷新可重载页面；新建临时页、冷启动与重载共用 `MAX_ACTIVE_WORKERS` 和 `WARM_STARTUP_CONCURRENCY`，满载时等待、重试或安全回收，不另开预算外页面。HTTP Cookie 导入只提交认证，不触发这条目录路径。
 
@@ -534,21 +798,26 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。冷�
 | 能力 | 路由 |
 | --- | --- |
 | 健康与状态 | `GET /health`、`GET /api/status` |
-| 模型与账户 | `GET /api/models`、`GET/POST /api/accounts`、`GET /api/accounts/exits`、`GET/POST /api/accounts/import/chrome`、`GET /api/accounts/import/browsers`、`POST /api/accounts/import/cookies/discover`、`POST /api/accounts/import/cookies`、`PUT/DELETE /api/accounts/{id}` |
+| 模型与账户 | `GET /api/models`、`GET/POST /api/accounts`、`GET /api/accounts/exits`、`GET/POST /api/accounts/import/chrome`、`GET /api/accounts/import/browsers`、`POST /api/accounts/import/cookies/discover`、`POST /api/accounts/import/cookies`、`PUT/DELETE /api/accounts/{id}`、`PUT /api/accounts/{id}/state` |
 | 账户任务 | `GET /api/accounts/tasks`、`DELETE /api/accounts/tasks/{id}` |
-| 登录与刷新 | `POST /api/accounts/{id}/login`、`POST /api/accounts/{id}/refresh`、`GET /api/login-view/{view}`（WebSocket） |
+| 登录与刷新 | `POST /api/accounts/{id}/login`、`POST /api/accounts/{id}/refresh`、`POST /api/accounts/refresh`、`GET /api/login-view/{view}`（WebSocket） |
 | 远程配对 | `GET /api/pairing`、`POST /api/pairing`、`POST /api/pairing/accounts`、`PUT /api/pairing/accounts/{account}/cookies` |
 | 生成服务 | `POST /api/control/start`、`POST /api/control/stop` |
 | Camoufox 准备 | `POST /api/camoufox/download`，后台下载或重试，进度由 `/api/status` 和 SSE `status` 返回 |
-| 配置 | `GET /api/config`、`PUT /api/config`、`GET /api/paths?path=`（列出服务所在机器的目录与账户状态文件 `storage-state.json`，`path=roots` 列出文件系统根） |
+| 配置 | `GET /api/config`、`PUT /api/config`、`GET /api/paths?path=`（列出服务所在机器的目录与账户状态文件 `storage-state.json`，`path=roots` 列出文件系统根）、`POST /api/paths/pick?path=`（桌面版以系统对话框选择账户目录） |
 | 冷却与请求 | `GET /api/cooldowns`、`GET /api/requests`、`POST /api/requests/{id}/cancel` |
-| 用量与正文 | `GET /api/usage`、`GET /api/usage/records`、`GET /api/usage/records.csv`、`GET /api/requests/{id}/body` |
+| 用量与正文 | `GET /api/usage`、`GET /api/usage/pairs`、`GET /api/usage/records`、`GET /api/usage/records.csv`、`GET /api/requests/{id}/body` |
 | 日志与事件 | `DELETE /api/logs`、`GET /api/events` |
 | 在线更新 | `GET /api/update`、`POST /api/update` |
 
 `/api` 接受 loopback 请求，并在请求带 `Origin` 时执行 same-origin 校验。`POST /api/pairing/accounts` 只校验配对令牌，`PUT /api/pairing/accounts/{account}/cookies` 只校验续签凭据。`/v1` 与 `/v1beta` 使用公开 API key 与 CORS。
 
 OpenAI Responses 的 `previous_response_id` 与 Gemini Interactions 的 `previous_interaction_id` 共用最多 256 个响应节点，用于重建下一轮完整 contents；生成期间上一轮被淘汰时，新响应保存请求开始时读取的完整上下文。已保存的终态节点写入 `runtime/states.db`，保留范围内的 ID 在服务或进程重启后可查询与续接，未保存、已删除或淘汰的节点不可恢复。进行中的生成任务和账户任务不恢复；恢复的 `-build` 写代码助手按账户复用 Build 应用，并通过应用内对话轨迹继续会话，细节见 [Build 通道](build.md)。Drive、视频任务与产物文件的账户绑定写入 `runtime-state.json`，已完成产物可继续读取，但未完成视频不会因资源绑定持久化而继续执行。
+
+- 续接库启动时读取节点 ID 与续接起点，节点正文在续接或查询时按需载入
+- 节点写入在释放节点表的锁之后按顺序提交，提交期间其他续接与查询照常进行
+- 对话库与续接状态库在服务就绪后交还空闲页，请求账本在后台清理过期记录后交还
+- 旧 `states(seq,id,data)` 到 `nodes(seq,id,parent,data)` 的迁移在事务中保留 seq、ID 与 Data 原始字节并提取 ParentID；无效数据或冲突导致回滚。原生库就绪后的迁移测试仍是升级门禁，不以文档说明代替验证
 
 新增上游能力从 `internal/aistudio` 开始：编码真实数组槽位、解码服务器事件，再由 `internal/api` 投影到公开协议。模型方法、上下文、输出上限、工具、声音、图片规格和视频规格均来自实时 `ListModels`。
 
@@ -574,17 +843,70 @@ npm run build
 - `npm run typecheck` 由 vue-tsc 检查脚本与模板类型
 - `npm run format:check` 由 Oxfmt 检查格式
 
-Vite+ 将生产产物写入 `internal/webui/dist`，脚本、样式与 SVG 以 gzip 压缩后只保留 `.gz` 文件，`index.html` 与字体保持原样；KaTeX 经 `web/src/playground/katex.scss` 只打包 woff2 字体。管理端通过本机 `/api` 路由管理生成服务、日志、账户、配置、模型冷却、活动请求和 SSE 状态事件；认证状态与 WAA 对象不进入浏览器存储。
+Vite+ 将生产产物写入 `internal/webui/dist`，脚本、样式与 SVG 以 gzip 压缩后只保留 `.gz` 文件，`index.html` 与字体保持原样；KaTeX 经 `web/src/playground/katex.scss` 只打包 woff2 字体。管理端通过本机 `/api` 路由管理生成服务、日志、账户、配置、模型冷却、活动请求和 SSE 状态事件；认证状态与 WAA 对象只保存在服务端。
 
-管理端提供简体中文、繁體中文、English、日本語、한국어、Français 与 Deutsch，所选语言保存在浏览器的 `user_lang`，未选择时按浏览器首选语言选择，都不支持时为 English。文案位于 `web/src/locales/<语言>.ts`，`zh-CN.ts` 定义全部键，其他语言按同一键集合提供 `messages`，缺键时类型检查失败；每种语言打包为单独的文件，页面只加载当前语言与切换到的语言。管理接口错误体的 `error.code` 对应 `error.<code>` 文案，`{detail}` 填入服务返回的 `error.message`，未收录的错误码显示服务原文。
+管理端提供简体中文、繁體中文、English、日本語、한국어、Français 与 Deutsch：
 
-服务生成的日志、错误、账户状态、冷却原因与命令行输出以简体中文写成，`internal/i18n/messages/<语言>.json` 是其他六种语言的翻译表：键为源码中含中文的字符串字面量与 Go 格式串，值为译文，`{0}`、`{1}` 依次对应格式动词。新增或修改含中文的文案时，在六个翻译表中写入同一键的译文。`internal/i18n` 与 `web/src/messages.ts` 按同一规则翻译：整句匹配格式串，格式串开头的格式动词取最长匹配，格式动词的取值递归翻译；整句没有匹配时依次按换行、` | `、`; `、`；` 分段，按第一个 `: ` 或 `：` 拆成外层说明与内层原因，按不含格式动词的文案前缀拆开，最后拆开 `键=值`。管理端各语言的界面文案 `web/src/locales/<语言>.ts` 引入同一语言的翻译表，两者打包在同一个文件中，按界面语言显示服务文案；控制台与命令行按操作系统语言输出，日志文件保持简体中文。上游原文、账户、模型名与数值保持原样。
+- 所选语言保存在浏览器的 `user_lang`，未选择时按浏览器首选语言选择，都不支持时为 English
+- 文案位于 `web/src/locales/<语言>.ts`，`zh-CN.ts` 定义全部键，其他语言按同一键集合提供 `messages`，缺键时类型检查失败
+- 每种语言打包为单独的文件，页面只加载当前语言与切换到的语言
+- 管理接口错误体的 `error.code` 对应 `error.<code>` 文案，`{detail}` 填入服务返回的 `error.message`，未收录的错误码显示服务原文
 
-`internal/webui/embed.go` 使用 `//go:embed dist`，因此 Go 构建前必须生成当前前端产物；静态文件由 `statigz` 返回，接受 gzip 的客户端直接收到 `.gz` 内容，其余客户端收到解压后的内容；`/assets/` 下文件名带内容哈希的静态文件带 `Cache-Control: public, max-age=31536000, immutable`，其余页面与静态文件带 `Cache-Control: no-store`，对带 `If-None-Match` 的请求也返回完整正文；入口页的内联脚本在资源载入失败、入口模块解析失败或 `vite:preloadError` 时以 `cache: reload` 重新取回本页的 `/assets/` 资源后重载，30 秒内只重试一次；`/api` 的 JSON、CSV 与事件流响应同样以 gzip 返回给接受 gzip 的客户端，事件流每个事件写出后随即刷新。管理端从 `/api/events` 接收 `status`、`models`、`accounts`、`account_tasks`、`log`、`cooldowns` 和 `request` 事件。
+服务生成的日志、错误、账户状态、冷却原因与命令行输出以简体中文写成，`internal/i18n/messages/<语言>.json` 是其他六种语言的翻译表：
 
-API 试用页位于 `web/src/playground/`，路由与官网相同（`/prompts/new_chat`、`/prompts/new_image`、`/prompts/new_video`、`/generate-speech`、`/new_music`、`/live`、`/prompts/:id`）。`request.ts` 由对话轮次与运行设置组成 Gemini `generateContent` 请求，`protocols.ts` 把同一请求转换为 OpenAI Chat、OpenAI Responses、Anthropic Messages 或 OpenAI Images，并以 `eventsource-parser` 读取各协议的 SSE，以各协议完成事件结束请求；流内错误与提前断流显示为失败。响应头、正文和心跳的刷新错误沿 HTTP 写入路径返回，事件转发在取消时释放账户租约。停止后可继续提交；运行快捷键在 User settings 中选择 Ctrl + Enter（默认）或 Enter。回复正文由 `markdown-it` 按 Markdown 渲染，原始 HTML 按文本显示。对话保存在 `runtime/prompts.db`，经 `/api/prompts` 读写，在轮次、标题或运行设置变化后合并保存；历史页的重命名经 `PATCH /api/prompts/{id}` 只改写标题与描述，复制经 `POST /api/prompts/{id}/copy` 在服务端完成。与官网一样，对话页在未命名时于运行结束后以最后一轮用户文本与模型回答、视频、音乐与 Imagen 页在提交时以提示词经 `POST /api/prompts/title`（`GenerateTitle`）生成标题，失败时保持 Untitled prompt。
+- 键为源码中含中文的字符串字面量与 Go 格式串，值为译文，`{0}`、`{1}` 依次对应格式动词
+- 新增或修改含中文的文案时，在六个翻译表中写入同一键的译文
+- 上游原文、账户、模型名与数值保持原样
 
-运行设置按模型目录的能力字段显示，只发送界面上可见且已填写的参数，未填写的数值参数由模型默认值决定；所选协议无法表达的设置（`protocols.ts` 的 `protocolSupports`）在该协议下隐藏。图片、视频、语音、音乐与实时对话页位于 `media/`：图片经 Gemini `generateContent` 或 OpenAI Images，视频经 Gemini `predictLongRunning` 或 OpenAI Videos，语音经 `/v1/audio/speech` 或 Gemini 端点（返回的 `audio/L16` 在页面封装为 WAV），实时对话经 `/v1/live` WebSocket；宽高比、分辨率与时长取自模型目录的 `capability_options`。
+`internal/i18n` 与 `web/src/messages.ts` 按同一规则翻译：
+
+1. 整句匹配格式串，格式串开头的格式动词取最长匹配，格式动词的取值递归翻译
+2. 整句没有匹配时，依次按换行、` | `、`; `、`；` 分段
+3. 按第一个 `: ` 或 `：` 拆成外层说明与内层原因
+4. 按不含格式动词的文案前缀拆开
+5. 最后拆开 `键=值`
+
+输出语言：
+
+- 管理端各语言的界面文案 `web/src/locales/<语言>.ts` 引入同一语言的翻译表，两者打包在同一个文件中，按界面语言显示服务文案
+- 控制台与命令行按操作系统语言输出，日志文件保持简体中文
+
+`internal/webui/embed.go` 使用 `//go:embed dist`，Go 构建前必须生成当前前端产物。管理端的静态文件与 `/api` 响应：
+
+- 静态文件由 `statigz` 返回，接受 gzip 的客户端直接收到 `.gz` 内容，其余客户端收到解压后的内容
+- `/assets/` 下文件名带内容哈希的静态文件带 `Cache-Control: public, max-age=31536000, immutable`；其余页面与静态文件带 `Cache-Control: no-store`，对带 `If-None-Match` 的请求也返回完整正文
+- 入口页的内联脚本在资源载入失败、入口模块解析失败或 `vite:preloadError` 时，以 `cache: reload` 重新取回本页的 `/assets/` 资源后重载，30 秒内只重试一次
+- `/api` 的 JSON、CSV 与事件流响应同样以 gzip 返回给接受 gzip 的客户端，事件流每个事件写出后随即刷新
+- 管理端从 `/api/events` 接收 `status`、`models`、`accounts`、`account_tasks`、`log`、`cooldowns` 和 `request` 事件
+
+API 试用页位于 `web/src/playground/`，路由与官网相同（`/prompts/new_chat`、`/prompts/new_image`、`/prompts/new_video`、`/generate-speech`、`/new_music`、`/live`、`/prompts/:id`）。
+
+请求与显示：
+
+- `request.ts` 由对话轮次与运行设置组成 Gemini `generateContent` 请求
+- `protocols.ts` 把同一请求转换为 OpenAI Chat、OpenAI Responses、Anthropic Messages 或 OpenAI Images，并以 `eventsource-parser` 读取各协议的 SSE，以各协议完成事件结束请求；流内错误与提前断流显示为失败
+- 服务端的响应头、正文和心跳的刷新错误沿 HTTP 写入路径返回，事件转发在取消时释放账户租约
+- 停止后可继续提交；运行快捷键在 User settings 中选择 Ctrl + Enter（默认）或 Enter
+- 回复正文由 `markdown-it` 按 Markdown 渲染，原始 HTML 按文本显示
+
+对话保存：
+
+- 对话保存在 `runtime/prompts.db`，经 `/api/prompts` 读写，在轮次、标题或运行设置变化后合并保存
+- 历史页的重命名经 `PATCH /api/prompts/{id}` 只改写标题与描述，复制经 `POST /api/prompts/{id}/copy` 在服务端完成
+- 与官网一样，标题经 `POST /api/prompts/title`（`GenerateTitle`）生成：对话页在未命名时于运行结束后以最后一轮用户文本与模型回答生成，视频、音乐与 Imagen 页在提交时以提示词生成；失败时保持 Untitled prompt
+
+运行设置按模型目录的能力字段显示，只发送界面上可见且已填写的参数，未填写的数值参数由模型默认值决定；所选协议无法表达的设置（`protocols.ts` 的 `protocolSupports`）在该协议下隐藏。
+
+图片、视频、语音、音乐与实时对话页位于 `media/`，宽高比、分辨率与时长取自模型目录的 `capability_options`：
+
+| 页面 | 端点 |
+| --- | --- |
+| 图片 | Gemini `generateContent` 或 OpenAI Images |
+| 视频 | Gemini `predictLongRunning` 或 OpenAI Videos |
+| 语音 | `/v1/audio/speech` 或 Gemini 端点 |
+| 实时对话 | `/v1/live` WebSocket |
+
+Gemini 端点返回的语音 `audio/L16` 在页面封装为 WAV。
 
 日志页保留最近 2000 条事件，按请求与运行阶段合并后先显示最近 200 行。关闭自动滚动时，当前首行保持固定，新日志追加在末尾。请求详情与阶段步骤在首次展开时渲染。
 
@@ -608,7 +930,16 @@ API 试用页位于 `web/src/playground/`，路由与官网相同（`/prompts/ne
 
 ## 6. 构建与贡献
 
-本地数据库使用经 cgo 编译的 SQLite，`internal/waa` 经 cgo 链接 SpiderMonkey 静态库，`internal/imagecodec/libwebp` 经 cgo 链接 libwebp 静态库，构建需要 C/C++ 编译器与当前平台的静态库：Windows 为 llvm-mingw 的 UCRT 版 clang，macOS 为 Xcode Command Line Tools，Linux 命令行版为 Zig、桌面版为 gcc；静态库分别来自 [Mag1cFall/firefox](https://github.com/Mag1cFall/firefox/releases) 与 [Mag1cFall/libwebp](https://github.com/Mag1cFall/libwebp/releases) 的 Releases，下载与 `CC`、`CXX`、`CGO_CPPFLAGS`、`CGO_LDFLAGS` 的设置见 README 的源码构建一节。发布二进制前先构建前端：
+本地数据库使用经 cgo 编译的 SQLite，`internal/waa` 经 cgo 链接 SpiderMonkey 静态库，`internal/imagecodec/libwebp` 经 cgo 链接 libwebp 静态库。构建需要 C/C++ 编译器与当前平台的静态库：
+
+| 平台 | C/C++ 编译器 |
+| --- | --- |
+| Windows | llvm-mingw 的 UCRT 版 clang |
+| macOS | Xcode Command Line Tools |
+| Linux 命令行版 | Zig |
+| Linux 桌面版 | gcc |
+
+静态库分别来自 [Mag1cFall/firefox](https://github.com/Mag1cFall/firefox/releases) 与 [Mag1cFall/libwebp](https://github.com/Mag1cFall/libwebp/releases) 的 Releases，下载与 `CC`、`CXX`、`CGO_CPPFLAGS`、`CGO_LDFLAGS` 的设置见 README 的源码构建一节。发布二进制前先构建前端：
 
 ```powershell
 cd web
@@ -638,7 +969,12 @@ CGO_ENABLED=1 go build -trimpath -tags desktop,production,gtk3 -o aistudio2api .
 
 Linux AppImage 由 `build/linux/appimage.sh` 在 Ubuntu 22.04 上以 `wails3 generate appimage` 打包，随包带上 WebKitGTK、GTK 与 GLib，以及构建机的 GIO 模块（TLS、代理与设置）和 GTK 输入法模块（含 ibus 与 fcitx5）；AppRun 以 `GIO_MODULE_DIR` 与 `GTK_IM_MODULE_FILE` 让程序只加载这些随包模块。
 
-Windows 桌面版启动时经 Wails 查询 WebView2 运行时版本。查不到且以显示窗口方式启动时，用消息框询问是否安装，询问的同时在后台下载微软 Evergreen 引导程序：确定后等下载完成，后台下载失败时重新下载一次，以 `/install` 按当前用户权限安装，下载与安装进度显示在引导程序自己的窗口中，完成后创建桌面窗口；取消询问时删除已下载的引导程序。在引导程序窗口中取消安装与取消询问相同，安装失败时先以消息框说明。取消、安装失败或以隐藏方式启动时只创建托盘：服务就绪后在默认浏览器打开管理页面，双击托盘图标或再次运行可执行文件也打开管理页面。
+Windows 桌面版启动时经 Wails 查询 WebView2 运行时版本。查不到且以显示窗口方式启动时，用消息框询问是否安装，询问的同时在后台下载微软 Evergreen 引导程序：
+
+- 确定后等下载完成，后台下载失败时重新下载一次，以 `/install` 按当前用户权限安装；下载与安装进度显示在引导程序自己的窗口中，完成后创建桌面窗口
+- 询问与安装期间管理服务照常启动，双击托盘图标或再次运行可执行文件在默认浏览器打开管理页面
+- 取消询问时删除已下载的引导程序；在引导程序窗口中取消安装与取消询问相同；安装失败时先以消息框说明
+- 取消、安装失败或以隐藏方式启动时只创建托盘：服务就绪后在默认浏览器打开管理页面，双击托盘图标或再次运行可执行文件也打开管理页面
 
 Windows 桌面版的 WebView2 数据写入 `%LocalAppData%\AIStudio2API\WebView2`。
 
@@ -646,7 +982,15 @@ Windows 桌面版的 WebView2 数据写入 `%LocalAppData%\AIStudio2API\WebView2
 
 Windows 与 Linux 的主窗口无边框，标题栏由页面绘制。Windows 上 WebView2 以合成托管方式运行，标题栏与最小化、最大化、关闭按钮作为非客户区参与系统命中测试：悬停最大化按钮时显示贴靠布局，右键标题栏打开系统菜单，双击标题栏最大化或还原。
 
-Windows 托盘菜单是 `tray_windows.go` 以 Win32 GDI 绘制的弹出窗口：右键或用键盘打开托盘图标菜单时，以 `Shell_NotifyIconGetRect` 取得的图标位置为排除区域贴着图标弹出，并限制在所在显示器的工作区内；配色与管理页面下拉框相同，页面经 `theme:dark`、`theme:light` 消息告知界面主题，页面加载前跟随系统深浅色；字号与间距按所在显示器的 DPI 缩放；方向键、Home、End 移动高亮，回车与空格选择，Esc 或失去焦点时关闭。Linux 通过 Wails 小窗口渲染 `tray.html`，使用相同的菜单配色、行高和键盘操作，关闭菜单时销毁窗口；StatusNotifierItem 的 `Activate` 事件（单击）显示主窗口，`ContextMenu` 事件打开自绘菜单。macOS 菜单栏图标使用系统菜单，单击或右键时由系统弹出；应用菜单为应用、文件、编辑、显示与窗口五个系统标准菜单。两个菜单的文字跟随界面语言，用词取自同语言 macOS 的系统菜单；页面加载前按 macOS 首选语言显示。
+托盘与菜单栏菜单：
+
+- Windows 托盘菜单是 `tray_windows.go` 以 Win32 GDI 绘制的弹出窗口：
+  - 右键或用键盘打开托盘图标菜单时，以 `Shell_NotifyIconGetRect` 取得的图标位置为排除区域贴着图标弹出，并限制在所在显示器的工作区内
+  - 配色与管理页面下拉框相同，页面经 `theme:dark`、`theme:light` 消息告知界面主题，页面加载前跟随系统深浅色
+  - 字号与间距按所在显示器的 DPI 缩放
+  - 方向键、Home、End 移动高亮，回车与空格选择，Esc 或失去焦点时关闭
+- Linux 通过 Wails 小窗口渲染 `tray.html`，使用与 Windows 相同的菜单配色、行高和键盘操作，关闭菜单时销毁窗口；StatusNotifierItem 的 `Activate` 事件（单击）显示主窗口，`ContextMenu` 事件打开自绘菜单
+- macOS 菜单栏图标使用系统菜单，单击或右键时由系统弹出；应用菜单为应用、文件、编辑、显示与窗口五个系统标准菜单。两个菜单的文字跟随界面语言，用词取自同语言 macOS 的系统菜单；页面加载前按 macOS 首选语言显示
 
 Windows 与 Linux 托盘菜单的“开机自启动”每次打开菜单时从系统读取勾选状态，macOS 菜单栏菜单的“登录时打开”在设置菜单与每次切换后读取；设置失败时以对话框显示错误：
 
@@ -654,7 +998,12 @@ Windows 与 Linux 托盘菜单的“开机自启动”每次打开菜单时从�
 - Linux：写入 `~/.config/autostart/aistudio2api.desktop`，`Exec` 为当前可执行文件（从 AppImage 运行时为 AppImage 文件）加 `-open-ui=false`；指向其他程序或含 `Hidden=true`、`X-GNOME-Autostart-enabled=false` 时显示为关闭
 - macOS：经 Wails 注册登录项，macOS 13 及以上从 `.app` 运行时使用 SMAppService，登录后打开窗口；其余情况写入带 `-open-ui=false` 的 LaunchAgent
 
-应用图标与打包配置在 `build/`：`appicon.svg` 为图标源文件，`appicon.png` 与 `windows/icon.ico` 由 `wails3 generate icons` 从它生成；`darwin/appicon.svg` 是按 macOS 图标网格缩到 824/1024 并带投影的同一图标，`darwin/icons.icns` 由它渲染的 1024 像素 PNG 经 `wails3 generate icons` 生成，同一 PNG 缩到 512 像素为 `internal/desktop/icons/appicon-mac.png`，macOS 桌面版启动时设为 Dock 与对话框图标。`darwin/*.lproj/InfoPlist.strings` 为各语言的麦克风与摄像头使用说明，打包时与 `icons.icns` 一起放入 `.app` 的 `Contents/Resources/`，系统对话框与菜单随之按系统语言显示。`cmd/aistudio2api/rsrc_windows_amd64.syso` 包含 Windows 图标、清单与版本信息，由以下命令生成，`go build` 构建 Windows amd64 时自动嵌入：
+应用图标与打包配置在 `build/`：
+
+- `appicon.svg` 为图标源文件，`appicon.png` 与 `windows/icon.ico` 由 `wails3 generate icons` 从它生成
+- `darwin/appicon.svg` 是按 macOS 图标网格缩到 824/1024 并带投影的同一图标；`darwin/icons.icns` 由它渲染的 1024 像素 PNG 经 `wails3 generate icons` 生成；同一 PNG 缩到 512 像素为 `internal/desktop/icons/appicon-mac.png`，macOS 桌面版启动时设为 Dock 与对话框图标
+- `darwin/*.lproj/InfoPlist.strings` 为各语言的麦克风与摄像头使用说明，打包时与 `icons.icns` 一起放入 `.app` 的 `Contents/Resources/`，系统对话框与菜单随之按系统语言显示
+- `cmd/aistudio2api/rsrc_windows_amd64.syso` 包含 Windows 图标、清单与版本信息，`go build` 构建 Windows amd64 时自动嵌入；它由以下命令生成：
 
 ```bash
 wails3 generate syso -arch amd64 -icon build/windows/icon.ico -manifest build/windows/wails.exe.manifest -info build/windows/info.json -out cmd/aistudio2api/rsrc_windows_amd64.syso
@@ -663,6 +1012,28 @@ wails3 generate syso -arch amd64 -icon build/windows/icon.ico -manifest build/wi
 默认 SpiderMonkey 运行不准备 Camoufox，显式浏览器登录或浏览器 Cookie 验证时才按需准备；HTTP Cookie 验证不启动浏览器。`WAA_BACKEND=camoufox` 时在管理服务启动后于后台下载，生成服务等准备完成后就绪，管理页面显示下载/解压进度与可重试的错误。贡献内容聚焦单一功能或协议变更，并使用脱敏后的请求与响应样例。
 
 GitHub Actions 的 `build.yml` 保留 `main`、`v*` 标签、Pull Request 与手动触发，统一调用仅有 `workflow_call` 入口的 `checks.yml`，不重复运行独立检查。检查执行前端 typecheck、test、lint、format:check、build，以及 `go.mod` 最低版本的 Go 单元测试与 vet；通过后再并行构建各平台发行包，Release 与 Docker 继续由这组检查门控。前端固定使用 Node.js 24.15.0/npm 11，产物在各 Go 任务间共享；Linux、Windows 与 macOS 原生任务经 `.github/actions/static-libraries` 下载对应目标的 SpiderMonkey 与 libwebp 静态库。Go 模块与编译缓存按任务、架构和工具链在 `main` 上保存，标签与 Pull Request 恢复缓存，SQLite、SpiderMonkey 与 libwebp 的 CGO 编译产物随 Go 编译缓存复用。发行包和镜像注入标签或提交版本，保留 fork 更新链路：
+
+- `internal/chromeauth/native/abe_helper_amd64.bin` 是 Windows Chrome 导入用于解密 App-Bound 主密钥的无导出 x64 DLL，使用上文的 llvm-mingw UCRT 版 clang 从 `abe_helper.c` 编译，只链接 Windows 系统库与系统 UCRT：
+
+```bash
+x86_64-w64-mingw32-clang -shared -O2 -s -o internal/chromeauth/native/abe_helper_amd64.bin internal/chromeauth/native/abe_helper.c -lole32 -loleaut32 -lcrypt32
+```
+
+实现与评审按以下设计原则取舍：
+
+- 全兼容：公开协议接受各协议标准的全部有效输入；上游或某个标准拒绝的输入，在适配与编码层改写成上游接受的形式
+- fail fast：出错时在出错处以真实原因失败，错误让客户端能按自己的策略重试；找不到合理解释的输入在发送前返回说明原因的错误
+- 默认行为先保证请求可用，其次照上游原样；上游的额度、权限与模型状态按上游返回处理
+- 接口与官方 API 用法一致：同样的请求发给官方 API，模型看到的上下文相同
+- 主路径只包含必需的步骤：可有可无的步骤删除，必需而耗时的步骤（下载、目录同步、预热）在后台或按需进行
+- 请求、身份、节奏与界面行为对齐官网；官网能完成而服务失败属于服务缺陷
+- 修复沿报错路径修根因，同类字段、嵌套结构与其他协议入口一起修
+- 代码只处理真实会发生的情况，选能满足需求的最简单实现
+- 模型、方法与能力以账户的实时目录为准
+
+贡献内容聚焦单一功能或协议变更，并使用脱敏后的请求与响应样例。
+
+发布包使用当前稳定版 Go 构建：
 
 - Windows amd64：桌面版 `aistudio2api-<版本>-windows-amd64.zip`，保留同名顶层目录，其中有 `aistudio2api.exe` 与 launcher `start.bat`；链接启用 `--gc-sections` / `--icf=safe`，7z 使用 ZIP Deflate 压缩
 - macOS：最低 macOS 13.0，arm64 与 amd64 合并的桌面版，ad-hoc 签名的 `AIStudio2API.app` 打成 zip 与 LZMA 压缩的 dmg；两个架构分别设置 SpiderMonkey 与 libwebp 的头文件和链接路径

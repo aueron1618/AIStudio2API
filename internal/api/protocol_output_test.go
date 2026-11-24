@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -43,14 +44,145 @@ func testEventStream(events ...aistudio.Event) <-chan aistudio.Event {
 	return stream
 }
 
-type responseStateCapture struct{ saved []SavedState }
-
-func (capture *responseStateCapture) Load() []SavedState {
-	return append([]SavedState(nil), capture.saved...)
+type responseStateCapture struct {
+	saved      []SavedState
+	unreadable string
 }
 
-func (capture *responseStateCapture) Save(saved []SavedState, _ []string) {
-	capture.saved = append(capture.saved, saved...)
+func (capture *responseStateCapture) Index() []StateNode {
+	index := make([]StateNode, 0, len(capture.saved))
+	for _, saved := range capture.saved {
+		index = append(index, StateNode{ID: saved.ID, ParentID: saved.ParentID})
+	}
+	return index
+}
+
+func (capture *responseStateCapture) Read(id string) ([]byte, bool) {
+	if id == capture.unreadable {
+		return nil, false
+	}
+	for _, saved := range capture.saved {
+		if saved.ID == id {
+			return saved.Data, true
+		}
+	}
+	return nil, false
+}
+
+func (capture *responseStateCapture) Save(saved []SavedState, removed []string) error {
+	for _, state := range saved {
+		index := slices.IndexFunc(capture.saved, func(old SavedState) bool { return old.ID == state.ID })
+		if index < 0 {
+			capture.saved = append(capture.saved, state)
+		} else {
+			capture.saved[index] = state
+		}
+	}
+	capture.saved = slices.DeleteFunc(capture.saved, func(state SavedState) bool { return slices.Contains(removed, state.ID) })
+	return nil
+}
+
+func TestLegacyStatePayloadMigration(t *testing.T) {
+	const root = `{
+		"ParentID":"","Contents":[{"role":"user","parts":[
+			{"text":"old question"},
+			{"inline_data":{"mime":"audio/pcm","data":"AQI="}},
+			{"file":{"id":"legacy-file","name":"fixture.png","mime":"image/png"}},
+			{"function_call":{"id":"legacy-call","name":"lookup","arguments":{"query":"before"},"thought_signature":"legacy-signature"}},
+			{"function_result":{"id":"legacy-call","name":"lookup","content":{"answer":1}}}
+		]}],"InlineInstructions":["old instruction"],"LegacyExtra":{"preserve":true},`
+	const child = `{"ParentID":"legacy-parent","Contents":[{"role":"assistant","parts":[{"text":"new answer","thought_signature":"answer-signature"}]}],"InlineInstructions":["new instruction"],`
+	for _, test := range []struct {
+		kind, parent, current string
+		interaction           bool
+	}{
+		{"response", `"Record":{"Model":"old-model","Shell":{"id":"legacy-parent","status":"completed","model":"old-response-model"},"Input":[{"ID":"input-parent","Raw":{"id":"input-parent","type":"message","role":"user","content":"old question"}}],"Output":[{"ID":"output-parent","Raw":{"id":"output-parent","type":"reasoning","encrypted_content":"legacy-signature","summary":[]}}]},"Interaction":null}`,
+			`"Record":{"Model":"new-model","Shell":{"id":"legacy-child","status":"completed","model":"new-response-model"},"Input":[{"ID":"input-child","Raw":{"id":"input-child","type":"message","role":"user","content":"next"}}],"Output":[],"Include":["reasoning.encrypted_content"]},"Interaction":null}`, false},
+		{"interaction", `"Record":null,"Interaction":{"object":{"id":"legacy-parent","status":"completed","model":"old-agent"},"input":[{"type":"user_input","content":[{"type":"text","text":"old question"}]}],"upstream":"old-upstream-id","account":"fixture-account","agent":"old-agent"}}`,
+			`"Record":null,"Interaction":{"object":{"id":"legacy-child","status":"completed","model":"new-agent"},"input":[{"type":"user_input","content":[{"type":"text","text":"next"}]}],"upstream":"new-upstream-id","account":"fixture-account","agent":"new-agent"}}`, true},
+		{"audio", `"Record":null,"Interaction":null}`, `"Record":null,"Interaction":null}`, false},
+	} {
+		t.Run(test.kind, func(t *testing.T) {
+			capture := &responseStateCapture{}
+			for _, fixture := range []struct{ id, payload string }{{"legacy-parent", root + test.parent}, {"legacy-child", child + test.current}} {
+				data := []byte(fixture.payload)
+				saved, err := MigrateLegacySavedState(fixture.id, data)
+				if err != nil || saved.ID != fixture.id || !bytes.Equal(saved.Data, data) {
+					t.Fatalf("legacy payload changed: %+v, %v", saved, err)
+				}
+				capture.saved = append(capture.saved, saved)
+			}
+			store := newResponseStateStore(capture)
+			if store.parents["legacy-child"] != "legacy-parent" || len(store.states) != 0 {
+				t.Fatal("legacy link was lost or lazy loading was bypassed")
+			}
+			history, ok := store.Load("legacy-child")
+			if !ok || history.ID != "legacy-child" || len(history.Contents) != 2 || !reflect.DeepEqual(history.InlineInstructions, []string{"old instruction", "new instruction"}) {
+				t.Fatalf("legacy continuation was not restored: %+v", history)
+			}
+			parts := history.Contents[0].Parts
+			if parts[0].Text != "old question" || parts[1].InlineData.MIME != "audio/pcm" || !bytes.Equal(parts[1].InlineData.Data, []byte{1, 2}) || parts[2].File.ID != "legacy-file" || parts[3].FunctionCall.ThoughtSignature != "legacy-signature" || string(parts[4].FunctionResult.Content) != `{"answer":1}` {
+				t.Fatalf("legacy media, tool identity or signature changed: %+v", parts)
+			}
+			if test.interaction {
+				record, exists := store.Interaction("legacy-child")
+				if !exists || !history.Interaction || history.Upstream != "new-upstream-id" || history.AccountID != "fixture-account" || history.Agent != "new-agent" || record.stream != nil || len(record.input) != 1 {
+					t.Fatal("legacy interaction lost its account binding, ID or input")
+				}
+			} else if test.kind == "response" {
+				response, _, exists := store.Response("legacy-child", nil)
+				if !exists || history.Model != "new-model" || !bytes.Contains(response, []byte(`"model":"new-response-model"`)) {
+					t.Fatal("legacy response model or response ID was lost")
+				}
+				items, exists := store.InputItems("legacy-child")
+				if !exists || len(items) != 3 || items[0].ID != "input-parent" || items[1].ID != "output-parent" || items[2].ID != "input-child" {
+					t.Fatal("legacy input/output item IDs were not restored")
+				}
+			}
+			if !store.Delete("legacy-parent", test.interaction) {
+				t.Fatal("legacy parent could not be removed")
+			}
+			restored := newResponseStateStore(capture)
+			after, ok := restored.Load("legacy-child")
+			if !ok || !reflect.DeepEqual(history, after) {
+				t.Fatalf("removing and reopening the parent lost continuation: before=%+v after=%+v", history, after)
+			}
+			restored.Store("continued-id", after, generationResult{}, responseState{Contents: []aistudio.Content{{Role: aistudio.RoleUser, Parts: []aistudio.Part{{Text: "continue"}}}}})
+			continued, ok := restored.Load("continued-id")
+			if !ok || continued.ID != "continued-id" || len(continued.Contents) != 3 {
+				t.Fatal("migrated continuation ID could not be reused")
+			}
+		})
+	}
+	for _, data := range []string{"", "null", "[]", `{"ParentID":3}`, `{"ParentID":"parent"} {}`} {
+		if _, err := MigrateLegacySavedState("invalid", []byte(data)); err == nil {
+			t.Fatalf("invalid legacy payload was accepted: %s", data)
+		}
+	}
+}
+
+func TestStateDeleteDoesNotLoseUnreadableChild(t *testing.T) {
+	parent, err := MigrateLegacySavedState("parent", []byte(`{"ParentID":"","Contents":[{"role":"user","parts":[{"text":"old"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := MigrateLegacySavedState("child", []byte(`{"ParentID":"parent","Contents":[{"role":"user","parts":[{"text":"new"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture := &responseStateCapture{saved: []SavedState{parent, child}, unreadable: "child"}
+	store := newResponseStateStore(capture)
+	if store.Delete("parent", false) || len(capture.saved) != 2 || store.parents["child"] != "parent" {
+		t.Fatal("failed lazy read deleted persistent history")
+	}
+	capture.unreadable = ""
+	if !store.Delete("parent", false) {
+		t.Fatal("recovered lazy read could not remove parent")
+	}
+	history, ok := newResponseStateStore(capture).Load("child")
+	if !ok || len(history.Contents) != 2 {
+		t.Fatal("retried removal lost history")
+	}
 }
 
 func TestResponseStatePersistenceBoundaries(t *testing.T) {
@@ -450,7 +582,7 @@ func TestChatLegacyFunctions(t *testing.T) {
 			if historyCall == nil || historyCall.Name != "lookup" || string(historyCall.Arguments) != `{"query":"before"}` || historyResult == nil || historyResult.Name != "lookup" || string(historyResult.Content) != `{"result":"old result"}` {
 				t.Fatalf("call=%+v result=%+v", historyCall, historyResult)
 			}
-			if _, err := aistudio.EncodeGenerateContentRequest(request, aistudio.GenerationDefaults{MaxOutputTokens: 1024}, aistudio.RequestContext{}); err != nil {
+			if _, _, err := aistudio.EncodeGenerateContentRequest(request, aistudio.GenerationDefaults{MaxOutputTokens: 1024}, aistudio.RequestContext{}); err != nil {
 				t.Fatalf("legacy history cannot be encoded: %v", err)
 			}
 			var frames []map[string]any

@@ -164,13 +164,21 @@ Waa/Create
 
 ### Challenge
 
-`Waa/Create` 请求 field 1 为 request key `lmnUSbltwc5ULv48iKLX`，field 2、3 为当前 VM 的 interpreter hash 与无绑定 snapshot；Worker 启动时只设置 field 1，请求为 `["lmnUSbltwc5ULv48iKLX"]`。interpreter 下载后以 SHA-256 + Base64URL 无 padding 计算摘要，摘要必须等于 challenge hash。一份 fresh challenge 复核样例包含 33,695 个字符的 program 与 65,831 字节的 interpreter。
+`Waa/Create` 请求的字段：
+
+| field | 内容 |
+| ---: | --- |
+| 1 | request key `lmnUSbltwc5ULv48iKLX` |
+| 2 | 当前 VM 的 interpreter hash |
+| 3 | 当前 VM 的无绑定 snapshot |
+
+Worker 启动时只设置 field 1，请求为 `["lmnUSbltwc5ULv48iKLX"]`。interpreter 下载后以 SHA-256 + Base64URL 无 padding 计算摘要，摘要必须等于 challenge hash。
 
 `Waa/Create` 响应的第二槽是 Base64 字符串。解码后每个字节加 `97`，结果是 challenge 数组。
 
 interpreter 可以按 hash 缓存。program、message ID、实验状态和 snapshot 状态属于当前 challenge 生命周期。每次从 challenge 读取全局函数名称。官网 VM 生命周期参数为 43,200,000ms，检查间隔为 300,000ms。
 
-`Waa/Ping` wire 为 `[request_key,botguard_response]`，成功响应为 `[]`。以下输入都能得到成功空响应：正确 proof、损坏 proof、省略 proof、任意 request key、无账户 Cookie。Ping 只验证 WAA RPC consumer identity 与字段类型，业务 proof 资格使用实际 GenerateContent 或 Bidi 请求判定。
+`Waa/Ping` wire 为 `[request_key,botguard_response]`，成功响应为 `[]`。Ping 只验证 WAA RPC consumer identity 与字段类型：正确 proof、损坏 proof、省略 proof、任意 request key 与无账户 Cookie 都得到成功空响应。业务 proof 资格以实际 GenerateContent 或 Bidi 请求判定。
 
 ### Host 与 Realm
 
@@ -194,7 +202,11 @@ dynamic program 会读取以下浏览器宿主语义。Camoufox 后端由真实 
 | 页面上下文 | 同一 Worker、同一请求正文，只替换发送入口 | 浏览器上下文 transport 对照 |
 | Go HTTP | 同一 Worker、同一 headers/body，只替换发送 transport | Go transport 与页面发送等价性 |
 
-包含真实输入、框架事件、Run action、官方 snapshot 与官网请求的完整 Angular 路径代表页面原生调用。账户资格、模型资格、proof 有效性和 runtime（账户的 WAA 浏览器运行实例）是否就绪由该路径发起的受保护业务 RPC 判定；页面上下文与 Go HTTP 链分别验证对应 transport。完整 Angular 返回 Code 7 表示该次调用被拒绝。
+包含真实输入、框架事件、Run action、官方 snapshot 与官网请求的完整 Angular 路径代表页面原生调用：
+
+- 账户资格、模型资格、proof 有效性和 runtime（账户的 WAA 浏览器运行实例）是否就绪，由该路径发起的受保护业务 RPC 判定
+- 页面上下文与 Go HTTP 链分别验证对应 transport
+- 完整 Angular 返回 Code 7 表示该次调用被拒绝
 
 发送链行为：
 
@@ -207,7 +219,7 @@ dynamic program 会读取以下浏览器宿主语义。Camoufox 后端由真实 
 | 完整 Angular 起点已经 Code 7 | 页面上下文与 Go HTTP 可得到相同 Code 7 |
 | 正确、损坏和空 Ping proof | 均返回 HTTP 200 `[]` |
 
-同一正文的受保护业务 RPC 接受结果直接判定发送链的业务可用性。proof 长度、program 长度、等待时长、Ping、单次 `sD()`、模型名称和本地 snapshot 结果作为诊断字段记录。
+发送链的业务可用性以同一正文的受保护业务 RPC 是否被接受判定。proof 长度、program 长度、等待时长、Ping、单次 `sD()`、模型名称和本地 snapshot 结果作为诊断字段记录。
 
 ### Snapshot 接口
 
@@ -252,7 +264,13 @@ ready -> closing -> closed
 
 同一账户的 snapshot 串行执行。页面生命周期中断、snapshot 错误、VM 到期、认证续签或进程关闭使当前 runtime 进入 failed/closed。调度层为每个 Worker 实例维护 generation（递增版本号），需要重建时创建新 generation；较晚返回的旧实例错误按旧 generation 处理，新实例状态保持不变。
 
-Camoufox bootstrap 通过官方页面取得 snapshot service 和动态请求头。页面 GenerateContent 在 `network.beforeRequestSent` 阶段由 `network.failRequest` 结束，因此 bootstrap 没有上游模型输出。同一账户的普通业务模型共享该 snapshot service。交互式登录、Cookie 导出和官方运行时位于 `internal/camoufoxnative`。
+Camoufox bootstrap 在账户标签页中按官网冷启动载入新对话页：
+
+1. 页面 preload 在官网 WAA service 首次取请求头时取得该 snapshot service
+2. 页面载入期间记下目录 RPC 响应与第一个带 `x-aistudio-visit-id` 的 MakerSuite 请求的公共头
+3. 等官方 WAA 程序的图片请求结束或到达上限后完成
+
+bootstrap 只载入页面，没有上游模型输出。同一账户的普通业务模型共享该 snapshot service。交互式登录、Cookie 导出和官方运行时位于 `internal/camoufoxnative`。
 
 SpiderMonkey bootstrap 在服务进程内请求官网页面与 `GetLoggingContext` 取得公共请求头，调用 `Waa/Create`，按 hash 加载解释器并在 SpiderMonkey 中执行 program，随后写入 bootstrap 提示词并派发交互事件；VM 每 12 小时按官网流程刷新。实现位于 `internal/waa` 与 `internal/aistudio/runtime_go.go`。
 
@@ -289,7 +307,7 @@ form:  count=1, ofs=<OFFSET>, req0___data__=<JSON_PROTOBUF>
 
 `RID` 标识前向请求，成功发送后递增。`ofs` 标识客户端消息 offset，成功 ACK 后递增。`AID` 是已消费的服务端 envelope ID，由 backchannel 中的 envelope 首槽推进。
 
-WebChannel ACK 是三个整数的数组。三个字段按数组结构和整数类型校验；第二个整数独立于本地请求序号。将 ACK 字段强行绑定 RID、AID 或 ofs 会在合法响应上制造协议错误。
+WebChannel ACK 是三个整数的数组，只按数组结构和整数类型校验。第二个整数与本地请求序号无关，RID、AID 与 ofs 由下面的提交规则维护。
 
 RID、ofs 与 AID 在各自成功点提交：
 
@@ -392,19 +410,42 @@ successful model/scope history
 3. 已有 Worker 无可用槽位时，先预留活动与启动预算，再从待机账户启动 Worker；容量已满时先关闭可回收的空闲旧 Worker，再启动目标 Worker
 4. 同账户重载需独占维护窗口，只有额外容量允许才保留新旧页重叠；失败或取消清理新资源，关闭失败的实体继续计入容量；候选均忙时等待槽位
 
-HTTP 403 且协议 Code 7 保留对应模型或 scope 的成功记录；未固定且首个上游语义事件尚未到达的请求，以及上游流中途中断的未固定非流式请求，继续尝试下一账户，固定请求、资源绑定请求和已开始的流返回上游错误。HTTP 404 且协议 Code 5 的消息包含 `Ambiguous request for service ''`、本地 Worker 失败或实例被替换时，运行时按 Worker generation 重建同一账户实例并重放一次。
+HTTP 403 且协议 Code 7 保留对应模型或 scope 的成功记录，之后按请求状态处理：
+
+- 继续尝试下一账户：未固定且首个上游语义事件尚未到达的请求，以及上游流中途中断的未固定非流式请求
+- 返回上游错误：固定请求、资源绑定请求和已开始的流
+
+HTTP 404 且协议 Code 5 的消息包含 `Ambiguous request for service ''`、本地 Worker 失败或实例被替换时，运行时按 Worker generation 重建同一账户实例并重放一次。
 
 认证写回使用 `authGeneration` 与 `checkedAt`；模型资格和冷却使用 `modelAccessGeneration` 与 `checked_at`。结果仅在对应 generation 值匹配且时间不早于当前状态时应用，同一时间以成功状态为最终值。目录、权益或认证材料更新时递增对应 generation。
 
 Bidi setup 成功使用 lease（本次会话持有的账户租约）的 `checked_at`；会话内资格请求使用严格递增的 `checked_at`。`turn_complete` 消费 pending 轮次并写入资格，Code 7 保留已有资格。认证成功与 401 复用该时序。
 
-`runtime-state.json` 保存 `benefit_tier`、`catalog_fingerprint`、`model_access:{state,checked_at,reason?}`、`cooldowns:{until,reason?}` 与 `resources:{kind?,name?,mime?,size?,purpose?,created_at,video?:{model,seconds,size}}`。`video-operation` 绑定把公开 video object 的 model、seconds、size、UTC 创建时间和创建账户一并持久化；重新建立账户池后，operation 轮询仍从该绑定恢复元数据。活动请求使用账户租约；读取最新磁盘状态、合并目标字段和原子写回使用独立短事务锁。该锁每 25ms 尝试一次并在 2 秒后超时；调用方 context（Go 取消上下文）可以更早取消等待。取得锁后必须重读磁盘值，写回后再更新内存与资源索引。跨进程读取资源未命中时刷新磁盘状态，防止旧内存覆盖另一个进程已经写入的绑定。
+`runtime-state.json` 保存账户的运行状态：
 
 本段中的 generation 表示一次 Stop/Start 创建的生成服务实例。启动从与运行状态指纹一致的 `catalog.json` 恢复缓存，通过 `CachedModels` 建立公开目录；没有缓存时等待首个非空真实目录，有缓存时按启动策略后台刷新 enabled 且处于 ready、busy 或 cooldown，且目录缺失、最近同步已满 24 小时或隐藏模型发现设置与缓存不一致的账户，其余沿用缓存。`PageCatalogProvider` 取得账户页面的 `GetLoggingContext`、`GetAiStudioBenefitTier` 与 `ListModels` 响应；复用 Worker、新建临时页和重载均受活动与启动预算约束，不能在 Worker 满载时另开预算外页面。缺目录账户可并发排队，已有目录的逐个读取。非空结果立即合并并发布账户与模型事件，正数热池继续预热；默认 `0/1/1/1` 跳过常驻预热。全部同步结束后按认证变化补发快照，并记录沿用缓存数、成功数、非空数、公共模型数、待重试数与耗时。HTTP Cookie 导入只提交验证后的认证，不走 PageCatalog 路径，目录由后续显式启动或刷新取得。
 
 目录错误或空目录的账户 ID 保留在 pending set，非空结果或删除账户时移除。启动期结束后以单个 30 秒 ticker 重试排序后的 pending 账户，非空结果立即发布目录与管理事件；同一循环每 24 小时逐个刷新 enabled 且处于 ready、busy 或 cooldown 的账户，没有空闲槽位或正在冷却的账户在本轮最后等到槽位空闲再读，页面预算仍统一约束。权益或目录变化递增 `modelAccessGeneration`。请求模型不在目录时，可等待正在刷新的首个账户；没有进行中的一轮且距上轮开始超过 10 分钟时触发一轮，等待首个账户结果后继续查找，其余账户后台刷新。停止取消全部目录任务，对目录退出最多等待 2 秒，对生命周期切换最多等待 12 秒；超时与清理错误保留，失败清理的实体不提前释放预算。
 
 终态 Responses / Interactions 的续接节点写入 `runtime/states.db`，这与账户 PageCatalog 缓存、资源绑定和任务生命周期分开。进行中的生成任务与账户导入任务不因终态持久化而获得重启恢复能力。恢复的 `-build` 写代码助手在账户运行状态中保存 Build 应用及对话轨迹；旧未完 Veo 任务不能在移除专用实现后继续执行。
+
+| 键 | 内容 |
+| --- | --- |
+| `benefit_tier` | 账户权益 |
+| `catalog_fingerprint` | 目录指纹 |
+| `model_access` | `{state,checked_at,reason?}` |
+| `cooldowns` | `{until,reason?,level?,fallback?,rejected_size?,rejected_until?,rejected_level?}` |
+| `resources` | `{kind?,name?,mime?,size?,purpose?,created_at,video?,alias?,sha256?,video_duration?,used_at?,display_name?,expires_at?}` |
+| `proxy` | 从 `PROXY` 代理池分配给账户的代理 |
+| `restricted` | Google 拒绝账户使用 AI Studio 的原因与跳转页 |
+| `assistant` | Build 写代码助手的应用与续接位置，见 [Build 通道](build.md#5-对话与应用) |
+
+- `video-operation` 绑定的 `video` 为 `{model,seconds,size,...}`，把公开 video object 的 model、seconds、size、UTC 创建时间和创建账户一并持久化；重新建立账户池后，operation 轮询仍从该绑定恢复元数据
+- 活动请求使用账户租约；读取最新磁盘状态、合并目标字段和原子写回使用独立短事务锁
+- 短事务锁为账户目录上级目录中的 `.leases/<账户目录名>.runtime.lock` 文件锁，每 25ms 尝试一次，直到取得锁或调用方 context（Go 取消上下文）取消
+- 取得锁后必须重读磁盘值，写回后再更新内存与资源索引
+- 跨进程读取资源未命中时刷新磁盘状态，防止旧内存覆盖另一个进程已经写入的绑定
+
 
 ## 6. 上游变化与恢复
 

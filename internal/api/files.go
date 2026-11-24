@@ -100,8 +100,7 @@ func (s *server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 			writeFileParseError(w, r, err)
 			return
 		}
-		seconds := setRetryAfter(w, err)
-		writeFileError(w, r, statusFromError(err), openAIErrorCode(err), retryMessage(err.Error(), seconds))
+		writeFileFailure(w, r, err)
 		return
 	}
 	metadata, err := service.FileMetadata(r.Context(), ref.ID)
@@ -109,8 +108,7 @@ func (s *server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		if !shouldWriteRequestError(r, err) {
 			return
 		}
-		seconds := setRetryAfter(w, err)
-		writeFileError(w, r, statusFromError(err), openAIErrorCode(err), retryMessage(err.Error(), seconds))
+		writeFileFailure(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, officialOrder(fileProtocol(r), fileResponse(r, metadata)))
@@ -566,8 +564,14 @@ func writeFileRequestError(w http.ResponseWriter, r *http.Request, err error) {
 		writeFileError(w, r, http.StatusNotFound, "file_not_found", "file not found")
 		return
 	}
+	writeFileFailure(w, r, err)
+}
+
+// writeFileFailure 写入文件服务请求失败的公开原因，请求记录保留完整原因
+func writeFileFailure(w http.ResponseWriter, r *http.Request, err error) {
 	seconds := setRetryAfter(w, err)
-	writeFileError(w, r, statusFromError(err), openAIErrorCode(err), retryMessage(err.Error(), seconds))
+	writeFileError(w, r, statusFromError(err), openAIErrorCode(err), retryMessage(publicReason(err), seconds))
+	setAccessLogResponseError(w, err.Error())
 }
 
 // writeFileParseError 写入 multipart 请求体解析错误，超过大小上限时返回 413

@@ -64,7 +64,11 @@ func (s *server) storeInteraction(request interactionRequest, previous responseH
 		return
 	}
 	id, _ := object["id"].(string)
-	interaction := &interactionRecord{object: encoded, input: interactionInputSteps(request.Input), upstream: result.interactionID, account: result.accountID, agent: result.providerModel, stream: request.stream}
+	inputSteps := request.inputSteps
+	if inputSteps == nil && len(request.Input) > 0 {
+		inputSteps = interactionInputSteps(request.Input)
+	}
+	interaction := &interactionRecord{object: encoded, input: inputSteps, upstream: result.interactionID, account: result.accountID, agent: result.providerModel, stream: request.stream}
 	s.responseStates.Store(id, previous, result, responseState{Contents: current, Interaction: interaction})
 }
 
@@ -157,11 +161,11 @@ func (s *server) handleInteractionDelete(w http.ResponseWriter, r *http.Request)
 // handleInteractionCancel 停止进行中的后台交互并返回保存的交互
 func (s *server) handleInteractionCancel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if value, ok := s.background.Load(id); ok {
-		run := value.(backgroundRun)
-		run.cancel()
-		<-run.done
+	if _, ok := s.responseStates.Interaction(id); !ok {
+		writeInteractionNotFound(w, id)
+		return
 	}
+	s.stopBackground(id)
 	record, ok := s.responseStates.Interaction(id)
 	if !ok {
 		writeInteractionNotFound(w, id)
@@ -202,8 +206,20 @@ func replayInteraction(w http.ResponseWriter, r *http.Request, object json.RawMe
 			if signature, ok := step["signature"]; ok {
 				events = append(events, interactionEvent{"step.delta", map[string]any{"index": index, "delta": map[string]any{"type": "thought_signature", "signature": signature}}})
 			}
+		case "function_call":
+			start, delta := interactionCallStream(step)
+			events = append(events, interactionEvent{"step.start", map[string]any{"index": index, "step": start}}, interactionEvent{"step.delta", map[string]any{"index": index, "delta": delta}})
 		default:
-			events = append(events, interactionEvent{"step.start", map[string]any{"index": index, "step": step}})
+			if !interactionToolStepKind(kind) {
+				events = append(events, interactionEvent{"step.start", map[string]any{"index": index, "step": step}})
+				break
+			}
+			start, delta := maps.Clone(step), maps.Clone(step)
+			delete(start, "signature")
+			for _, key := range []string{"id", "call_id", "search_type"} {
+				delete(delta, key)
+			}
+			events = append(events, interactionEvent{"step.start", map[string]any{"index": index, "step": start}}, interactionEvent{"step.delta", map[string]any{"index": index, "delta": delta}})
 		}
 		events = append(events, interactionEvent{"step.stop", map[string]any{"index": index}})
 	}

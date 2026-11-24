@@ -129,6 +129,7 @@ func mockProtectedXHR(t *testing.T) *protectedTestVM {
 	cx.Release(btoa)
 	runProtectedJS(t, vm, `
 var page = {}, xhr, request, messages = [], sendError = false;
+var performance = {now: () => Date.now()};
 var listeners = new Map();
 var addEventListener = (name, fn) => { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(fn); };
 var removeEventListener = (name, fn) => listeners.get(name)?.delete(fn);
@@ -319,11 +320,14 @@ var originalOpen = XMLHttpRequest.prototype.open;
 }
 
 func TestGeneratePromptHeadPreservesCharacterBoundaries(t *testing.T) {
-	for _, text := range []string{"", "short", strings.Repeat("a", promptFillLimit), strings.Repeat("\U00020000", promptFillLimit+1)} {
-		want := []rune(text)
-		want = want[:min(len(want), promptFillLimit)]
-		if got := promptHead(text); got != string(want) {
-			t.Fatalf("prompt head = %d bytes, want %d complete characters", len(got), len(want))
+	for _, test := range []struct{ text, want string }{
+		{"", ""},
+		{"short", "short"},
+		{strings.Repeat("a", promptFillLimit), strings.Repeat("a", promptFillLimit)},
+		{strings.Repeat("\U00020000", promptFillLimit+1), strings.Repeat("\U00020000", promptFillLimit/2)},
+	} {
+		if got := promptHead(test.text); got != test.want {
+			t.Fatalf("prompt head = %d bytes, want %d bytes of complete characters", len(got), len(test.want))
 		}
 	}
 }

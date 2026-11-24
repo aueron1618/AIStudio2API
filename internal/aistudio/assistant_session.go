@@ -26,6 +26,8 @@ type assistantTrajectory struct {
 	ID string `json:"id"`
 	// HistoryGroups 是开启 trajectory 时转录在自定义指令中的开头分组数
 	HistoryGroups int `json:"history_groups,omitempty"`
+	// Context 是 trajectory 中最近一个说明文件的系统提示词与函数声明摘要，trajectory 没有说明文件时为空
+	Context string `json:"context,omitempty"`
 }
 
 // assistantTip 返回 API key 与对话摘要合成的续接位置，运行状态中不保存明文 key
@@ -34,13 +36,12 @@ func assistantTip(apiKey string, digest string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// assistantTipLink 返回 links 最后一组之前最近的模型轮分组，没有时为 -1
+// assistantTipLink 返回非模型结尾对话最后一组之前的模型轮分组，最后一组是模型轮或之前没有模型轮时为 -1
 func assistantTipLink(links []turnLink) int {
-	index := len(links) - 2
-	if index >= 0 && !links[index].model {
-		index--
+	if len(links) < 2 || links[len(links)-1].model {
+		return -1
 	}
-	return index
+	return len(links) - 2
 }
 
 // matchAssistantTrajectory 返回应用中续接位置为 tip 的 trajectory

@@ -64,3 +64,28 @@ func TestBrowserCloseAlwaysTerminatesTreeBeforeProfileRemoval(t *testing.T) {
 		t.Fatal("successful Close was not idempotent")
 	}
 }
+
+func TestBrowserCloseFailureRetainsProfileForRetry(t *testing.T) {
+	profile := t.TempDir()
+	process := &browserProcess{profile: profile, done: make(chan struct{})}
+	close(process.done)
+	cleanupErr := errors.New("tree still active")
+	if err := process.close(browserProcessCloseTimeout, func(context.Context, *browserProcess) error { return cleanupErr }); !errors.Is(err, cleanupErr) {
+		t.Fatalf("failed tree cleanup = %v", err)
+	}
+	if process.closed {
+		t.Fatal("failed tree cleanup reported the process closed")
+	}
+	if _, err := os.Stat(profile); err != nil {
+		t.Fatal("failed tree cleanup removed its profile")
+	}
+	if err := process.close(browserProcessCloseTimeout, func(context.Context, *browserProcess) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !process.closed {
+		t.Fatal("successful retry did not finish process cleanup")
+	}
+	if _, err := os.Stat(profile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("successful retry retained the profile")
+	}
+}

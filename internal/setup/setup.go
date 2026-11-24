@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
@@ -30,7 +32,10 @@ import (
 type setupStrings []string
 
 var verifySetupCookies = chromeauth.VerifyAuthUser
-var checkSetupAccess = chromeauth.CheckAccess
+var checkSetupAccess = func(ctx context.Context, state *aistudio.StorageState, proxy string, authUser int) error {
+	_, err := chromeauth.CheckAccess(ctx, state, proxy, authUser)
+	return err
+}
 
 func (values *setupStrings) String() string {
 	return strings.Join(*values, ",")
@@ -83,7 +88,7 @@ func Run(ctx context.Context, cfg config.Config, args []string) error {
 		if err != nil {
 			return err
 		}
-		return renewRemote(ctx, client, renewals, i18n.Stdout)
+		return renewRemote(ctx, renewals, i18n.Stdout, pushTo(client))
 	}
 	input := bufio.NewReader(os.Stdin)
 	var target accountTarget
@@ -103,9 +108,7 @@ func Run(ctx context.Context, cfg config.Config, args []string) error {
 		}
 		target = localTarget{store: aistudio.NewAccountStore(cfg.AuthStates)}
 		if options.cdp == "" {
-			if options.locale, options.timezone, err = exitEnvironment(ctx, options); err != nil {
-				return err
-			}
+			options.locale, options.timezone = exitEnvironment(ctx, options)
 		}
 	}
 	importErr := importAccounts(ctx, cfg, target, options, input)
@@ -115,7 +118,7 @@ func Run(ctx context.Context, cfg config.Config, args []string) error {
 	if err := saveRenewals(remote.renewals); err != nil || importErr != nil {
 		return errors.Join(importErr, err)
 	}
-	return renewRemote(ctx, client, remote.renewals, i18n.Stdout)
+	return renewRemote(ctx, remote.renewals, i18n.Stdout, pushTo(client))
 }
 
 // importAccounts 按参数从 storage state 文件、Cookie、隔离登录或本机 Chrome 导入账户
@@ -194,7 +197,7 @@ func (target *remoteTarget) Save(
 		return "", err
 	}
 	input := api.AccountStateInput{
-		Label: accountConfig.Label, Locale: accountConfig.Locale, Timezone: accountConfig.Timezone,
+		Label: accountConfig.Label, Note: accountConfig.Note, Locale: accountConfig.Locale, Timezone: accountConfig.Timezone,
 		AuthUser: accountConfig.AuthUser, StorageState: uploadState,
 	}
 	if fingerprintDirectory != "" {
@@ -276,6 +279,9 @@ func remoteOrigin(raw string) (string, error) {
 	return parsed.Scheme + "://" + parsed.Host, nil
 }
 
+// verifyAuthUser 识别 Cookie 登录 AI Studio 的账户
+var verifyAuthUser = chromeauth.VerifyAuthUser
+
 func importStorageState(ctx context.Context, target accountTarget, options setupOptions) error {
 	state, err := aistudio.LoadStorageState(options.storageState)
 	if err != nil {
@@ -284,11 +290,18 @@ func importStorageState(ctx context.Context, target accountTarget, options setup
 	if _, err := aistudio.NewSigner().Authorization(state); err != nil {
 		return fmt.Errorf("认证状态无法用于 AI Studio: %w", err)
 	}
-	label := defaultSetupLabel(options.storageState)
+	label := ""
 	if extension, exists, err := state.AuthExtension(); err != nil {
 		return err
 	} else if exists && strings.TrimSpace(extension.Source.Email) != "" {
-		label = extension.Source.Email
+		label = strings.ToLower(strings.TrimSpace(extension.Source.Email))
+	}
+	if label == "" {
+		verification, err := verifyAuthUser(ctx, &state, options.egress, options.authUser)
+		if err != nil {
+			return fmt.Errorf("识别 Cookie 登录的账户: %w", err)
+		}
+		label = strings.ToLower(strings.TrimSpace(verification.Email))
 	}
 	saved, err := target.Save(ctx, setupAccountConfig(label, options), state, "")
 	if err != nil {
@@ -313,9 +326,7 @@ func importCookies(ctx context.Context, target accountTarget, options setupOptio
 			options.timezone = browser.Timezone
 		}
 		if options.remote == "" {
-			if options.locale, options.timezone, err = exitEnvironment(ctx, options); err != nil {
-				return err
-			}
+			options.locale, options.timezone = exitEnvironment(ctx, options)
 		}
 	}
 	state, err := aistudio.ParseCookieText(options.cookies)
@@ -368,10 +379,7 @@ func importIsolatedLogin(
 		return fmt.Errorf("创建隔离登录目录: %w", err)
 	}
 	defer os.RemoveAll(loginDirectory)
-	locale, timezone, err := exitEnvironment(ctx, options)
-	if err != nil {
-		return err
-	}
+	locale, timezone := exitEnvironment(ctx, options)
 	result, err := driver.Login(ctx, aistudio.IsolatedLoginRequest{
 		Directory: loginDirectory, Proxy: options.egress,
 		Locale: locale, Timezone: timezone,
@@ -422,28 +430,40 @@ func importChromeAccounts(ctx context.Context, cfg config.Config, target account
 	if err != nil {
 		return err
 	}
-	modelCounts := make([]int, len(results))
+	var saving sync.Mutex
+	var group sync.WaitGroup
+	failures := make([]error, len(results))
 	for index := range results {
-		verifyContext, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
-		verification, verifyErr := chromeauth.VerifyAuthUser(verifyContext, &results[index].State, options.egress, 0)
-		cancel()
-		if verifyErr != nil {
-			return fmt.Errorf("验证 %s: %w", results[index].Email, verifyErr)
-		}
-		if !strings.EqualFold(strings.TrimSpace(results[index].Email), strings.TrimSpace(verification.Email)) {
-			return fmt.Errorf("Chrome Cookie 登录邮箱与所选账户不一致")
-		}
-		if err := checkAccess(ctx, results[index].Email, &results[index].State, options.egress, 0); err != nil {
-			return err
-		}
-		modelCounts[index] = verification.ModelCount
+		group.Go(func() {
+			failures[index] = importChromeResult(ctx, cfg, target, options, &results[index], &saving, output)
+		})
 	}
-	for index, result := range results {
-		if _, err := target.Save(ctx, setupAccountConfig(result.Email, options), result.State, ""); err != nil {
-			return err
-		}
-		fmt.Fprintf(output, "已导入: %s (%s)，%d 个模型\n", result.Email, result.Profile, modelCounts[index])
+	group.Wait()
+	return errors.Join(failures...)
+}
+
+// importChromeResult 验证一个 Chrome 账号，通过后保存并输出，saving 串行化各账号的保存与输出
+func importChromeResult(ctx context.Context, cfg config.Config, target accountTarget, options setupOptions, result *chromeauth.ImportResult, saving *sync.Mutex, output io.Writer) error {
+	verifyContext, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
+	verification, err := chromeauth.VerifyAuthUser(verifyContext, &result.State, options.egress, 0)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("验证 %s: %w", result.Email, err)
 	}
+	if !strings.EqualFold(strings.TrimSpace(result.Email), strings.TrimSpace(verification.Email)) {
+		return fmt.Errorf("Chrome Cookie 登录邮箱与所选账户不一致")
+	}
+	if err := checkAccess(ctx, result.Email, &result.State, options.egress, 0); err != nil {
+		return err
+	}
+	saving.Lock()
+	defer saving.Unlock()
+	accountConfig := setupAccountConfig(result.Email, options)
+	accountConfig.Note = aistudio.TruncateAccountNote(result.DisplayName)
+	if _, err := target.Save(ctx, accountConfig, result.State, ""); err != nil {
+		return err
+	}
+	fmt.Fprintf(output, "已导入: %s (%s)，%d 个模型\n", result.Email, result.Profile, verification.ModelCount)
 	return nil
 }
 
@@ -602,16 +622,15 @@ func parseSetupFlags(args []string, cfg config.Config) (setupOptions, error) {
 	return options, nil
 }
 
-// exitEnvironment 返回账户语言与时区：未用 --locale、--timezone 指定的项按 setup 出口的地理位置填写
-func exitEnvironment(ctx context.Context, options setupOptions) (string, string, error) {
+// exitEnvironment 返回账户语言与时区：未用 --locale、--timezone 指定的项按 setup 出口的地理位置填写，查询出口失败时取本机的语言与时区并写入 WARN 日志
+func exitEnvironment(ctx context.Context, options setupOptions) (string, string) {
 	exit, err := egress.Environment(ctx, options.egress, options.locale, options.timezone)
 	if err != nil {
-		return "", "", fmt.Errorf("按出口位置确定账户语言与时区: %w", err)
-	}
-	if exit.IP != "" {
+		slog.Warn("查询出口位置失败，账户语言与时区使用本机设置", "locale", exit.Locale, "timezone", exit.Timezone, "error", err)
+	} else if exit.IP != "" {
 		fmt.Fprintf(i18n.Stdout, "按出口 %s（%s）设置账户语言 %s、时区 %s\n", exit.IP, exit.Country, exit.Locale, exit.Timezone)
 	}
-	return exit.Locale, exit.Timezone, nil
+	return exit.Locale, exit.Timezone
 }
 
 func setupAccountConfig(label string, options setupOptions) aistudio.AccountConfig {
@@ -621,14 +640,6 @@ func setupAccountConfig(label string, options setupOptions) aistudio.AccountConf
 	accountConfig.Timezone = options.timezone
 	accountConfig.AuthUser = options.authUser
 	return accountConfig
-}
-
-func defaultSetupLabel(storageState string) string {
-	parent := filepath.Base(filepath.Dir(storageState))
-	if parent == "." || parent == string(filepath.Separator) {
-		return "Default"
-	}
-	return parent
 }
 
 func defaultSetupLoginDriver(ctx context.Context, egress string) (aistudio.IsolatedLoginDriver, error) {

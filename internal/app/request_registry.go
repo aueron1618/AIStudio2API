@@ -16,11 +16,13 @@ import (
 
 // requestRegistry 保存活动请求与事件订阅
 type requestRegistry struct {
-	mu          sync.Mutex
-	active      map[string]trackedRequest
-	logs        []api.AdminLog
-	subscribers map[*eventSubscriber]struct{}
-	console     chan api.AdminLog
+	mu            sync.Mutex
+	active        map[string]trackedRequest
+	logs          []api.AdminLog
+	subscribers   map[*eventSubscriber]struct{}
+	console       chan api.AdminLog
+	consoleClosed bool
+	consoleDone   chan struct{}
 	// firstEvents 是各模型与通道近期原请求的首事件等待，生成服务重启后保留
 	firstEvents *firstEventStats
 }
@@ -42,23 +44,28 @@ const (
 	adminRequestRetain         = 512
 	adminRequestCompactAt      = 640
 	adminRequestRefreshLatency = 50 * time.Millisecond
+	// adminRequestDataInterval 是正在输出的请求向管理页发布最近收到输出时刻的最短间隔
+	adminRequestDataInterval = time.Second
 )
 
 type trackedRequest struct {
 	request api.AdminRequest
 	cancel  context.CancelFunc
+	// publishedDataAt 是最近一次发布给管理页的收到输出时刻
+	publishedDataAt time.Time
 }
 
-// newRequestRegistry 创建活动请求注册表
-func newRequestRegistry(ctx context.Context) *requestRegistry {
+// newRequestRegistry 创建活动请求注册表，进程退出前调用 close 排空控制台日志队列
+func newRequestRegistry() *requestRegistry {
 	registry := &requestRegistry{
 		active:      make(map[string]trackedRequest),
 		logs:        make([]api.AdminLog, 0, 128),
 		subscribers: make(map[*eventSubscriber]struct{}),
 		console:     make(chan api.AdminLog, 256),
+		consoleDone: make(chan struct{}),
 		firstEvents: newFirstEventStats(),
 	}
-	go registry.writeConsole(ctx)
+	go registry.writeConsole()
 	return registry
 }
 
@@ -83,6 +90,20 @@ func (registry *requestRegistry) markRunning(id string, accountID string, accoun
 		tracked.request.AccountID = accountID
 		tracked.request.AccountLabel = accountLabel
 		tracked.request.State = "running"
+		tracked.request.SentAt = time.Now()
+		registry.active[id] = tracked
+		registry.publishLocked(api.AdminEvent{Type: "request", Data: tracked.request})
+	}
+	registry.mu.Unlock()
+}
+
+// markQueued 把换号后重新等待账户的请求改回等待执行，accountID 为请求指定的账户，清掉上一次尝试的账户、通道、发出与收到输出的时刻
+func (registry *requestRegistry) markQueued(id string, accountID string) {
+	registry.mu.Lock()
+	if tracked, exists := registry.active[id]; exists {
+		tracked.request.AccountID, tracked.request.AccountLabel, tracked.request.Channel = accountID, "", ""
+		tracked.request.State = "queued"
+		tracked.request.SentAt, tracked.request.LastDataAt, tracked.publishedDataAt = time.Time{}, time.Time{}, time.Time{}
 		registry.active[id] = tracked
 		registry.publishLocked(api.AdminEvent{Type: "request", Data: tracked.request})
 	}
@@ -96,6 +117,20 @@ func (registry *requestRegistry) markChannel(id string, channel string) {
 		tracked.request.Channel = channel
 		registry.active[id] = tracked
 		registry.publishLocked(api.AdminEvent{Type: "request", Data: tracked.request})
+	}
+	registry.mu.Unlock()
+}
+
+// markData 记下请求最近一次收到上游输出的时刻，首个输出立即发布，之后至多每 adminRequestDataInterval 发布一次
+func (registry *requestRegistry) markData(id string, at time.Time) {
+	registry.mu.Lock()
+	if tracked, exists := registry.active[id]; exists {
+		tracked.request.LastDataAt = at
+		if at.Sub(tracked.publishedDataAt) >= adminRequestDataInterval {
+			tracked.publishedDataAt = at
+			registry.publishLocked(api.AdminEvent{Type: "request", Data: tracked.request})
+		}
+		registry.active[id] = tracked
 	}
 	registry.mu.Unlock()
 }
@@ -193,39 +228,48 @@ func (registry *requestRegistry) recordLog(entry api.AdminLog) {
 		registry.logs = registry.logs[:adminLogRetain]
 	}
 	registry.publishLocked(api.AdminEvent{Type: "log", Data: entry})
-	registry.mu.Unlock()
-	select {
-	case registry.console <- entry:
-	default:
+	if !registry.consoleClosed {
+		select {
+		case registry.console <- entry:
+		default:
+		}
 	}
+	registry.mu.Unlock()
 }
 
-func (registry *requestRegistry) writeConsole(ctx context.Context) {
-	for {
-		select {
-		case entry := <-registry.console:
-			level := slog.LevelInfo
-			switch entry.Level {
-			case "ERROR":
-				level = slog.LevelError
-			case "WARN":
-				level = slog.LevelWarn
-			}
-			record := slog.NewRecord(entry.Time, level, entry.Message, 0)
-			record.AddAttrs(slog.String("event", entry.Event), slog.String("source", entry.Source))
-			if entry.Stage != nil {
-				record.AddAttrs(slog.Any("stage", entry.Stage))
-			}
-			for _, field := range entry.Fields {
-				record.AddAttrs(slog.String(field.Key, field.Value))
-			}
-			if entry.Request != nil {
-				record.AddAttrs(slog.Any("request", entry.Request))
-			}
-			_ = slog.Default().Handler().Handle(ctx, record)
-		case <-ctx.Done():
-			return
+// close 关闭控制台日志队列并等待已缓冲日志全部写出
+func (registry *requestRegistry) close() {
+	registry.mu.Lock()
+	if !registry.consoleClosed {
+		registry.consoleClosed = true
+		close(registry.console)
+	}
+	registry.mu.Unlock()
+	<-registry.consoleDone
+}
+
+func (registry *requestRegistry) writeConsole() {
+	defer close(registry.consoleDone)
+	for entry := range registry.console {
+		level := slog.LevelInfo
+		switch entry.Level {
+		case "ERROR":
+			level = slog.LevelError
+		case "WARN":
+			level = slog.LevelWarn
 		}
+		record := slog.NewRecord(entry.Time, level, entry.Message, 0)
+		record.AddAttrs(slog.String("event", entry.Event), slog.String("source", entry.Source))
+		if entry.Stage != nil {
+			record.AddAttrs(slog.Any("stage", entry.Stage))
+		}
+		for _, field := range entry.Fields {
+			record.AddAttrs(slog.String(field.Key, field.Value))
+		}
+		if entry.Request != nil {
+			record.AddAttrs(slog.Any("request", entry.Request))
+		}
+		_ = slog.Default().Handler().Handle(context.Background(), record)
 	}
 }
 

@@ -88,3 +88,16 @@ func (lazy *lazyLoginDriver) ImportCookies(ctx context.Context, request aistudio
 	}
 	return driver.ImportCookies(ctx, request, state)
 }
+
+// Verify 等 Camoufox 就绪后打开账户验证页并自动再核对
+func (driver *lazyLoginDriver) Verify(ctx context.Context, request aistudio.AccountVerifyRequest) (bool, error) {
+	path, err := camoufoxnative.Prepare(ctx, driver.proxy)
+	if err != nil {
+		return true, err
+	}
+	login, err := aistudio.NewNativeLoginDriver(path)
+	if err != nil {
+		return true, err
+	}
+	return login.Verify(ctx, request)
+}

@@ -2,7 +2,6 @@ import { createSSRApp, nextTick, reactive, ref } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import { api } from '@/api'
-import { useConsole } from '@/console'
 import { messages } from '@/locales/en'
 import { mountSetup } from '@/test-component'
 import type {
@@ -99,6 +98,7 @@ const candidate = (source: number, imported = false): Candidate => ({
   imported,
   signed_out: false,
   device_bound: false,
+  sign_in_required: false,
   error: '',
   restricted: '',
 })
@@ -126,7 +126,8 @@ function mount() {
     error: '',
     chromeImport: false,
     camoufox: undefined,
-    geoip: undefined,
+    models: [],
+    cooldowns: [],
     onTask: (task: AccountTask) => {
       taskEvents(task)
       props.tasks = [task]
@@ -154,7 +155,8 @@ async function renderImport(
     error: '',
     chromeImport: false,
     camoufox: undefined,
-    geoip: undefined,
+    models: [],
+    cooldowns: [],
   })
   app.directive('tooltip', {})
   app.mixin({
@@ -187,6 +189,8 @@ beforeEach(() => {
     isSecureContext: true,
     setTimeout,
     clearTimeout,
+    setInterval,
+    clearInterval,
     localStorage: storage,
   })
 })
@@ -221,10 +225,9 @@ describe('Cookie import preferences and layout', () => {
         { egress: '' },
         { egress: 'http://offline.example.test' },
       ],
-      geoip: undefined,
     })
     cleanups.push(instance.unmount)
-    expect(useConsole().exitLookups.value).toBe(1)
+    expect(instance.state.loading).toBe(true)
     await instance.state.loadExits()
     expect(instance.state.groups).toMatchObject([
       { ip: '192.0.2.1', accounts: 2 },
@@ -237,7 +240,6 @@ describe('Cookie import preferences and layout', () => {
     await nextTick()
     expect(instance.state.groups[0]?.ip).toBe('192.0.2.1')
     expect(instance.state.loading).toBe(false)
-    expect(useConsole().exitLookups.value).toBe(0)
   })
 
   it('starts blank without preferences and does not remember untouched defaults', () => {

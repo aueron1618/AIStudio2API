@@ -22,11 +22,10 @@ import MediaPromptBox from './MediaPromptBox.vue'
 import PaidUsageZeroState, { type Suggestion } from './PaidUsageZeroState.vue'
 import VideoSettings from './VideoSettings.vue'
 import VideoResult from './VideoResult.vue'
-import { readImage } from './api'
+import { localAttachment } from '../media-store'
 import { useRunningClock } from '../clock'
-import { dataURL } from '../protocols'
 import { mediaCodeOptions, videoCode, type MediaCodeLanguage } from './code'
-import { maxReferences, useVideo, type VideoData, type VideoFrame } from './video'
+import { frameURL, maxReferences, useVideo, type VideoData, type VideoFrame } from './video'
 import { useMediaQuery } from '../media-query'
 import { modelMatches } from '../catalog'
 
@@ -98,27 +97,27 @@ function elapsed(index: number, duration: number | undefined): string {
   return `${(milliseconds / 1000).toFixed(1)}s`
 }
 
-async function toFrame(file: Blob, name: string): Promise<VideoFrame> {
-  return { ...(await readImage(file)), name }
+function toFrame(file: Blob, name: string): VideoFrame {
+  return Object.assign(localAttachment(file, file.type || 'image/png').inlineData!, { name })
 }
 
-async function setStart(file: File): Promise<void> {
-  state.start = await toFrame(file, file.name)
+function setStart(file: File): void {
+  video.setStart(toFrame(file, file.name))
 }
 
-async function setLastFrame(file: File): Promise<void> {
-  video.setLast(await toFrame(file, file.name))
+function setLastFrame(file: File): void {
+  video.setLast(toFrame(file, file.name))
 }
 
-async function addImages(files: File[]): Promise<void> {
+function addImages(files: File[]): void {
   files = files.filter((file) => file.type.startsWith('image/'))
   if (imageDisabled.value || files.length === 0) return
   if (!referenceInputs.value) {
-    await setStart(files[0]!)
+    setStart(files[0]!)
     return
   }
   for (const file of files.slice(0, maxReferences - state.references.length))
-    state.references.push(await toFrame(file, file.name))
+    state.references.push(toFrame(file, file.name))
 }
 
 let suggestionPick = 0
@@ -132,13 +131,13 @@ async function useSuggestion(item: Suggestion): Promise<void> {
   }
   try {
     const start = item.reference
-      ? await toFrame(await (await fetch(item.reference)).blob(), item.reference.split('/').at(-1)!)
+      ? toFrame(await (await fetch(item.reference)).blob(), item.reference.split('/').at(-1)!)
       : undefined
     if (pick !== suggestionPick) return
     state.draft = item.prompt
-    state.references = []
+    video.clearReferences()
     video.setLast(undefined)
-    state.start = start
+    video.setStart(start)
     void video.run()
   } catch (error) {
     if (pick === suggestionPick) store.showNotice(errorText(error), 'error')
@@ -291,7 +290,7 @@ watch(
                   ].filter(Boolean)"
                   :key="frameIndex"
                   class="loaded-image"
-                  :src="dataURL(frame!)"
+                  :src="frameURL(frame!)"
                   :alt="frame!.name"
                 />
               </div>
@@ -333,7 +332,7 @@ watch(
             :frame="state.start"
             :label="t('pg.startFrame')"
             @add="setStart"
-            @remove="state.start = undefined"
+            @remove="video.setStart(undefined)"
           />
           <template v-if="video.videoInputs.value.last">
             <span class="augmentation-separator"><UiIcon name="swapHoriz" :size="24" /></span>
@@ -347,14 +346,14 @@ watch(
         </template>
         <template v-if="!frameInputs && state.start" #media>
           <div class="reference">
-            <img class="reference-image" :src="dataURL(state.start)" :alt="state.start.name" />
+            <img class="reference-image" :src="frameURL(state.start)" :alt="state.start.name" />
             <span class="reference-name">{{ state.start.name }}</span>
             <button
               type="button"
               ms-button
               class="ms-button-borderless ms-button-icon ms-button-small"
               :aria-label="t('pg.removeMedia')"
-              @click="state.start = undefined"
+              @click="video.setStart(undefined)"
             >
               <UiIcon name="close" :size="16" />
             </button>
@@ -362,14 +361,14 @@ watch(
         </template>
         <template v-else-if="state.references.length" #media>
           <div v-for="(frame, index) in state.references" :key="index" class="reference">
-            <img class="reference-image" :src="dataURL(frame)" :alt="frame.name" />
+            <img class="reference-image" :src="frameURL(frame)" :alt="frame.name" />
             <span class="reference-name">{{ frame.name }}</span>
             <button
               type="button"
               ms-button
               class="ms-button-borderless ms-button-icon ms-button-small"
               :aria-label="t('pg.removeMedia')"
-              @click="state.references.splice(index, 1)"
+              @click="video.removeReference(index)"
             >
               <UiIcon name="close" :size="16" />
             </button>

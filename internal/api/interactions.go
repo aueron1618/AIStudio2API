@@ -35,6 +35,11 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
+	stores := request.Store == nil || *request.Store
+	if stores {
+		request.inputSteps = interactionInputSteps(request.Input)
+	}
+	request.Input = nil
 	if err := resolveGeminiFileNames(r.Context(), s.service, generate.Contents); err != nil {
 		if shouldWriteRequestError(r, err) {
 			writeGeminiRequestError(w, err)
@@ -55,7 +60,10 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		w, stopKeepalive = s.nonstreamKeepalive(w, r)
 		defer stopKeepalive()
 	}
-	current := cloneResponseContents(generate.Contents)
+	var current []aistudio.Content
+	if stores {
+		current = cloneResponseContents(generate.Contents)
+	}
 	var previous responseHistory
 	if request.PreviousID != "" {
 		var ok bool

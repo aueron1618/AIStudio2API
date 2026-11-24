@@ -65,7 +65,7 @@ vi.mock('@/playground/request', async (original) => ({
 
 const cleanups: (() => void)[] = []
 beforeEach(() => {
-  vi.stubGlobal('window', { location: new URL(origin), clearTimeout })
+  vi.stubGlobal('window', { location: new URL(origin), clearTimeout, setInterval, clearInterval })
   vi.stubGlobal('navigator', { userAgent: 'offline-fixture' })
 })
 afterEach(() => {
@@ -79,7 +79,7 @@ function clientInput(model: Model, protocol: Protocol = 'chat'): ClientInput {
     key: 'fixture-key',
     model,
     modelID: model.id,
-    tiers: { opus: model.id, sonnet: model.id, haiku: model.id },
+    tiers: { fable: model.id, opus: model.id, sonnet: model.id, haiku: model.id },
     models: catalog.value,
     catalog: catalog.value,
     shell: 'unix',
@@ -89,11 +89,11 @@ function clientInput(model: Model, protocol: Protocol = 'chat'): ClientInput {
 }
 
 describe('Access fixed-channel contracts', () => {
-  it('retains the fourteen existing clients, adds Magpie and keeps all capability families', () => {
-    expect(clients).toHaveLength(15)
-    expect(new Set(clients.map((client) => client.id)).size).toBe(15)
+  it('retains the local clients, adds upstream clients and keeps all capability families', () => {
+    expect(clients).toHaveLength(16)
+    expect(new Set(clients.map((client) => client.id)).size).toBe(16)
     expect(clients.map((client) => client.id)).toEqual(
-      expect.arrayContaining(['gemini-cli', 'hermes', 'magpie']),
+      expect.arrayContaining(['gemini-cli', 'hermes', 'magpie', 'dsh', 'agy']),
     )
     expect(capabilities.map((capability) => capability.id)).toEqual([
       'chat',

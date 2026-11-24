@@ -58,11 +58,13 @@ func retryTestRuntime(t *testing.T, generate func(context.Context, aistudio.Gene
 			t.Fatal(err)
 		}
 	}
-	return &trackedService{
+	service := &trackedService{
 		lifecycle: t.Context(), service: retryTestService{generate: generate}, pool: pool,
-		requests: newRequestRegistry(t.Context()), workers: &accountWorkerManager{},
-		maxAccountSwitches: config.DefaultMaxAccountSwitches,
+		requests: newTestRequestRegistry(t), workers: &accountWorkerManager{},
+		publishStatus: func() {},
 	}
+	service.SetRequestPolicy(nil, config.DefaultMaxAccountSwitches)
+	return service
 }
 
 func assertRetryLeasesReleased(t *testing.T, service *trackedService) {
@@ -98,7 +100,7 @@ func TestGenerateWithRetryHonorsAccountSwitchBudget(t *testing.T) {
 				calls++
 				return nil, &url.Error{Op: "Post", URL: "https://example.test", Err: io.ErrUnexpectedEOF}
 			})
-			service.maxAccountSwitches = test.limit
+			service.SetRequestPolicy(nil, test.limit)
 			ctx, cancel := context.WithTimeout(aistudio.ContextWithChannel(t.Context(), aistudio.ChannelPlayground), 5*time.Second)
 			defer cancel()
 			request := aistudio.GenerateRequest{ID: "switch-budget", Model: "shared"}
@@ -265,7 +267,7 @@ func TestCollectGenerateEventsCancellationDuringDrain(t *testing.T) {
 	defer close(source)
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := collectGenerateEvents(ctx, source, nil)
+		_, _, err := collectGenerateEvents(ctx, source, nil, nil)
 		done <- err
 	}()
 	source <- aistudio.Event{Kind: aistudio.EventError, Err: &aistudio.StreamInterruptedError{Err: io.ErrUnexpectedEOF}}
@@ -291,7 +293,7 @@ func TestGenerateWithRetryQuotaFallbackKeepsChannel(t *testing.T) {
 				service := retryTestRuntime(t, func(context.Context, aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
 					return nil, limit
 				})
-				service.maxAccountSwitches = 0 // Quota failures do not consume the non-quota switch budget.
+				service.SetRequestPolicy(nil, 0) // Quota failures do not consume the non-quota switch budget.
 				ctx, cancel := context.WithTimeout(aistudio.ContextWithChannel(t.Context(), channel), 5*time.Second)
 				defer cancel()
 				request := aistudio.GenerateRequest{ID: "quota-limit-test", Model: "shared"}
@@ -494,17 +496,19 @@ func TestDispatchQueuePreservesFIFOAcrossLiveScopeChanges(t *testing.T) {
 		{"first": {"a", "b"}, "second": {"a", "b"}},
 	} {
 		pool.SetAPIKeyAccounts(scopes)
-		if queue.turn(second, selection) || !queue.turn(first, selection) {
+		_, secondTurn := queue.turn(second, selection)
+		_, firstTurn := queue.turn(first, selection)
+		if secondTurn || !firstTurn {
 			t.Fatal("later waiter overtook the original head after a common scope change")
 		}
 	}
 	queue.setStarting(first, true)
-	if !queue.turn(second, selection) {
+	if _, turn := queue.turn(second, selection); !turn {
 		t.Fatal("a starting worker blocked the next request")
 	}
 	queue.setStarting(first, false)
 	queue.leave(first)
-	if !queue.turn(second, selection) {
+	if _, turn := queue.turn(second, selection); !turn {
 		t.Fatal("removing the head did not advance the queue")
 	}
 	queue.leave(second)
@@ -538,11 +542,16 @@ func TestDispatchQueueUsesOneBindingSnapshotPerTurn(t *testing.T) {
 	queue.join(barrier, selection)
 	second := queue.join(aistudio.ContextWithAPIKey(t.Context(), "second"), selection)
 	result := make(chan bool, 1)
-	go func() { result <- queue.turn(second, selection) }()
+	go func() {
+		_, turn := queue.turn(second, selection)
+		result <- turn
+	}()
 	workerBudgetResult(t, barrier.entered)
 	pool.SetAPIKeyAccounts(map[string][]string{"first": {"a"}, "second": {"a"}})
 	release()
-	if workerBudgetResult(t, result) || queue.turn(second, selection) {
+	previousTurn := workerBudgetResult(t, result)
+	_, nextTurn := queue.turn(second, selection)
+	if previousTurn || nextTurn {
 		t.Fatal("mixed binding epochs let a later equivalent request overtake the head")
 	}
 }

@@ -21,10 +21,12 @@ func TestAntiTruncationRuntimeConfig(t *testing.T) {
 		t.Fatal("anti-truncation must not require restarting the generation service")
 	}
 	manager := &runtimeManager{current: &runtimeGeneration{config: cfg}}
+	manager.settings.Store(requestSettingsOf(cfg))
 	if manager.antiTruncationEnabled() {
 		t.Fatal("disabled setting was not reflected")
 	}
 	manager.current.config.AntiTruncation = true
+	manager.settings.Store(requestSettingsOf(manager.current.config))
 	if !manager.antiTruncationEnabled() || !runtimeConfigDTO(manager.current.config).AntiTruncation {
 		t.Fatal("enabled setting was not reflected")
 	}
@@ -33,7 +35,7 @@ func TestAntiTruncationRuntimeConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool := aistudio.NewAccountPool(nil, 1)
-	admin := &runtimeAdmin{configPath: path, requests: newRequestRegistry(t.Context()), pool: pool, service: &trackedService{pool: pool}}
+	admin := &runtimeAdmin{configPath: path, requests: newTestRequestRegistry(t), pool: pool, service: &trackedService{pool: pool}}
 	for _, enabled := range []bool{true, false} {
 		value.AntiTruncation = enabled
 		updated, err := admin.UpdateRuntimeConfig(t.Context(), value)
@@ -58,10 +60,11 @@ func TestAntiTruncationDisableSurvivesConcurrentStartup(t *testing.T) {
 	}
 	manager := &runtimeManager{
 		lifecycle: ctx, configPath: path, activeManagement: cfg, logs: &logOutput{},
-		current: configTestGeneration(ctx, path, cfg),
+		current: configTestGeneration(t, ctx, path, cfg),
 	}
+	manager.settings.Store(requestSettingsOf(cfg))
 	building, release := make(chan struct{}), make(chan struct{})
-	next := configTestGeneration(ctx, path, cfg)
+	next := configTestGeneration(t, ctx, path, cfg)
 	manager.factory = func(launch, _ context.Context, snapshot config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
 		close(building)
 		select {

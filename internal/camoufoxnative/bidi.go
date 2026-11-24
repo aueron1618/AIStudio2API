@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/Mag1cFall/AIStudio2API/internal/waa/rhythm"
 )
 
 // bidiCommandTimeout 为单条 BiDi 命令等待响应的最长时间
@@ -43,8 +45,14 @@ type bidiClient struct {
 	denial *AccessDenial
 	// listener 接收 BiDi 事件，在读取连接的协程中调用
 	listener func(map[string]any)
+	// rhythm 是账户点击与粘贴的事件节奏，决定可信指针与键盘动作中的停顿
+	rhythm rhythm.Rhythm
 	// loads 是正在载入官网页面的标签页记下的网络状态，键为标签页的 context
 	loads map[string]*pageLoad
+	// browser 是提供这条连接的 Camoufox 进程，连接断开时据它判断浏览器是否已退出
+	browser *browserProcess
+	// writeErr 是第一次写出失败的原因，连接因此关闭时作为连接断开的原因
+	writeErr error
 }
 
 // pageLoad 是一个标签页载入官网页面期间从网络事件记下的状态
@@ -71,18 +79,25 @@ type bidiCommandError struct {
 	message string
 }
 
+// commandErrorContains 判断 err 是否为消息含 text 的 BiDi 命令错误
+func commandErrorContains(err error, text string) bool {
+	var command *bidiCommandError
+	return errors.As(err, &command) && strings.Contains(command.message, text)
+}
+
 func (err *bidiCommandError) Error() string {
 	return fmt.Sprintf("BiDi %s 失败: %s", err.method, err.code+": "+err.message)
 }
 
-// newBiDiClient 创建 WebDriver BiDi 客户端，读取协程按命令 ID 交付响应并分发事件，多条命令可同时等待响应
-func newBiDiClient(connection *websocket.Conn) *bidiClient {
+// newBiDiClient 创建 browser 进程上的 WebDriver BiDi 客户端，读取协程按命令 ID 交付响应并分发事件，多条命令可同时等待响应
+func newBiDiClient(connection *websocket.Conn, browser *browserProcess) *bidiClient {
 	client := &bidiClient{
 		connection: connection,
 		pending:    make(map[int]bidiPending),
 		channels:   make(map[string]*bidiChannel),
 		done:       make(chan struct{}),
 		loads:      make(map[string]*pageLoad),
+		browser:    browser,
 	}
 	go client.read()
 	return client
@@ -93,7 +108,7 @@ type bidiResponse struct {
 	err    error
 }
 
-// command 发送一条 BiDi 命令并等待其响应，调用方取消或超过 bidiCommandTimeout 时立即返回，迟到的响应被丢弃
+// command 发送一条 BiDi 命令并等待其响应，调用方取消或超过 bidiCommandTimeout 时立即返回，迟到的响应被丢弃；写出失败时关闭连接并等待连接失败的原因，调用方取消或超时时返回写出错误
 func (client *bidiClient) command(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -123,8 +138,17 @@ func (client *bidiClient) command(ctx context.Context, method string, params map
 	select {
 	case err := <-written:
 		if err != nil {
-			client.forget(id)
-			return nil, err
+			if errors.Is(err, ctx.Err()) {
+				client.forget(id)
+				return nil, err
+			}
+			select {
+			case result := <-response:
+				return nil, result.err
+			case <-ctx.Done():
+				client.forget(id)
+				return nil, err
+			}
 		}
 	case <-ctx.Done():
 		client.forget(id)
@@ -140,12 +164,22 @@ func (client *bidiClient) command(ctx context.Context, method string, params map
 }
 
 // write 写出一条消息
-func (client *bidiClient) write(ctx context.Context, message map[string]any) error {
+func (client *bidiClient) write(ctx context.Context, message map[string]any) (err error) {
 	client.writeLock.Lock()
 	defer client.writeLock.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			client.mu.Lock()
+			if client.writeErr == nil {
+				client.writeErr = err
+			}
+			client.mu.Unlock()
+			_ = client.connection.Close()
+		}
+	}()
 	// A caller deadline must not permanently corrupt the shared WebSocket writer.
 	if err := client.connection.SetWriteDeadline(time.Now().Add(bidiCommandTimeout)); err != nil {
 		return err
@@ -195,9 +229,17 @@ func (client *bidiClient) respond(id int, message map[string]any) {
 	pending.response <- bidiResponse{result: result}
 }
 
-// fail 记录连接失败并结束全部等待中的命令与通道
+// fail 记录连接失败并结束全部等待中的命令与通道：连接因写出失败而关闭时原因为写出错误，Camoufox 进程随之退出时为写明退出码与最近输出的 browserExited
 func (client *bidiClient) fail(err error) {
-	failure := fmt.Errorf("BiDi 连接已断开: %w", err)
+	client.mu.Lock()
+	if client.writeErr != nil {
+		err = client.writeErr
+	}
+	client.mu.Unlock()
+	failure := client.browser.exitFailure(browserExitWait)
+	if failure == nil {
+		failure = fmt.Errorf("BiDi 连接已断开: %w", err)
+	}
 	client.mu.Lock()
 	client.failure = failure
 	pending, channels := client.pending, client.channels
@@ -621,7 +663,8 @@ func waitContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// servicePreloadFunction 是先于官网页面脚本执行的 preload，只在仍在解析的顶层官网文档中生效：第一个 bundle 写入 default_MakerSuite 时把它恢复为普通数据属性，并在随后的微任务中定位官网 WAA service 类（原型带 initialize，getMetadata 返回 X-Goog-Api-Key），该类实例首次调用 getMetadata 时换回原方法并经通道交出实例
+// servicePreloadFunction 是先于官网页面脚本执行、经通道交出官网 WAA service 实例的 preload
+// 只在仍在解析的顶层官网文档中生效；实例首次调用 getMetadata 时换回原方法并交出实例
 const servicePreloadFunction = `emit => {
   if (window !== window.top || location.origin !== 'https://aistudio.google.com' || document.readyState !== 'loading') return;
   Object.defineProperty(window, 'default_MakerSuite', {configurable: true, enumerable: true, get: () => undefined, set: namespace => {

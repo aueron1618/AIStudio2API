@@ -35,11 +35,17 @@ func quotaCooldownReason(reason string) bool {
 // planLimitBackoff 为没有恢复时间的套餐限额与短期限额按连续次数递增的冷却时长
 var planLimitBackoff = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour}
 
+// rejectedSizeBackoff 为套餐限额与每日限额的拒绝记录失效后再次被拒时依次进入的有效期
+var rejectedSizeBackoff = []time.Duration{5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour}
+
 // quotaLimitPattern 匹配额度错误中逐项列出的额度上限
 var quotaLimitPattern = regexp.MustCompile(`\blimit:\s*(\d+)`)
 
-// usageLimitResetPattern 匹配套餐限额错误中 resets in 之后的小时与分钟
-var usageLimitResetPattern = regexp.MustCompile(`resets in (?:(\d+) hours?)?(?:, )?(?:(\d+) minutes?)?`)
+// usageLimitResetPattern 匹配套餐限额错误中 resets in 之后的恢复等待时长片段
+var usageLimitResetPattern = regexp.MustCompile(`resets in\s+(\d+\s+(?:days?|hours?|minutes?|seconds?)(?:(?:,\s*(?:and\s+)?|\s+and\s+|\s+)\d+\s+(?:days?|hours?|minutes?|seconds?))*)`)
+
+// usageLimitResetUnitPattern 匹配恢复等待时长片段中的每一项数值与单位
+var usageLimitResetUnitPattern = regexp.MustCompile(`(\d+)\s+(day|hour|minute|second)s?`)
 
 // CooldownState 表示账户或模型暂时不可调度的状态
 type CooldownState struct {
@@ -48,11 +54,22 @@ type CooldownState struct {
 	Level  int       `json:"level,omitempty"`
 	// Fallback 是套餐限额或每日限额冷却期间，忽略这两类冷却的回退选号另受的较早结束的冷却
 	Fallback *CooldownState `json:"fallback,omitempty"`
+	// RejectedSize 是套餐限额或每日限额冷却期间上游在 RejectedUntil 之前以额度拒绝过的最小请求输入字节数
+	RejectedSize int64 `json:"rejected_size,omitempty"`
+	// RejectedUntil 是 RejectedSize 失效的时刻
+	RejectedUntil time.Time `json:"rejected_until,omitzero"`
+	// RejectedLevel 是拒绝记录有效期在 rejectedSizeBackoff 中的档位，取值范围 1..len(rejectedSizeBackoff)
+	RejectedLevel int `json:"rejected_level,omitempty"`
 }
 
 // Active 判断冷却状态当前是否生效
 func (c CooldownState) Active(now time.Time) bool {
 	return !c.Until.IsZero() && now.Before(c.Until)
+}
+
+// rejects 判断上游在拒绝记录有效期内以套餐限额或每日限额拒绝过不大于 size 的请求
+func (c CooldownState) rejects(size int64, now time.Time) bool {
+	return now.Before(c.RejectedUntil) && size >= c.RejectedSize
 }
 
 // QuotaCooldown 表示上游额度限制对应的调度冷却
@@ -64,6 +81,8 @@ type QuotaCooldown struct {
 	Escalate bool
 	// Explicit retry times supersede inferred backoff, not a known daily reset.
 	explicitRetry bool
+	// RequestSize 是被拒请求输入正文的字节数，0 表示未知
+	RequestSize int64
 }
 
 // QuotaCooldownForError 解析上游分钟、每日或套餐额度限制
@@ -121,7 +140,7 @@ func BuildRejectionCooldown(err error) (QuotaCooldown, bool) {
 // AccountRejectionKind 是上游以 403、协议错误码 7 暂时拒绝账户时冷却的类型名，也是其冷却原因的前缀
 const AccountRejectionKind = "权限拒绝"
 
-// AccountRejectionCooldown 返回上游以 403、协议错误码 7 拒绝账户且官网不跳转拒绝页时，按账户与模型以 planLimitBackoff 递增的冷却
+// AccountRejectionCooldown 返回上游以 403、协议错误码 7 拒绝账户且官网不跳转拒绝页时的冷却：账户在该模型上自上次成功后第一次被拒只记下不冷却，再被拒时以 planLimitBackoff 递增
 func AccountRejectionCooldown(err error) (QuotaCooldown, bool) {
 	var rpcError *RPCError
 	if !errors.As(err, &rpcError) || rpcError.StatusCode != http.StatusForbidden || rpcError.Code != 7 || rpcError.accessDenial() != nil {
@@ -151,12 +170,30 @@ func zeroQuotaLimit(message string) bool {
 // usageLimitReset 返回套餐限额错误写明的恢复等待时长
 func usageLimitReset(message string) (time.Duration, bool) {
 	match := usageLimitResetPattern.FindStringSubmatch(message)
-	if match == nil || match[1] == "" && match[2] == "" {
+	if match == nil {
 		return 0, false
 	}
-	hours, _ := strconv.Atoi(match[1])
-	minutes, _ := strconv.Atoi(match[2])
-	return time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute, true
+	var total time.Duration
+	for _, unit := range usageLimitResetUnitPattern.FindAllStringSubmatch(match[1], -1) {
+		value, err := strconv.Atoi(unit[1])
+		if err != nil {
+			continue
+		}
+		switch unit[2] {
+		case "day":
+			total += time.Duration(value) * 24 * time.Hour
+		case "hour":
+			total += time.Duration(value) * time.Hour
+		case "minute":
+			total += time.Duration(value) * time.Minute
+		case "second":
+			total += time.Duration(value) * time.Second
+		}
+	}
+	if total <= 0 {
+		return 0, false
+	}
+	return total, true
 }
 
 // planLimitCooldown 按同一范围上一次套餐限额冷却计算本次冷却；上一次仍未结束时沿用它
@@ -169,6 +206,25 @@ func planLimitCooldown(previous CooldownState, exists bool, now time.Time, reaso
 		level = min(previous.Level, len(planLimitBackoff)-1) + 1
 	}
 	return CooldownState{Until: now.Add(planLimitBackoff[level-1]).UTC(), Reason: reason, Level: level}
+}
+
+// samePlanWindow 判断两个套餐限额冷却的恢复时刻相差不到一分钟，套餐限额的恢复时间只精确到分钟
+func samePlanWindow(previous, next CooldownState) bool {
+	return strings.HasPrefix(previous.Reason, PlanLimitKind) && strings.HasPrefix(next.Reason, PlanLimitKind) && next.Until.Sub(previous.Until).Abs() < time.Minute
+}
+
+// withRejection 返回沿用 previous 的拒绝记录的冷却，size 大于 0 时再记下上游以套餐限额或每日限额拒绝了 size 字节的请求：记录仍有效时取较小的字节数，已失效时进入下一档有效期
+func (c CooldownState) withRejection(previous CooldownState, size int64, now time.Time) CooldownState {
+	c.RejectedSize, c.RejectedUntil, c.RejectedLevel = previous.RejectedSize, previous.RejectedUntil, previous.RejectedLevel
+	switch {
+	case size <= 0:
+	case now.Before(previous.RejectedUntil):
+		c.RejectedSize = min(size, previous.RejectedSize)
+	default:
+		c.RejectedLevel = min(previous.RejectedLevel+1, len(rejectedSizeBackoff))
+		c.RejectedSize, c.RejectedUntil = size, now.Add(rejectedSizeBackoff[c.RejectedLevel-1]).UTC()
+	}
+	return c
 }
 
 func minuteQuotaEvidence(value string) bool {

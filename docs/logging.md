@@ -34,7 +34,9 @@
 
 `INFO` 记录状态推进和完成结果，`WARN` 记录等待、切换与客户端取消，`ERROR` 记录失败结果。管理页面支持按级别、来源、消息、阶段名、字段名与字段取值筛选，日志正文可以选择和横向滚动。
 
-带 `stage` 的运行事件在页面上按来源与阶段名合并为一张卡片，显示阶段名、当前进度 `step/steps` 与最新一步的消息和字段。带 `state` 的事件结束同一来源进行中的卡片并显示结束状态；步骤号不大于当前步骤时另起一张卡片。卡片位于首条消息的时间位置，展开详情可查看每一步的时间、消息与字段；级别、来源和文本筛选在任一步命中时显示该卡片。
+页面每行的消息列依次为展开箭头、状态标签、标题与字段、行尾耗时，各行标题左缘对齐：请求的状态标签为 HTTP 状态或“处理中”，阶段为进度或结束状态名，单条运行事件没有状态标签；字段 `duration` 显示在行尾。展开的详情从行首开始。
+
+带 `stage` 的运行事件在页面上按来源与阶段名合并为一张卡片，显示阶段名、当前进度 `step/steps` 与最新一步的消息和字段。带 `state` 的事件结束同一来源进行中的卡片并显示结束状态，没有进行中的卡片时自成一张已结束的卡片；步骤号不大于当前步骤时另起一张卡片。卡片位于首条消息的时间位置，展开详情可查看每一步的时间、消息与字段；级别、来源和文本筛选在任一步命中时显示该卡片。
 
 请求错误保存在 `request.error` 并直接展示在请求行下方。未授权（401）行不展示模型、账户、正文或原始路径，避免把请求中的凭据当成诊断文本。运行事件的错误保存在字段 `error`，原因保存在字段 `reason`，页面在消息下另起一行显示。
 
@@ -49,17 +51,26 @@ INFO  service  [运行时装配 1/3] 载入账户
 INFO  service  [运行时装配 2/3] 使用 SpiderMonkey WAA 后端 accounts=28
 INFO  service  [运行时装配 3/3] 创建协议客户端 egress=直连
 INFO  service  [运行时装配 completed] 协议运行时就绪 accounts=28 duration=31ms
-INFO  service  管理监听启动 addr=127.0.0.1:2048
-INFO  service  管理服务就绪 addr=http://127.0.0.1:2048
+INFO  service  [管理服务启动 1/2] 管理监听启动 addr=127.0.0.1:2048
+INFO  service  [管理服务启动 2/2] 预览监听启动 addr=127.0.0.1:2050
+INFO  service  [管理服务启动 completed] 管理服务就绪 addr=http://127.0.0.1:2048 duration=3ms
 INFO  service  管理页面已打开 addr=http://127.0.0.1:2048
 ```
 
-点击“启动服务”后状态进入 `LAUNCHING`。服务先读取当前 `generation`（一次启动所创建的生成服务实例）的 `CachedModels`。缓存非空时立即预热 Worker，首个 Worker 有结果后读取 `enabled` 且处于 `ready`、`busy` 或 `cooldown` 的账户中目录缓存缺失或最近一次同步已满 24 小时的账户会话页面载入时的权益与 `ListModels` 目录；没有模型缓存的 generation 先同时读取这些账户的页面目录，等待首个非空真实目录后预热 Worker，其余账户继续后台同步。首个 Worker 就绪后状态进入 `RUNNING` 并开始接收请求，其余目标 Worker 继续预热；可预热的账户全部处于冷却时记录 `WAA Worker 预热等待账户冷却`（`until` 为恢复时间）并直接进入 `RUNNING`，冷却期内的请求按冷却规则排队或返回 429，冷却结束后开始预热。`LAUNCHING` 期间点击“停止服务”会取消当前阶段并回到 `STOPPED`。
+点击“启动服务”后状态进入 `LAUNCHING`，服务先读取当前 `generation`（一次启动所创建的生成服务实例）的 `CachedModels`：
+
+- 缓存非空时状态进入 `RUNNING` 并开始接收请求，Worker 在后台预热；首个 Worker 有结果后，读取 `enabled` 且处于 `ready`、`busy` 或 `cooldown` 的账户中目录缓存缺失或最近一次同步已满 24 小时的账户会话页面载入时的权益与 `ListModels` 目录
+- 没有模型缓存的 generation 先同时读取这些账户的页面目录，取得首个非空真实目录后进入 `RUNNING` 并在后台预热 Worker，其余账户继续后台同步
+- 预热的首个 Worker 有结果之前到达的请求等待这个 Worker（指定账户的请求直接启动该账户的 Worker），之后热池未满时请求按需启动所选账户的 Worker；首轮目录同步完成后预热仍失败时记录 `WAA Worker 预热失败`（`error` 为原因），生成服务保持 `RUNNING`
+- 可预热的账户全部处于冷却时记录 `WAA Worker 预热等待账户冷却`（`until` 为恢复时间）；冷却期内的请求按冷却规则排队或返回 429，冷却结束后开始预热
+- `LAUNCHING` 期间点击“停止服务”会取消当前阶段并回到 `STOPPED`
+- 有模型缓存时第 1 步记录 `准备模型目录`（`cached_models` 为缓存的模型数）；配置了多个代理时先记录 `检测代理池`；管理页侧栏在启动与停止期间显示同样的步骤与已用时间
 
 下面是显式配置正数热池的示例，不是默认容量。默认 `0/1/1/1` 跳过常驻预热；启动或刷新目录所需的页面、重载和请求 Worker 仍共用活动及启动预算，多个账户可排队但不能无界同时启动。
 
 ```text
-INFO  service              [生成服务启动 1/2] 准备模型目录 cached_models=0
+INFO  service              [生成服务启动] 开始启动生成服务 accounts=28
+INFO  service              [生成服务启动 1/2] 等待首个账户读取模型目录
 INFO  service              [生成服务启动 2/2] 预热 WAA Worker models=39 target_workers=5
 INFO  service              模型目录后台同步完成 cached_accounts=0 synced_accounts=28 nonempty_accounts=28 models=39 retry_accounts=0 duration=2.792s
 INFO  account@example.com  [WAA Worker 启动 completed] WAA Worker 就绪 page_model=gemini-flash-latest pid=18240 duration=8.172s
@@ -67,7 +78,17 @@ INFO  service              [生成服务启动 completed] 生成服务就绪 mod
 INFO  service              WAA Worker 预热完成 workers=5/5 duration=34.903s
 ```
 
-`准备模型目录` 的 `cached_models` 是启动瞬间当前 generation 合并后的真实模型数。`模型目录后台同步完成` 的 `cached_accounts` 是目录缓存未满 24 小时、本次启动不载入页面的账户数，`synced_accounts` 是本次无错误返回的账户数，包含空目录；`nonempty_accounts` 是返回非空真实目录的账户数；`models` 是合并后的公共模型数；`retry_accounts` 是 `pending set`（等待重试的账户 ID 集合）的大小。每个非空结果到达时已经写入公共目录、发布管理事件并在运行期预热更多 Worker，因此后台完成日志可以出现在 `生成服务就绪` 之后。
+`准备模型目录` 的 `cached_models` 是启动瞬间当前 generation 合并后的真实模型数。`模型目录后台同步完成` 的字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `cached_accounts` | 目录缓存未满 24 小时、本次启动沿用缓存的账户数 |
+| `synced_accounts` | 本次无错误返回的账户数，包含空目录 |
+| `nonempty_accounts` | 返回非空真实目录的账户数 |
+| `models` | 合并后的公共模型数 |
+| `retry_accounts` | `pending set`（等待重试的账户 ID 集合）的大小 |
+
+每个非空结果到达时已经写入公共目录、发布管理事件并在运行期预热更多 Worker，因此后台完成日志可以出现在 `生成服务就绪` 之后。
 
 目录为空、单账户同步失败或单账户同步成功但仍为空的账户进入 pending ID 集合。启动期同步结束后，处于 `RUNNING` 的生成服务使用单个 30 秒 ticker（定时器）重新载入全部 pending 账户的页面再次读取目录；非空成功立即更新账户、模型和 Worker 选择，失败与空结果继续保留：
 
@@ -76,6 +97,8 @@ INFO  account@example.com  模型目录已更新 models=39
 ```
 
 同一循环从启动期同步开始时起每 24 小时按权益从高到低、同权益按账户 ID 的顺序逐个重新载入全部 `enabled` 且处于 `ready`、`busy` 或 `cooldown` 的账户的页面读取权益与 `ListModels` 目录，没有空闲并发槽位或正在冷却的账户在本轮最后等到槽位空闲再读。当前 Worker 的重载与新建临时目录页都受统一活动/启动预算约束，满载时不会另开预算外页面。请求模型不在目录时，巡检正在读取一轮的首个账户则等它读完；没有进行中的一轮且距上轮开始超过 10 分钟时触发刷新，先等待首个账户结果，其余在后台继续。订阅模型额度错误也可触发该账户刷新。权益或模型数变化时更新调度与公开目录，读取失败记录原因并加入 pending ID 集合，登录失效的账户转为需要登录：
+
+巡检日志：
 
 ```text
 INFO  account@example.com  WAA Worker 页面已重新载入 duration=4.521s
@@ -103,16 +126,17 @@ ERROR  service  [生成服务启动 failed] 生成服务启动失败 duration=2.
 
 启动失败、取消或 Stop 会通过 Go `context` 的取消信号停止模型目录 fan-out，并最多等待 2 秒；超时错误为 `模型目录刷新停止超时`。控制请求等待正在进行的启动或停止操作最多 12 秒，对应 `生成服务启动停止超时`、`生成服务停止超时` 或 `生成服务切换停止超时`；这些错误与 Worker 清理错误进入同一错误链。
 
-停止生成服务会保留管理监听器，并记录 Worker 数和总耗时：
+停止生成服务会保留管理监听器，各行属于阶段“生成服务停止”，日志页合成一行，记录 Worker 数和总耗时；服务本来就停着时不写日志：
 
 ```text
 INFO   service  生成服务停止 workers=5
+INFO   service  停止在途请求 requests=2
+INFO   service  关闭 WAA Worker workers=5
 INFO   service  生成服务已停止 duration=3.204s
-INFO   service  生成服务已处于停止状态
 ERROR  service  生成服务停止失败 duration=10.006s error=<JOINED_ERROR>
 ```
 
-`服务配置已保存` 表示 `.env` 已写入。管理登录与监听配置通过进程重启应用；API key 列表、容量、路由、账户绑定和 anti/auto 等热配置保存后立即应用，其他生成服务配置通过 Stop/Start 应用。Web 修改 key 时写入的 `PROXY_API_KEY_WEB_OVERRIDE=true` 保证保存的 key 在重启后仍优先于进程环境，以设置页的生效提示为准。
+`服务配置已保存` 表示 `.env` 已写入。管理登录与监听配置通过进程重启应用；API key 列表、容量、路由、账户绑定和 anti/auto 等热配置保存后立即应用。模型映射、非流式保活、假流式、搜索型号、全模型搜索、独立思考引导、用户文字改写与媒体输出作用于新请求；其他生成服务配置通过 Stop/Start 应用。Web 修改 key 时写入的 `PROXY_API_KEY_WEB_OVERRIDE=true` 保证保存的 key 在重启后仍优先于进程环境，以设置页的生效提示为准。
 
 ### Worker 生命周期
 
@@ -131,7 +155,27 @@ INFO  account@example.com  [WAA Worker 启动 7/7] 执行 WAA Bootstrap
 INFO  account@example.com  [WAA Worker 启动 completed] WAA Worker 就绪 page_model=gemini-flash-latest pid=18240 duration=10.842s
 ```
 
-启动失败记录页面模型、耗时和原始错误。按需容量事件说明当前热池动作：
+启动失败记录页面模型、耗时和原始错误。
+
+Worker 运行中或浏览器登录期间 Camoufox 退出时，错误写明退出码与 Camoufox 最近 20 行输出（见 [Camoufox 后端](development.md#camoufox-后端)），据此判断原因：
+
+- Windows 上退出码 `0xC0000409` 为浏览器崩溃；浏览器被其他程序强制结束时退出码由该程序决定，`taskkill /F` 为 `0x00000001`，PowerShell `Stop-Process` 为 `0xFFFFFFFF`；最近的输出给出崩溃前 Camoufox 打印的内容
+- 错误为 `BiDi 连接已断开` 时，浏览器进程在连接断开 5 秒后仍在运行
+- 浏览器登录期间退出码为 0 时，错误为 `登录窗口已关闭，登录没有完成`，表示登录窗口被关闭
+
+热池动作记录在它引起的 Worker 启动或停止阶段中，字段 `trigger` 为起因，`workers` 为动作完成后的热池 Worker 数与 `MAX_ACTIVE_WORKERS`：
+
+| 起因 | 记录位置 | 语义 |
+| --- | --- | --- |
+| `trigger=scale_up workers=N/M` | `WAA Worker 就绪` | 活动 Worker 超出常驻名额、未达 `MAX_ACTIVE_WORKERS`，新 Worker 成功发布 |
+| `trigger=replace workers=N/M` | `WAA Worker 就绪` | `pending Worker`（正在启动的替代 Worker）成功启动并替换一个空闲 Worker |
+| `trigger=replace` | 被替换账户的 `WAA Worker 停止` 阶段 | 空闲 Worker 为替代 Worker 让出名额 |
+| `trigger=idle_reclaim workers=N/M` | `WAA Worker 已停止` | 超出热池目标的 Worker 空闲 5 分钟后关闭 |
+
+```text
+INFO   account@example.com  [WAA Worker 启动 completed] WAA Worker 就绪 trigger=scale_up workers=11/20 page_model=gemini-flash-latest pid=18240 duration=4.78s
+INFO   account@example.com  [WAA Worker 停止 completed] WAA Worker 已停止 trigger=idle_reclaim workers=10/20 pid=18240 duration=136ms
+```
 
 | 事件 | 语义 |
 | --- | --- |
@@ -142,12 +186,12 @@ INFO  account@example.com  [WAA Worker 启动 completed] WAA Worker 就绪 page_
 | `WAA Worker 重建，重放当前请求` | 当前账户 Worker 已失效，业务请求在新实例重放；`reason` 为触发重建的错误 |
 | `WAA Worker 已更新，重放当前请求` | 并发路径已经替换 Worker，当前请求使用新实例 |
 
-单个 Worker 停止事件：
+单个 Worker 停止经 `WAA Worker 停止` 阶段写入同一张卡片：
 
 ```text
-INFO   account@example.com  WAA Worker 停止 pid=18240
-INFO   account@example.com  WAA Worker 已停止 pid=18240 duration=3.014s
-ERROR  account@example.com  WAA Worker 停止失败 pid=18240 duration=10.002s error=<JOINED_ERROR>
+INFO   account@example.com  [WAA Worker 停止] WAA Worker 停止 pid=18240
+INFO   account@example.com  [WAA Worker 停止 completed] WAA Worker 已停止 pid=18240 duration=3.014s
+ERROR  account@example.com  [WAA Worker 停止 failed] WAA Worker 停止失败 pid=18240 duration=10.002s error=<JOINED_ERROR>
 ```
 
 关闭时先进行有界卸载上报，再依次执行三个资源关闭阶段：
@@ -164,6 +208,10 @@ ERROR  account@example.com  WAA Worker 停止失败 pid=18240 duration=10.002s e
 ## API 请求
 
 请求事件通过 `request.id` 关联。页面将开始、进展和结束合并为一行，展示最新账户、HTTP 状态、模型、耗时和输出统计；请求换过账户时标题行显示换号次数与按上游 HTTP 状态的分组计数。详情展开后才渲染接口、用量、终止原因和时间线，原始 JSON 需要进一步展开，折叠时释放格式化视图。时间线中每次换号为一行，显示账户、上游状态、按状态归类的原因与上游原文，点击展开该账户的全部事件；连续的同类进度事件合为一行并标出次数，悬停次数查看每一次的时刻与字段。
+
+- 进行中的请求在标题行显示所处阶段：等待执行、已发出等待上游或正在输出，以及距最近一次数据的时长；换号后重新排队时回到等待执行
+- 时间线中每次换号为一行，显示账户、上游状态、按状态归类的原因与上游原文，点击展开该账户的全部事件；请求的来源按换号顺序写成 `A → B`，上游要求验证账户的 403 归为“需要验证账户”，跳转到拒绝页的归为“服务受限”
+- 时间线每步一行，依次为时刻、消息与耗时（`duration` 或 `waited`），其余字段在下方按名称与取值对齐；`等待模型继续输出` 与随后的 `模型继续输出` 合为一行“停顿 N 后继续”；`rpc`、`mode`、`network_bytes`、`network_idle`、`reasoning_events`、`text_events`、`last_event`、`current_event` 以及与卡片相同的模型和通道只在 JSON 中
 
 ```text
 22:11:47  200  gemini-3.8-flash  换号 5  403 ×3  429 ×2  4.76 s  工具调用 1
@@ -193,15 +241,21 @@ ERROR  account@example.com  WAA Worker 停止失败 pid=18240 duration=10.002s e
 {"time":"2026-09-06T22:11:47.248+08:00","level":"INFO","msg":"工具调用完成","event":"request.finished","source":"account@example.com","request":{"id":"chatcmpl_example","state":"tool_calls","model":"gemini-3.8-flash","status":200,"duration_ms":4758,"tool_calls":1,"finish_reason":"stop","usage":{"input_tokens":100,"cached_tokens":0,"reasoning_tokens":32,"reply_tokens":38,"output_tokens":70,"total_tokens":170,"average_tokens_per_second":14.712064}}}
 ```
 
-采样参数保存在 `request.parameters`。`first_event_ms`、`queue_ms`、`proof_ms` 和 `upstream_bytes` 作为 JSON 诊断字段保留：`queue_ms` 是请求进入服务到取得最终执行账户的时间，`proof_ms` 是等待并生成 WAA proof 的累计时间。页面支持按级别、账户以及模型、请求 ID、状态码搜索。
+采样参数保存在 `request.parameters`。`first_event_ms`、`queue_ms`、`proof_ms` 和 `upstream_bytes` 作为 JSON 诊断字段保留：
+
+- `queue_ms` 是请求进入服务到取得最终执行账户的时间
+- `proof_ms` 是等待并生成 WAA proof 的累计时间
+- `proof_phases` 把 `proof_ms` 分为等待页面 `lock_ms`、页面操作 `interaction_ms`（到页面应用发出请求为止）、等待 WAA 刷新 `refresh_ms` 与 WAA 计算 `compute_ms`；请求卡片展开后的“WAA 耗时”与用量页请求详情按这四项显示
+
+页面支持按级别、账户以及模型、请求 ID、状态码搜索。
 
 客户端取消记录为 `499`；认证、额度和上游失败分别使用对应 HTTP 状态与 `request.error`。
 
-管理端取消活动请求或停止生成服务时，仍连接的客户端按公开协议收到 `503 request_canceled` 或对应的流式 error event。
+管理端取消活动请求时，仍连接的客户端按公开协议收到 `503 request_canceled` 或对应的流式 error event；停止生成服务时收到 `503 service_stopped` 或对应的流式 error event，错误消息写明生成服务已停止。
 
 ## 流式等待
 
-连续 15 秒没有阶段进展时会写入诊断日志。请求在收到上游终态、客户端取消或达到 `REQUEST_TIMEOUT` 时结束。
+连续 15 秒没有阶段进展时会写入诊断日志。请求在收到上游终态、客户端取消或上游连续 `REQUEST_TIMEOUT` 没有数据时结束。流在完成前中断或上游异常结束而重新生成时，记一条“重新生成”，`attempt` 为第几次，`reason` 为中断错误或结束原因。
 
 | 事件 | 当前停留位置 | 重点字段 |
 | --- | --- | --- |
@@ -212,9 +266,12 @@ ERROR  account@example.com  WAA Worker 停止失败 pid=18240 duration=10.002s e
 | `等待模型继续输出` | 已有语义事件，连续 15 秒没有下一事件；模型在正文之后生成函数调用参数时，上游生成完整个调用才发出；上游在输出中途审核后续内容时，审完放出剩余内容或以 `OTHER` 拦截结束；两种情况期间连接上都没有数据 | `last_event`、`reasoning_events`、`text_events`、`network_bytes`、`network_idle` |
 | `模型继续输出` | 等待后解出下一语义事件 | `waited`、`current_event` |
 | `账号切换` | 当前账户在首个上游语义事件前失败，或非流式请求的上游流中途中断，额度以外的失败最多换 `MAX_ACCOUNT_SWITCHES` 次；`续写轮账号切换` 为自动续写轮在当前账户上失败后换账户重发 | 当前账户来源、`model`、上游 HTTP 状态 `status` 与协议错误码 `code`、原始原因 `reason` |
+| `同模型同通道最近两个请求都因连接断开失败，本请求也连续两次连接断开，停止重试` | 同一模型与通道最近两个请求都在本请求开始前 30 秒内以连接断开失败，本请求在前两个账户上的尝试也都以连接断开失败，以原错误结束 | 当前账户来源、`model`、原始原因 `reason` |
 | `备用请求发起` | 原请求等待首个语义事件达到 `FIRST_EVENT_HEDGE` 的阈值，空闲账户开始同一请求 | 备用账户来源、`primary_waited`、`threshold`、`model` |
 | `备用请求胜出` | 备用请求先解出首个语义事件，原请求取消 | 备用账户来源、`primary_waited`、`model` |
 | `原请求胜出，取消备用请求` | 原请求先解出首个语义事件，备用请求取消 | `hedge_account`、`model` |
+
+`current_step` 写明请求停在哪一步：SpiderMonkey 后端为 `WAA proof` 或 `等待上游响应头`；Camoufox 后端在页面界面运行时依次为 `取得标签页`、`等待其他请求的界面操作`、`选中标签页`、`新开对话`、`粘贴提示词`、`等待 Run 可点`、`点击 Run`（再次运行同一段对话为 `点击 Rerun`，函数结果为 `粘贴函数结果`、`点击提交`）、`等待页面发出请求`，页面发出请求后为 `等待上游响应头`。界面步骤各有上限：取得标签页 2 分钟，等待其他请求的界面操作 2 分钟，选中标签页到点击结束 1 分钟，页面开始运行后 30 秒内发出请求；超过上限时请求以 `界面运行停在<步骤>，<上限> 内没有完成` 失败。
 
 `network_bytes` 是当前账户尝试累计读取的上游响应体字节数，`network_idle` 是最近一次读取距日志时刻的时间。`network_bytes=0` 表示响应体尚未产生数据；数值增长且 `network_idle` 较短，表示网络仍有数据进入、解码器尚未形成新的语义事件。
 
@@ -244,7 +301,7 @@ SSE 客户端把该帧作为连接存活信号，正文、推理和 usage 继续
 
 ## 账户事件
 
-HTTP `401` 会使用账户保存的 OAuth/DBSC 材料续签 Cookie；账户没有材料或材料被拒绝时，从本机 Chrome 导入同一邮箱的材料。随后重置 WAA Worker 并重放一次请求。同一账户在续签完成前发出的请求同时收到 `401` 时只续签一次，其余请求等这次续签完成后直接重放。
+HTTP `401` 会使用账户保存的 OAuth/DBSC 材料续签 Cookie；材料被拒绝时，从本机 Chrome 重新导入同一 Google 账户的材料。随后重置 WAA Worker 并重放一次请求。没有 OAuth 材料的账户按认证恢复失败处理。同一账户在续签完成前发出的请求同时收到 `401` 时只续签一次，其余请求等这次续签完成后直接重放。
 
 ```text
 INFO  account@example.com  [账户认证续签 1/2] 刷新 Cookie
@@ -254,7 +311,17 @@ INFO  account@example.com  [账户认证续签 completed] 账户认证续签完�
 ERROR account@example.com  [账户认证续签 failed] 账户认证续签失败 duration=1.116s error=<ERROR>
 ```
 
-HTTP `403` 与协议 Code 7 保留当前账户和模型的 `verified` 记录，不标记永久权限失败；官网不跳转拒绝页的这类拒绝让该账户在该模型上按连续次数冷却 1、5、15、30、60 分钟，类型为 `权限拒绝`，成功一次后从 1 分钟重新开始。协议 Code 5、Worker 进程失败或 Worker 被替换时重建当前账户 Worker 并重放一次，额度、权限拒绝与服务受限的失败直接换号、不重放；其他可重试错误写入临时冷却。
+HTTP `403` 与协议 Code 7 保留当前账户和模型的 `verified` 记录。官网不跳转拒绝页的这类拒绝：
+
+- 自上次成功后第一次出现时只换号；没有其他账户可换时在该账户上重试一次，并记 WARN “没有其他账户可换，同账户重试被上游拒绝的请求”
+- 连续第二次起，该账户在该模型上冷却 1、5、15、30、60 分钟，类型为 `权限拒绝`，成功一次后重新计数
+- 全部候选账户都在冷却时，权限拒绝冷却中的账户仍依次接收请求，每个账户一次
+
+其他错误：
+
+- 协议 Code 5、Worker 进程失败或 Worker 被替换时，重建当前账户 Worker 并重放一次
+- 额度、权限拒绝与服务受限的失败直接换号
+- 其他可重试错误写入临时冷却
 
 ```text
 WARN  account@example.com  账号冷却 kind=权限拒绝 scope=gemini-3.7-flash until=2026-11-12T20:41:07+08:00
@@ -269,7 +336,11 @@ WARN  account@example.com  账号切换 model=gemini-3.7-flash status=403 code=7
 | --- | --- |
 | `[账户添加 1/2]`、`[账户添加 2/2]`、`账户添加完成` | 隔离登录、保存认证状态、同步模型目录 |
 | `[账户登录 1/2]`、`[账户登录 2/2]`、`账户登录完成` | 更新当前账户认证材料与 Worker 实例 |
-| `账户配置已更新`、`账户已删除` | 账户配置与运行对象已更新 |
+| `[账户导入 n/m]`、`Chrome 账户已导入`、`认证状态账户已导入`、`账户导入失败` | 读取 Chrome 登录状态、检查 AI Studio 访问、保存账户；结束带耗时 |
+| `[账户刷新 n/m]`、`账户刷新完成`、`账户刷新失败` | 立即刷新的等待在途请求、读取权益与模型目录、核对验证状态；结束带耗时，写明是否解除服务受限 |
+| `等待账户的在途请求结束` | 保存、目录同步或立即刷新在等该账户的请求结束 |
+| `账户配置已更新`、`账户已删除`、`账户删除失败` | 账户配置与运行对象已更新，或删除失败的原因 |
+| `账户停用完成` | 停用后在途请求已结束、Worker 已关闭，带耗时 |
 | `账户模型目录同步完成` | 新目录已写入当前模型目录和账户调度状态 |
 | `账户模型目录等待重试` | 当前同步失败，运行期重试继续处理 |
 
@@ -291,7 +362,24 @@ WARN  account@example.com  账号切换 model=gemini-3.7-flash status=403 code=7
 
 ## 用量账本
 
-`runtime/requests.db` 是本地 SQLite 账本。`/v1` 与 `/v1beta` 通过 API key 校验的每个 POST 请求完成后写入一行：请求 ID、完成时间、协议、路径、模型、账户、通道、HTTP 状态、`request.state`、耗时、首个上游事件、排队时间、token 用量（含缓存命中数）、工具调用数、错误摘要，以及最终结果之前未成功的上游尝试。同一事务按 UTC 小时与服务器本地日累加汇总与耗时分布：完整落在范围与单个分桶内的本地日读取日汇总，其余整小时读取小时汇总，范围边缘与跨分桶的部分读取原始记录。服务器时区变化后，下次启动时从小时汇总与原始记录重建本地日汇总。写入由后台协程批量提交，不阻塞响应：等待写入的记录超过 4096 条时丢弃新记录，写入恢复后输出丢弃数。记录与汇总按服务器本地日整日保留 90 天。管理页的用量看板通过 `GET /api/usage` 与 `GET /api/usage/records` 查询。看板的估算费用按 Gemini API 与 Vertex AI 公布的当前文本单价从原始记录逐条计算，缓存命中的输入按缓存单价计算。
+`runtime/requests.db` 是本地 SQLite 账本。
+
+记录：
+
+- `/v1` 与 `/v1beta` 通过 API key 校验的每个 POST 请求完成后写入一行：请求 ID、完成时间、协议、路径、模型、账户、通道、HTTP 状态、`request.state`、耗时、首个上游事件、排队时间、token 用量（含缓存命中数）、工具调用数、错误摘要，以及最终结果之前未成功的上游尝试
+- 写入由后台协程批量提交，响应照常返回；等待写入的记录超过 4096 条时丢弃新记录，写入恢复后输出丢弃数
+- 记录与汇总按服务器本地日整日保留 90 天
+
+汇总：
+
+- 同一事务按 UTC 小时与服务器本地日累加汇总与耗时分布
+- 查询时完整落在范围与单个分桶内的本地日读取日汇总，其余整小时读取小时汇总，范围边缘与跨分桶的部分读取原始记录
+- 服务器时区变化后，下次启动时从小时汇总与原始记录重建本地日汇总
+
+查询与费用：
+
+- 管理页的用量看板通过 `GET /api/usage`、`GET /api/usage/pairs` 与 `GET /api/usage/records` 查询
+- 看板的估算费用按 Gemini API 与 Vertex AI 公布的当前文本单价从原始记录逐条计算，缓存命中的输入按缓存单价计算
 
 ```text
 INFO  service  请求账本已按服务器时区重建本地日汇总 days=<COUNT>
@@ -319,8 +407,8 @@ ERROR service  请求账本清理失败 error=<ERROR>
 1. `status`
 2. `models`
 3. `accounts`
-4. 最多 2000 条 `log`
+4. 最近 200 条 `log`
 5. `cooldowns`
 6. 按开始时间排序的活动 `request`
 
-后续增量事件类型为 `status`、`models`、`accounts`、`log`、`cooldowns` 和 `request`。每个 SSE `data` 行是 `{"type":"<TYPE>","data":<DTO>}`，其中 `<DTO>` 是对应类型的事件对象；字段定义见 [protocol.md](protocol.md)。
+后续增量事件类型为 `status`、`models`、`accounts`、`log`、`cooldowns` 和 `request`。每个 SSE `data` 行是 `{"type":"<TYPE>","data":<DTO>}`，其中 `<DTO>` 是对应类型的事件对象；字段定义见 [protocol.md](protocol.md)。`status`、`models`、`accounts` 与 `cooldowns` 只在内容与该连接上次收到的不同时发送。

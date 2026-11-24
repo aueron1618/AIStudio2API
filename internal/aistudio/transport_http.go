@@ -45,15 +45,22 @@ type HTTPTransportOptions struct {
 	GlobalProxy string
 }
 
+// accountHTTPClient 保存单个账户当前出口代理对应的 HTTP 客户端
+type accountHTTPClient struct {
+	proxyURL string
+	client   *http.Client
+}
+
 // MakerSuiteHTTPTransport 使用账户固定出口发送普通 RPC
 type MakerSuiteHTTPTransport struct {
-	pool        *AccountPool
-	signer      *Signer
-	headers     ProtocolHeaderProvider
-	globalProxy string
-	now         func() time.Time
-	clientsMu   sync.Mutex
-	clients     map[string]*http.Client
+	pool           *AccountPool
+	signer         *Signer
+	headers        ProtocolHeaderProvider
+	globalProxy    string
+	now            func() time.Time
+	clientsMu      sync.Mutex
+	clients        map[string]*http.Client
+	accountClients map[string]accountHTTPClient
 	// driveMu 保护 driveDiscovered
 	driveMu sync.Mutex
 	// driveDiscovered 记录已按官网页面读取 Drive discovery 文档的账户
@@ -64,6 +71,20 @@ type MakerSuiteHTTPTransport struct {
 
 type accountLeaseContextKey struct{}
 type accountSelectionObserverContextKey struct{}
+
+// residentCatalogContextKey 是 context 中要求账户目录读取在常驻 Worker 的页面上进行的键
+type residentCatalogContextKey struct{}
+
+// ContextWithResidentCatalog 返回要求账户目录读取在常驻 Worker 的页面上进行、不临时载入页面的 ctx
+func ContextWithResidentCatalog(ctx context.Context) context.Context {
+	return context.WithValue(ctx, residentCatalogContextKey{}, true)
+}
+
+// ResidentCatalog 判断 ctx 是否要求账户目录读取在常驻 Worker 的页面上进行
+func ResidentCatalog(ctx context.Context) bool {
+	resident, _ := ctx.Value(residentCatalogContextKey{}).(bool)
+	return resident
+}
 
 // ContextWithAccountLease 将上层已持有的租约传给协议传输
 func ContextWithAccountLease(ctx context.Context, lease *AccountLease) context.Context {
@@ -76,14 +97,14 @@ func AccountLeaseFromContext(ctx context.Context) (*AccountLease, bool) {
 	return lease, ok && lease != nil && lease.Account() != nil
 }
 
-// ContextWithAccountSelectionObserver 观察请求最终选择的账户
-func ContextWithAccountSelectionObserver(ctx context.Context, observer func(*Account)) context.Context {
+// ContextWithAccountSelectionObserver 观察请求最终取得的账户租约
+func ContextWithAccountSelectionObserver(ctx context.Context, observer func(*AccountLease)) context.Context {
 	return context.WithValue(ctx, accountSelectionObserverContextKey{}, observer)
 }
 
-func observeAccountSelection(ctx context.Context, account *Account) {
-	if observer, ok := ctx.Value(accountSelectionObserverContextKey{}).(func(*Account)); ok {
-		observer(account)
+func observeAccountSelection(ctx context.Context, lease *AccountLease) {
+	if observer, ok := ctx.Value(accountSelectionObserverContextKey{}).(func(*AccountLease)); ok && observer != nil {
+		observer(lease)
 	}
 }
 
@@ -100,6 +121,7 @@ func NewMakerSuiteHTTPTransport(options HTTPTransportOptions) (*MakerSuiteHTTPTr
 		globalProxy:     strings.TrimSpace(options.GlobalProxy),
 		now:             time.Now,
 		clients:         make(map[string]*http.Client),
+		accountClients:  make(map[string]accountHTTPClient),
 		driveDiscovered: make(map[string]bool),
 	}
 	if _, err := transport.clientForProxy(transport.globalProxy); err != nil {
@@ -191,7 +213,7 @@ func (t *MakerSuiteHTTPTransport) UploadAssistantFile(ctx context.Context, accou
 	if err != nil {
 		return "", fmt.Errorf("读取账户动态公共头: %w", err)
 	}
-	client, err := t.clientForProxy(account.EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(account)
 	if err != nil {
 		return "", err
 	}
@@ -274,7 +296,7 @@ func (t *MakerSuiteHTTPTransport) UploadAssistantFile(ctx context.Context, accou
 	return path, nil
 }
 
-// Do 发送普通 MakerSuite RPC 并让响应 body 持有租约
+// Do 发送普通 MakerSuite RPC 并让响应 body 持有租约，账户有 WAA Worker 时 pageIssuedRPCs 中的方法与 issuedByPage 上下文中的请求由页面发出
 func (t *MakerSuiteHTTPTransport) Do(ctx context.Context, rpc RPCRequest) (*RPCResponse, error) {
 	lease, owned, err := resolveAccountLease(ctx, t.pool, AccountSelection{AccountID: rpc.AccountID})
 	if err != nil {
@@ -287,6 +309,20 @@ func (t *MakerSuiteHTTPTransport) Do(ctx context.Context, rpc RPCRequest) (*RPCR
 		return errors.Join(requestErr, lease.Release())
 	}
 	account := lease.Account()
+	finish := func() error {
+		if owned {
+			return lease.Release()
+		}
+		return nil
+	}
+	if worker := pageWorker(account.ID); worker != nil && (pageIssuedRPCs[rpc.Method] || ctx.Value(pageIssuedKey{}) != nil) {
+		response, err := worker.SendPageRPC(ContextWithAccountLease(ctx, lease), t.signer, rpc)
+		if err != nil {
+			return nil, releaseOnError(fmt.Errorf("页面发送 MakerSuite %s 请求: %w", rpc.Method, err))
+		}
+		response.Body = &leaseResponseBody{body: response.Body, finish: finish}
+		return response, nil
+	}
 	_, headers, err := prepareProtocolHeaders(ctx, lease, rpc, t.signer, t.headers, t.now(), true)
 	if err != nil {
 		return nil, releaseOnError(err)
@@ -296,7 +332,7 @@ func (t *MakerSuiteHTTPTransport) Do(ctx context.Context, rpc RPCRequest) (*RPCR
 		return nil, releaseOnError(fmt.Errorf("创建 MakerSuite %s 请求: %w", rpc.Method, err))
 	}
 	request.Header = headers
-	client, err := t.clientForProxy(account.EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(account)
 	if err != nil {
 		return nil, releaseOnError(err)
 	}
@@ -310,17 +346,12 @@ func (t *MakerSuiteHTTPTransport) Do(ctx context.Context, rpc RPCRequest) (*RPCR
 			return nil, releaseOnError(fmt.Errorf("合并 MakerSuite %s 响应 Cookie: %w", rpc.Method, err))
 		}
 	}
-	body := &leaseResponseBody{
-		body: response.Body,
-		finish: func() error {
-			if owned {
-				return lease.Release()
-			}
-			return nil
-		},
-	}
+	body := &leaseResponseBody{body: response.Body, finish: finish}
 	return &RPCResponse{StatusCode: response.StatusCode, Header: response.Header.Clone(), Body: body}, nil
 }
+
+// pageIssuedRPCs 是官网页面为对话附件上传自己发出的 RPC，账户有 WAA Worker 时由页面以页面的登录凭据发出
+var pageIssuedRPCs = map[string]bool{"GenerateAccessToken": true, "GetAppFolder": true}
 
 // FetchStatic 经账户的固定出口以 GET 读取官网静态资源
 func (t *MakerSuiteHTTPTransport) FetchStatic(ctx context.Context, accountID string, address string) ([]byte, error) {
@@ -355,8 +386,34 @@ func (t *MakerSuiteHTTPTransport) CloseIdleConnections() {
 	for _, client := range t.clients {
 		client.CloseIdleConnections()
 	}
+	for _, entry := range t.accountClients {
+		entry.client.CloseIdleConnections()
+	}
 }
 
+// clientForAccount 返回账户专用的固定出口客户端，与每账户一个浏览器的 Firefox 一致，按账户隔离连接池、预检缓存与 TLS 票据缓存
+func (t *MakerSuiteHTTPTransport) clientForAccount(account *Account) (*http.Client, error) {
+	proxyURL := account.EffectiveProxy(t.globalProxy)
+	t.clientsMu.Lock()
+	if entry, ok := t.accountClients[account.ID]; ok && entry.proxyURL == proxyURL {
+		t.clientsMu.Unlock()
+		return entry.client, nil
+	}
+	client, err := NewProxyHTTPClient(proxyURL)
+	if err != nil {
+		t.clientsMu.Unlock()
+		return nil, err
+	}
+	previous := t.accountClients[account.ID].client
+	t.accountClients[account.ID] = accountHTTPClient{proxyURL: proxyURL, client: client}
+	t.clientsMu.Unlock()
+	if previous != nil {
+		previous.CloseIdleConnections()
+	}
+	return client, nil
+}
+
+// clientForProxy 返回按代理共用的无凭据客户端，供不带账户 Cookie 与授权头的公开静态资源请求使用
 func (t *MakerSuiteHTTPTransport) clientForProxy(proxyURL string) (*http.Client, error) {
 	t.clientsMu.Lock()
 	defer t.clientsMu.Unlock()
@@ -435,9 +492,11 @@ func prepareProtocolHeaders(
 // CooldownQueueLimit 为全部候选账户冷却时一个请求排队等待恢复的累计上限，覆盖分钟限额窗口
 const CooldownQueueLimit = time.Minute
 
-// QueuedCoolingError 返回全部候选账户冷却时的排队结果：最早恢复的冷却在已排队 queued 之后的上限内且不是权限拒绝冷却时为 nil，否则为 AllCoolingError
-func QueuedCoolingError(modelID string, cooldown CooldownState, queued time.Duration) error {
-	if time.Until(cooldown.Until) <= CooldownQueueLimit-queued && !strings.HasPrefix(cooldown.Reason, AccountRejectionKind) {
+// QueuedCoolingError 返回全部候选账户冷却时的排队结果：最早恢复的冷却在已排队 queued 之后的上限内、不晚于 ctx 的期限且不是权限拒绝冷却时为 nil，否则为 AllCoolingError
+func QueuedCoolingError(ctx context.Context, modelID string, cooldown CooldownState, queued time.Duration) error {
+	deadline, bounded := ctx.Deadline()
+	if time.Until(cooldown.Until) <= CooldownQueueLimit-queued && !(bounded && cooldown.Until.After(deadline)) &&
+		!strings.HasPrefix(cooldown.Reason, AccountRejectionKind) {
 		return nil
 	}
 	return &AllCoolingError{ModelID: modelID, Until: cooldown.Until, Reason: cooldown.Reason}
@@ -465,7 +524,7 @@ func acquireQueuedLease(ctx context.Context, pool *AccountPool, selection Accoun
 		available := len(groups.WarmReady) + len(groups.WarmAvailable) + len(groups.WarmBusy) + len(groups.StandbyReady) + len(groups.StandbyBusy)
 		cooling := available == 0 && !groups.EarliestCooldown.Until.IsZero()
 		if cooling {
-			if err := QueuedCoolingError(selection.ModelID, groups.EarliestCooldown, cooled); err != nil {
+			if err := QueuedCoolingError(ctx, selection.ModelID, groups.EarliestCooldown, cooled); err != nil {
 				return nil, false, err
 			}
 		}
@@ -483,19 +542,19 @@ func acquireQueuedLease(ctx context.Context, pool *AccountPool, selection Accoun
 }
 
 func resolveAccountLease(ctx context.Context, pool *AccountPool, selection AccountSelection) (*AccountLease, bool, error) {
-	selection = selectionWithChannel(ctx, selection)
+	selection = pool.ScopedSelection(ctx, selection)
 	if lease, ok := AccountLeaseFromContext(ctx); ok {
 		if err := validateLeaseSelection(lease, selection); err != nil {
 			return nil, false, err
 		}
-		observeAccountSelection(ctx, lease.Account())
+		observeAccountSelection(ctx, lease)
 		return lease, false, nil
 	}
 	lease, err := pool.AcquireFor(ctx, selection)
 	if err != nil {
 		return nil, false, err
 	}
-	observeAccountSelection(ctx, lease.Account())
+	observeAccountSelection(ctx, lease)
 	return lease, true, nil
 }
 

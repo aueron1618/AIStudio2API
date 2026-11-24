@@ -458,7 +458,7 @@ func TestGoPageCloseCancelsUnreadBodyAndScheduledRequests(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body, Request: request}, nil
 	}}
 	runtime, _ := newTestGoPageRuntime(t, transport)
-	response, err := runtime.SendProtected(t.Context(), "https://fixture.test/protected", http.Header{}, []byte("[]"))
+	response, err := runtime.SendProtected(t.Context(), "https://fixture.test/protected", http.Header{}, protectedBody{data: []byte("[]")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,6 +470,91 @@ func TestGoPageCloseCancelsUnreadBodyAndScheduledRequests(t *testing.T) {
 		t.Fatal("Close retained an unread body or allowed a new timer")
 	}
 	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGoPageCompanionKeepsLeaseAndAdmissionUntilJoined(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		account := &Account{ID: "fixture", Config: AccountConfig{Enabled: true}, State: AccountReady}
+		pool := NewAccountPool([]*Account{account}, 1)
+		lease, err := pool.AcquireFor(t.Context(), AccountSelection{AccountID: account.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lease.Release()
+		runtime, _ := newTestGoPageRuntime(t, &pageTestTransport{roundTrip: func(*http.Request) (*http.Response, error) {
+			t.Fatal("companion fixture must not make a network request")
+			return nil, context.Canceled
+		}})
+		source := ContextWithAccountLease(ContextWithAccountScope(ContextWithAPIKey(ContextWithChannel(t.Context(), ChannelBuild), "admitted-key"), []string{account.ID}), lease)
+		source = ContextWithAccount(source, account.ID)
+		caller, cancel := context.WithCancel(source)
+		defer cancel()
+		started, completed := make(chan struct{}), make(chan struct{})
+		runtime.scheduleContext(caller, 0, func(ctx context.Context) {
+			if got, ok := AccountLeaseFromContext(ctx); !ok || got != lease || ChannelFromContext(ctx) != ChannelBuild || contextAccount(ctx) != account.ID {
+				t.Error("companion lost its leased account or fixed channel")
+			}
+			if key, _ := ctx.Value(apiKeyContextKey{}).(string); key != "admitted-key" {
+				t.Error("companion lost its admitted API key")
+			}
+			if scope, scoped := ctx.Value(accountScopeContextKey{}).([]string); !scoped || len(scope) != 1 || scope[0] != account.ID {
+				t.Error("companion widened its admitted account scope")
+			}
+			close(started)
+			<-ctx.Done()
+			close(completed)
+		})
+		<-started
+		cancel()
+		if err := lease.Release(); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		select {
+		case <-completed:
+			t.Fatal("caller cancellation prematurely stopped a page companion")
+		default:
+		}
+		if next, waitable, err := pool.TryAcquireFor(t.Context(), AccountSelection{AccountID: account.ID}); err != nil || next != nil || !waitable {
+			t.Fatalf("companion released capacity before cleanup: %v, %t, %v", next, waitable, err)
+		}
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-completed:
+		default:
+			t.Fatal("page Close failed to cancel and join its companion")
+		}
+		next, _, err := pool.TryAcquireFor(t.Context(), AccountSelection{AccountID: account.ID})
+		if err != nil || next == nil {
+			t.Fatalf("joined companion retained capacity: %v, %v", next, err)
+		}
+		defer next.Release()
+	})
+}
+
+func TestGoPageCanceledTimerReleasesRetainedLease(t *testing.T) {
+	account := &Account{ID: "fixture", Config: AccountConfig{Enabled: true}, State: AccountReady}
+	pool := NewAccountPool([]*Account{account}, 1)
+	lease, err := pool.AcquireFor(t.Context(), AccountSelection{AccountID: account.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	runtime, _ := newTestGoPageRuntime(t, &pageTestTransport{})
+	timer := runtime.scheduleContext(ContextWithAccountLease(t.Context(), lease), time.Hour, func(context.Context) { t.Error("canceled companion timer fired") })
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	runtime.stopTimer(timer)
+	runtime.stopTimer(timer)
+	if lease.holds != 0 || !lease.released {
+		t.Fatal("canceled timer leaked or released its lease more than once")
+	}
+	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

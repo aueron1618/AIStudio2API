@@ -1,18 +1,91 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 )
+
+type promptMediaTestStore struct {
+	PromptStore
+	path, mime    string
+	opened, saved int
+}
+
+func (store *promptMediaTestStore) OpenMedia(_ context.Context, id string) (*os.File, string, error) {
+	store.opened++
+	if id != "fixture" {
+		return nil, "", ErrPromptNotFound
+	}
+	file, err := os.Open(store.path)
+	return file, store.mime, err
+}
+
+func (store *promptMediaTestStore) SaveMedia(ctx context.Context, _ string, content io.Reader) (string, error) {
+	store.saved++
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	_, err := io.Copy(io.Discard, content)
+	return "fixture", err
+}
+
+func TestPromptMediaPermissionsAndRange(t *testing.T) {
+	for _, mimeType := range []string{"video/webm", "application/pdf"} {
+		t.Run(mimeType, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "media.fixture")
+			if err := os.WriteFile(path, []byte("0123456789"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store := &promptMediaTestStore{path: path, mime: mimeType}
+			handler := NewHandler(nil, Config{Prompts: store, APIKey: "generation-key", AdminAuthEnabled: true, AdminUsername: "admin", AdminPassword: "fixture", AdminSessionPath: filepath.Join(dir, "sessions.json")})
+			for _, method := range []string{http.MethodGet, http.MethodPost} {
+				endpoint := "/api/prompts/media/fixture"
+				if method == http.MethodPost {
+					endpoint = "/api/prompts/media"
+				}
+				response := accountTaskRequest(handler, method, endpoint, "private-media", http.Header{"Authorization": {"Bearer generation-key"}})
+				if response.Code != http.StatusUnauthorized || store.opened != 0 || store.saved != 0 {
+					t.Fatalf("generation key accessed management media: %d %s", response.Code, response.Body)
+				}
+			}
+			login := accountTaskRequest(handler, http.MethodPost, "/api/auth/login", `{"username":"admin","password":"fixture"}`, nil)
+			if login.Code != http.StatusOK || len(login.Result().Cookies()) == 0 {
+				t.Fatal("fixture management login failed")
+			}
+			headers := http.Header{"Cookie": {login.Result().Cookies()[0].String()}, "Range": {"bytes=2-5"}}
+			foreign := headers.Clone()
+			foreign.Set("Origin", "https://foreign.example")
+			if response := accountTaskRequest(handler, http.MethodGet, "/api/prompts/media/fixture", "", foreign); response.Code != http.StatusForbidden || store.opened != 0 {
+				t.Fatal("foreign origin accessed stored prompt media")
+			}
+			response := accountTaskRequest(handler, http.MethodGet, "/api/prompts/media/fixture", "", headers)
+			if response.Code != http.StatusPartialContent || response.Header().Get("Content-Range") != "bytes 2-5/10" || response.Body.String() != "2345" || response.Header().Get("Content-Type") != mimeType {
+				t.Fatalf("prompt media Range contract changed: %d %v %s", response.Code, response.Header(), response.Body)
+			}
+			policy := response.Header().Get("Content-Security-Policy")
+			if !strings.Contains(policy, "frame-ancestors 'self'") || strings.Contains(policy, "sandbox") != (mimeType != "application/pdf") {
+				t.Fatalf("prompt media framing policy changed: %s", policy)
+			}
+			response = accountTaskRequest(handler, http.MethodPost, "/api/prompts/media", "private-media", headers)
+			if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != `{"id":"fixture"}` || store.saved != 1 {
+				t.Fatalf("authenticated prompt media upload failed: %d %s", response.Code, response.Body)
+			}
+		})
+	}
+}
 
 func TestMediaDirectoryDefaultLimitPreservesFiles(t *testing.T) {
 	dir := t.TempDir()

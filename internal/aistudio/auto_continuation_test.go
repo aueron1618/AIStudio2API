@@ -142,12 +142,12 @@ func TestContinuationGuardRechecksAfterPreparation(t *testing.T) {
 		client.SetAutoContinuation(false)
 		return nil, checkContinuation(ctx)
 	})})
-	_, err := client.doProtected(t.Context(), GenerateRequest{continuationRound: 1, continuationToken: "next"}, nil)
+	_, err := client.doProtected(t.Context(), GenerateRequest{continuationRound: 1, continuationToken: "next"}, nil, 0)
 	if !errors.Is(err, errAutoContinuationDisabled) {
 		t.Fatalf("continuation guard did not survive preparation: %v", err)
 	}
 	ctx := context.WithValue(t.Context(), continuationPolicyContextKey{}, &client.autoContinuationDisabled)
-	_, err = (&WorkerProtectedTransport{}).doPrepared(ctx, "", "", 5, "", AccountSelection{}, RPCRequest{})
+	_, err = (&WorkerProtectedTransport{}).doPrepared(ctx, "", "", "", AccountSelection{}, RPCRequest{})
 	if !errors.Is(err, errAutoContinuationDisabled) {
 		t.Fatalf("disabled continuation reached the worker: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestSingleRoundEncodingDropsContinuationToken(t *testing.T) {
 		Model: "test", Contents: []Content{{Role: RoleUser, Parts: []Part{{Text: "hello"}}}},
 		continuationRound: 5, continuationToken: "must-not-be-sent",
 	}
-	body, err := EncodeGenerateContentRequest(request, GenerationDefaults{MaxOutputTokens: continuationRoundTokens}, RequestContext{})
+	body, proofAt, err := EncodeGenerateContentRequest(request, GenerationDefaults{MaxOutputTokens: continuationRoundTokens}, RequestContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +206,9 @@ func TestSingleRoundEncodingDropsContinuationToken(t *testing.T) {
 	}
 	if len(wire) > 16 && wire[16] != nil {
 		t.Fatalf("single-round request leaked continuation token: %s", body)
+	}
+	if string(body[proofAt:proofAt+len("null")]) != "null" {
+		t.Fatal("single-round encoding lost its proof byte location")
 	}
 }
 

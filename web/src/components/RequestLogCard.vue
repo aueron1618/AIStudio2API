@@ -4,6 +4,7 @@ import { api, ApiError } from '@/api'
 import { channelLabelKey, useI18n, type TranslationKey } from '@/i18n'
 import {
   byteLength,
+  formatLogDuration,
   formatLogNumber,
   isAttempt,
   logField,
@@ -14,15 +15,19 @@ import {
 } from '@/logs'
 import type { AdminLog, RequestBody } from '@/types'
 import DisclosureChevron from './DisclosureChevron.vue'
-import LogLine from './LogLine.vue'
+import LogLine, { useLogLineText } from './LogLine.vue'
+import RequestStep from './RequestStep.vue'
 import UiCollapse from './UiCollapse.vue'
 import UiDisclosure from './UiDisclosure.vue'
 import UiIcon from './UiIcon.vue'
+import { displayModelName, useUsageFormat } from './usage/format'
 
 const props = defineProps<{ row: LogRow }>()
 // open 是详情是否展开，由日志页按行保存
 const open = defineModel<boolean>('open', { required: true })
 const { t, locale, errorText, logText } = useI18n()
+const formatLine = useLogLineText()
+const { duration } = useUsageFormat()
 const request = computed(() => props.row.entry.request!)
 const running = computed(() => request.value.state === 'running')
 
@@ -89,6 +94,18 @@ function toggleAttempt(index: number): void {
   openAttempts.value = next
 }
 
+// shortLabel 返回卡片上的字段名：界面语言有缩写时显示缩写，悬停提示为全称
+function shortLabel(short: TranslationKey, full: TranslationKey): { text: string; title?: string } {
+  const text = t(short)
+  return text === t(full) ? { text } : { text, title: t(full) }
+}
+// labels 是卡片上可缩写的字段名
+const labels = computed(() => ({
+  tools: shortLabel('logs.toolsShort', 'logs.tools'),
+  switches: shortLabel('logs.switchesShort', 'logs.switches'),
+  firstToken: shortLabel('logs.firstTokenShort', 'logs.firstToken'),
+}))
+
 // causeKeys 是上游 HTTP 状态对应的失败原因文案键
 const causeKeys: Record<string, TranslationKey> = {
   '400': 'logs.cause.invalid',
@@ -149,21 +166,6 @@ function trimmed(event: AdminLog): AdminLog {
 // clock 返回事件按界面语言显示的时刻
 function clock(event: AdminLog): string {
   return new Date(event.time).toLocaleTimeString(locale.value, { hour12: false })
-}
-
-// occurrences 列出合并的同类事件各自的时刻与字段原文
-function occurrences(events: AdminLog[]): string {
-  return events
-    .map((event) =>
-      [
-        clock(event),
-        ...(event.fields ?? []).map(
-          (field) =>
-            `${t(`logs.field.${field.key}` as TranslationKey) ?? field.key} ${logText(field.value)}`,
-        ),
-      ].join('  '),
-    )
-    .join('\n')
 }
 
 const body = ref<RequestBody | null>(null)
@@ -254,6 +256,23 @@ function seconds(value: number, digits = 0): string {
   return formatLogNumber(value, locale.value, digits, 'second')
 }
 
+// proofPhases 列出 WAA 耗时中不为零的分项
+const proofPhases = computed(() => {
+  const phases = request.value.proof_phases
+  if (phases === undefined) return ''
+  return (
+    [
+      ['logs.proofLock', phases.lock_ms],
+      ['logs.proofInteraction', phases.interaction_ms],
+      ['logs.proofRefresh', phases.refresh_ms],
+      ['logs.proofCompute', phases.compute_ms],
+    ] as const
+  )
+    .filter(([, value]) => value >= 1)
+    .map(([key, value]) => `${t(key)} ${duration(value)}`)
+    .join(' · ')
+})
+
 // toggleBody 展开或收起正文一节，首次展开时读取账本保存的请求与响应正文
 async function toggleBody(): Promise<void> {
   bodyOpen.value = !bodyOpen.value
@@ -285,6 +304,39 @@ function bodySize(saved: string, total: number): string {
   return bytes < total ? `${number(bytes)} / ${number(total)} B` : `${number(total)} B`
 }
 
+// hasSecondRow 判断请求卡片是否有原因、步骤或指标第二行
+const hasSecondRow = computed(() =>
+  Boolean(
+    request.value.error ||
+    request.value.state === 'blocked' ||
+    request.value.state === 'limited' ||
+    (running.value && currentStep.value) ||
+    request.value.usage,
+  ),
+)
+
+// headingTooltip 返回标题行完整文字，供截断时悬停显示
+const headingTooltip = computed(() => {
+  const parts = [
+    displayModelName(request.value.model ?? '') || `${request.value.method} ${request.value.path}`,
+  ]
+  if (request.value.channel) parts.push(t(channelLabelKey(request.value.channel)))
+  if (request.value.tool_calls)
+    parts.push(`${labels.value.tools.text} ${number(request.value.tool_calls)}`)
+  if (attempts.value.length) {
+    const groups = attemptGroups.value
+      .map((group) => `${group.label} ×${number(group.count)}`)
+      .join(' ')
+    parts.push(`${labels.value.switches.text} ${number(attempts.value.length)} ${groups}`.trim())
+  }
+  return parts.join(' ')
+})
+
+// stepTooltip 返回运行中当前步骤的完整文字，供截断时悬停显示
+const stepTooltip = computed(() =>
+  currentStep.value ? formatLine(trimmed(currentStep.value), { part: 'inline' }) : '',
+)
+
 const bodyParts = computed(() =>
   body.value === null
     ? []
@@ -304,18 +356,26 @@ const bodyParts = computed(() =>
 </script>
 
 <template>
-  <div class="request-log">
-    <div class="request-heading">
-      <UiDisclosure v-model="open" />
-      <span class="request-state" :class="`state-${request.state}`">{{
-        request.status ?? t('logs.running')
-      }}</span>
-      <strong>{{ request.model || `${request.method} ${request.path}` }}</strong>
-      <span v-if="request.channel" class="request-channel">{{
+  <div class="log-op request-log">
+    <UiDisclosure v-model="open" />
+    <span class="log-state" :class="`log-state-${request.state}`">{{
+      request.status ?? t('logs.running')
+    }}</span>
+    <span
+      v-tooltip.overflow="headingTooltip"
+      class="log-op-main request-heading"
+      :class="hasSecondRow ? 'request-heading-single' : 'request-heading-clamp'"
+      ><strong class="log-op-title">{{
+        displayModelName(request.model ?? '') || `${request.method} ${request.path}`
+      }}</strong
+      ><span v-if="request.channel" class="request-channel">{{
         t(channelLabelKey(request.channel))
-      }}</span>
-      <span v-if="attempts.length" class="request-attempts"
-        ><span class="log-field-key">{{ t('logs.switches') }}</span
+      }}</span
+      ><span v-if="request.tool_calls" class="request-tools"
+        ><span class="log-field-key" :title="labels.tools.title">{{ labels.tools.text }}</span
+        >&nbsp;{{ number(request.tool_calls) }}</span
+      ><span v-if="attempts.length" class="request-attempts"
+        ><span class="log-field-key" :title="labels.switches.title">{{ labels.switches.text }}</span
         >&nbsp;{{ number(attempts.length) }}
         <span
           v-for="group in attemptGroups"
@@ -324,50 +384,63 @@ const bodyParts = computed(() =>
           :class="group.tone"
           >{{ group.label }} ×{{ number(group.count) }}</span
         ></span
-      >
-      <span v-if="request.duration_ms !== undefined" class="request-duration">{{
-        seconds(request.duration_ms / 1000, 2)
-      }}</span>
-      <span v-else-if="running" class="request-duration">{{ seconds(runningSeconds) }}</span>
-    </div>
-    <p v-if="running && currentStep" class="request-step">
-      <LogLine :entry="trimmed(currentStep)" part="inline" />
-    </p>
-    <div v-if="request.usage || request.tool_calls" class="request-metrics">
-      <template v-if="request.usage">
-        <span class="log-field"
-          ><span class="log-field-key">{{ t('logs.reasoning') }}</span
-          >&nbsp;{{ number(request.usage.reasoning_tokens) }}</span
-        >
-        <span class="log-field"
-          ><span class="log-field-key">{{ t('logs.reply') }}</span
-          >&nbsp;{{ number(request.usage.reply_tokens) }}</span
-        >
-        <span class="log-field"
-          ><span class="log-field-key">{{ t('logs.outputTotal') }}</span
-          >&nbsp;{{ number(request.usage.output_tokens) }} tokens</span
-        >
-        <span v-if="request.usage.average_tokens_per_second !== undefined" class="log-field"
-          ><span class="log-field-key">{{ t('logs.averageSpeed') }}</span
-          >&nbsp;{{ number(request.usage.average_tokens_per_second, 1) }} tokens/s</span
-        >
-        <span v-if="request.first_event_ms !== undefined" class="log-field"
-          ><span class="log-field-key">{{ t('logs.firstToken') }}</span
-          >&nbsp;{{ seconds(request.first_event_ms / 1000, 1) }}</span
-        >
-      </template>
-      <span v-if="request.tool_calls" class="log-field"
-        ><span class="log-field-key">{{ t('logs.tools') }}</span
-        >&nbsp;{{ number(request.tool_calls) }}</span
-      >
-    </div>
-    <p v-if="request.error" class="request-error request-error-summary">
+      ></span
+    >
+    <span class="log-op-duration">{{
+      request.duration_ms !== undefined
+        ? request.duration_ms < 1000
+          ? formatLogDuration(request.duration_ms, locale)
+          : seconds(request.duration_ms / 1000, 2)
+        : running
+          ? seconds(runningSeconds)
+          : ''
+    }}</span>
+    <p
+      v-if="request.error"
+      v-tooltip.overflow="logText(request.error)"
+      class="log-op-row request-error request-error-summary"
+    >
       {{ logText(request.error) }}
     </p>
-    <p v-else-if="request.state === 'blocked' || request.state === 'limited'" class="request-error">
+    <p
+      v-else-if="request.state === 'blocked' || request.state === 'limited'"
+      v-tooltip.overflow="finishLabel"
+      class="log-op-row request-error request-error-summary"
+    >
       {{ finishLabel }}
     </p>
-    <UiCollapse :open="open">
+    <p
+      v-else-if="running && currentStep"
+      v-tooltip.overflow="stepTooltip"
+      class="log-op-row request-step"
+    >
+      <LogLine :entry="trimmed(currentStep)" part="inline" />
+    </p>
+    <div v-else-if="request.usage" class="log-op-row request-metrics">
+      <span class="log-field"
+        ><span class="log-field-key">{{ t('logs.reasoning') }}</span
+        >&nbsp;{{ number(request.usage.reasoning_tokens) }}</span
+      >
+      <span class="log-field"
+        ><span class="log-field-key">{{ t('logs.reply') }}</span
+        >&nbsp;{{ number(request.usage.reply_tokens) }}</span
+      >
+      <span class="log-field"
+        ><span class="log-field-key">{{ t('logs.outputTotal') }}</span
+        >&nbsp;{{ number(request.usage.output_tokens) }} tokens</span
+      >
+      <span v-if="request.usage.average_tokens_per_second !== undefined" class="log-field"
+        ><span class="log-field-key">{{ t('logs.averageSpeed') }}</span
+        >&nbsp;{{ number(request.usage.average_tokens_per_second, 1) }} tokens/s</span
+      >
+      <span v-if="request.first_event_ms !== undefined" class="log-field"
+        ><span class="log-field-key" :title="labels.firstToken.title">{{
+          labels.firstToken.text
+        }}</span
+        >&nbsp;{{ seconds(request.first_event_ms / 1000, 1) }}</span
+      >
+    </div>
+    <UiCollapse class="log-op-row log-op-detail" :open="open">
       <div class="request-details">
         <dl>
           <dt>ID</dt>
@@ -375,6 +448,10 @@ const bodyParts = computed(() =>
           <template v-if="request.requested_model">
             <dt>{{ t('usage.requestedModel') }}</dt>
             <dd>{{ request.requested_model }}</dd>
+          </template>
+          <template v-if="request.model">
+            <dt>{{ t('usage.dimension.model') }}</dt>
+            <dd>{{ request.model }}</dd>
           </template>
           <template v-if="request.response_model">
             <dt>{{ t('usage.responseModel') }}</dt>
@@ -404,6 +481,13 @@ const bodyParts = computed(() =>
             <dt>{{ t('logs.inputMessages') }}</dt>
             <dd>{{ number(request.input_messages) }}</dd>
           </template>
+          <template v-if="request.proof_ms">
+            <dt>{{ t('logs.field.waa') }}</dt>
+            <dd>
+              {{ duration(request.proof_ms)
+              }}<span v-if="proofPhases" class="text-gray-500"> · {{ proofPhases }}</span>
+            </dd>
+          </template>
           <template v-if="request.error">
             <dt>{{ t('logs.errorDetail') }}</dt>
             <dd class="request-error-detail">{{ logText(request.error) }}</dd>
@@ -419,19 +503,26 @@ const bodyParts = computed(() =>
           </template>
         </dl>
         <ol class="request-timeline">
-          <li
-            v-for="(item, index) in timeline"
-            :key="index"
-            :class="{ 'timeline-attempt': item.kind === 'attempt' }"
-          >
-            <template v-if="item.kind === 'attempt'">
+          <template v-for="(item, index) in timeline" :key="index">
+            <RequestStep
+              v-if="item.kind !== 'attempt'"
+              :step="item"
+              :model="request.model"
+              :channel="request.channel"
+              :source="
+                sources.length > 1 && item.events[0]!.source.includes('@')
+                  ? sourceName(item.events[0]!.source)
+                  : ''
+              "
+            />
+            <li v-else class="timeline-attempt">
               <button
                 type="button"
                 class="attempt-toggle"
                 :aria-expanded="openAttempts.has(index)"
                 @click="toggleAttempt(index)"
               >
-                <time class="font-mono">{{ clock(item.events[0]!) }}</time>
+                <time class="font-mono">{{ clock(item.steps[0]!.events[0]!) }}</time>
                 <span class="request-timeline-source" :title="item.attempt.source">{{
                   sourceName(item.attempt.source)
                 }}</span>
@@ -456,33 +547,18 @@ const bodyParts = computed(() =>
               </button>
               <UiCollapse :open="openAttempts.has(index)">
                 <ol class="attempt-events">
-                  <li v-for="(event, step) in item.events" :key="step">
-                    <time class="font-mono">{{ clock(event) }}</time>
-                    <span class="request-timeline-line"><LogLine :entry="trimmed(event)" /></span>
-                  </li>
+                  <RequestStep
+                    v-for="(step, position) in item.steps"
+                    :key="position"
+                    :step="step"
+                    :model="request.model"
+                    :channel="request.channel"
+                    source=""
+                  />
                 </ol>
               </UiCollapse>
-            </template>
-            <template v-else>
-              <time class="font-mono">{{ clock(item.events[0]!) }}</time>
-              <span
-                v-if="sources.length > 1"
-                class="request-timeline-source"
-                :title="item.events[0]!.source"
-                >{{ sourceName(item.events[0]!.source) }}</span
-              >
-              <span class="request-timeline-line"
-                ><LogLine :entry="trimmed(item.events.at(-1)!)"
-                  ><span
-                    v-if="item.events.length > 1"
-                    class="timeline-count"
-                    :title="occurrences(item.events)"
-                    >×{{ number(item.events.length) }}</span
-                  ></LogLine
-                ></span
-              >
-            </template>
-          </li>
+            </li>
+          </template>
         </ol>
         <section class="request-json">
           <button
@@ -540,53 +616,43 @@ const bodyParts = computed(() =>
 </template>
 
 <style scoped>
-.request-heading {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 2px 10px;
+.request-heading > * {
+  margin-inline-end: 10px;
 }
-.request-heading strong {
-  color: var(--color-fg);
-  font-weight: 600;
-  overflow-wrap: anywhere;
+.request-heading > :last-child {
+  margin-inline-end: 0;
 }
-.request-state {
-  border: 1px solid currentColor;
-  border-radius: 4px;
-  padding: 0 6px;
-  line-height: 18px;
-  font-variant-numeric: tabular-nums;
+.request-heading-single {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.state-completed,
-.state-tool_calls {
-  color: var(--color-green-400);
-  background: color-mix(in oklab, var(--color-green-400) 8%, transparent);
+.request-heading-single .request-attempts {
+  flex-wrap: nowrap;
 }
-.state-running {
-  color: var(--color-blue-400);
+.request-heading-clamp {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
-.state-limited,
-.state-blocked,
-.state-cancelled {
-  color: var(--color-yellow-400);
-}
-.state-failed,
 .request-error {
   color: var(--color-red-400);
 }
 .request-channel {
   color: var(--color-gray-500);
 }
-.request-duration {
-  color: var(--color-fg);
-  margin-left: auto;
+.request-tools {
+  color: var(--color-gray-300);
   font-variant-numeric: tabular-nums;
 }
 .request-step {
+  overflow: hidden;
   margin: 2px 0 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .request-step :deep(.log-line-message) {
   color: var(--color-gray-300);
@@ -599,16 +665,12 @@ const bodyParts = computed(() =>
 }
 .request-error {
   margin: 2px 0 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
-/* request-error-summary 为卡片上的错误，最多两行，全文在详情中 */
+/* request-error-summary 为卡片上的错误或拦截原因，单行截断，悬停或展开详情看全文 */
 .request-error-summary {
-  display: -webkit-box;
   overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .request-details .request-error-detail {
   color: var(--color-red-400);
@@ -641,33 +703,18 @@ const bodyParts = computed(() =>
   padding-left: 12px;
   margin: 8px 0;
 }
-.request-timeline > li:not(.timeline-attempt) {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  margin-bottom: 4px;
-}
-.request-timeline time,
+.attempt-toggle time,
 .request-timeline-source {
   flex-shrink: 0;
   color: var(--color-gray-500);
 }
-.request-timeline time {
-  font-variant-numeric: tabular-nums;
-}
-.request-timeline-line {
-  min-width: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.timeline-count {
-  margin-inline-end: 8px;
-  color: var(--color-gray-400);
+.attempt-toggle time {
   font-variant-numeric: tabular-nums;
 }
 /* request-attempts 为卡片标题行的换账户次数与按上游状态的分组计数 */
 .request-attempts {
   display: inline-flex;
+  vertical-align: top;
   align-items: center;
   flex-wrap: wrap;
   gap: 2px 6px;
@@ -748,17 +795,6 @@ const bodyParts = computed(() =>
   padding-left: 12px;
   border-left: 1px solid var(--color-line);
 }
-.attempt-events li {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  margin-bottom: 2px;
-}
-.attempt-events time {
-  flex-shrink: 0;
-  color: var(--color-gray-500);
-  font-variant-numeric: tabular-nums;
-}
 .request-section-toggle {
   display: flex;
   align-items: center;
@@ -814,9 +850,6 @@ const bodyParts = computed(() =>
   font-size: 13px;
 }
 @media (max-width: 767px) {
-  .request-duration {
-    margin-left: 0;
-  }
   /* 窄屏下换号行只显示账户、上游状态与原因，账户名先截断，上游原文在展开的事件中 */
   .attempt-toggle .request-timeline-source {
     flex-shrink: 1;

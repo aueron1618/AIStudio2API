@@ -1,5 +1,6 @@
 import { computed, reactive, ref, shallowRef, watch } from 'vue'
 import { api, openAdminEvents } from '@/api'
+import { syncServerClock } from '@/elapsed'
 import { useI18n } from '@/i18n'
 import type {
   Account,
@@ -59,14 +60,26 @@ const visibleAccounts = computed(() =>
   ),
 )
 
-// serviceState 为界面显示的生成服务状态
-const serviceState = computed<'unavailable' | 'running' | 'launching' | 'stopped'>(() => {
-  if (status.value === null) return 'unavailable'
-  if (status.value.state === 'RUNNING') return 'running'
-  if (status.value.state === 'LAUNCHING') return 'launching'
-  if (startPending.value && !launchCancellationRequested.value) return 'launching'
-  return 'stopped'
-})
+// stopSteps 是生成服务的停止步骤
+const stopSteps = new Set<ServiceStatus['transition']>([
+  'cancel_requests',
+  'wait_catalog_stop',
+  'close_workers',
+])
+
+// serviceState 为界面显示的生成服务状态，有停止步骤时为 stopping
+const serviceState = computed<'unavailable' | 'running' | 'launching' | 'stopping' | 'stopped'>(
+  () => {
+    if (status.value === null) return 'unavailable'
+    if (stopSteps.has(status.value.transition)) return 'stopping'
+    if (status.value.state === 'RUNNING') return 'running'
+    if (status.value.state === 'LAUNCHING') return 'launching'
+    if (startPending.value && !launchCancellationRequested.value) return 'launching'
+    return 'stopped'
+  },
+)
+
+watch(status, (value) => value && syncServerClock(value.time))
 
 let eventConnection: EventSource | undefined
 // consoleGeneration 为 startConsole 与 stopConsole 的调用序号，离开后才完成的初始化据此不再订阅事件
@@ -222,24 +235,37 @@ function undoDelete(): void {
   pendingDelete.value = null
 }
 
-// commitDelete 立即提交等待中的账户删除，页面关闭时使用 keepalive 请求
+// committingDelete 跟踪已发出、尚未完成的账户删除请求，新的添加或导入入口先等它结束
+let committingDelete: Promise<void> | null = null
+
+// commitDelete 立即提交等待中的账户删除并等待进行中的删除结束，页面关闭时使用 keepalive 请求
 async function commitDelete(keepalive = false): Promise<void> {
   const pending = pendingDelete.value
-  if (pending === null) return
-  window.clearTimeout(pending.timer)
-  pendingDelete.value = null
-  const ids = pending.accounts.map((account) => account.id)
-  deletingAccounts.value = new Set([...deletingAccounts.value, ...ids])
-  const results = await Promise.allSettled(ids.map((id) => api.deleteAccount(id, keepalive)))
-  const failed = results.find((result) => result.status === 'rejected')
-  if (failed !== undefined) showNotice(errorText(failed.reason), 'error')
-  try {
-    await loadAccountData()
-  } finally {
-    const deleting = new Set(deletingAccounts.value)
-    for (const id of ids) deleting.delete(id)
-    deletingAccounts.value = deleting
+  if (pending !== null) {
+    window.clearTimeout(pending.timer)
+    pendingDelete.value = null
+    const ids = pending.accounts.map((account) => account.id)
+    deletingAccounts.value = new Set([...deletingAccounts.value, ...ids])
+    const previous = committingDelete
+    const task = (async () => {
+      if (previous !== null) await previous
+      const results = await Promise.allSettled(ids.map((id) => api.deleteAccount(id, keepalive)))
+      const failed = results.find((result) => result.status === 'rejected')
+      if (failed !== undefined) showNotice(errorText(failed.reason), 'error')
+      try {
+        await loadAccountData()
+      } finally {
+        const deleting = new Set(deletingAccounts.value)
+        for (const id of ids) deleting.delete(id)
+        deletingAccounts.value = deleting
+      }
+    })()
+    const completion = task.finally(() => {
+      if (committingDelete === completion) committingDelete = null
+    })
+    committingDelete = completion
   }
+  if (committingDelete !== null) await committingDelete
 }
 
 // flushDelete 在页面隐藏时提交等待中的删除
@@ -272,17 +298,12 @@ async function retryCamoufox(): Promise<void> {
   }
 }
 
-// exitLookups 是进行中的出口查询数，查询可能开始新一轮出口 IP 库下载
-const exitLookups = ref(0)
-
-// statusTimer 在 Camoufox 或出口 IP 库下载期间、出口查询或账户任务进行中每秒刷新服务状态，服务端不在下载期间推送进度
+// statusTimer 在 Camoufox 下载期间或账户任务进行中每秒刷新服务状态，服务端不在下载期间推送进度
 let statusTimer: number | undefined
 watch(
   () =>
     consoleActive.value &&
     (status.value?.camoufox.preparing === true ||
-      status.value?.geoip.preparing === true ||
-      exitLookups.value > 0 ||
       accountTasks.value.some((task) => task.state === 'running')),
   (polling) => {
     window.clearInterval(statusTimer)
@@ -353,8 +374,13 @@ function updateAccount(account: Account): void {
   if (index !== -1) accounts.value[index] = account
 }
 
-// waitForRestart 在线更新后等新进程接管再刷新页面：状态接口返回其他版本或要求重新登录都表示旧进程已退出
-function waitForRestart(previous = status.value?.version): void {
+// restartTimeout 是在线更新后等新版本接管的毫秒数，超过后提示新版本没有启动
+const restartTimeout = 60_000
+// restartStalled 表示在线更新后超过 restartTimeout 仍没有新版本接管
+const restartStalled = ref(false)
+
+// waitForRestart 在线更新后每秒查一次新进程是否接管，接管后刷新页面：状态接口返回其他版本或要求重新登录都表示旧进程已退出；超过 restartTimeout 时置 restartStalled 并继续等待
+function waitForRestart(previous = status.value?.version, startedAt = Date.now()): void {
   eventConnection?.close()
   window.setTimeout(async () => {
     const response = await fetch('/api/status', { cache: 'no-store' }).catch(() => undefined)
@@ -365,13 +391,16 @@ function waitForRestart(previous = status.value?.version): void {
       window.location.reload()
       return
     }
-    waitForRestart(previous)
+    restartStalled.value = Date.now() - startedAt >= restartTimeout
+    waitForRestart(previous, startedAt)
   }, 1000)
 }
 
+// handleAdminEvent 应用一条管理事件，各区域在收到第一份快照时结束加载
 function handleAdminEvent(event: AdminEvent): void {
   if (event.type === 'status') {
     status.value = event.data
+    loading.status = false
     return
   }
   if (event.type === 'log') {
@@ -381,14 +410,17 @@ function handleAdminEvent(event: AdminEvent): void {
   }
   if (event.type === 'accounts') {
     accounts.value = event.data.accounts
+    loading.accounts = false
     return
   }
   if (event.type === 'models') {
     models.value = event.data.models
+    loading.models = false
     return
   }
   if (event.type === 'cooldowns') {
     cooldowns.value = event.data
+    loading.cooldowns = false
     return
   }
   if (event.type === 'account_tasks') {
@@ -417,11 +449,18 @@ async function startConsole(): Promise<void> {
     (value) => (update.value = value),
     () => undefined,
   )
-  eventConnection = openAdminEvents(handleAdminEvent, () => {
-    resetLogs()
-    requests.value = []
-    void loadAccountTasks()
-  })
+  eventConnection = openAdminEvents(
+    (event) => {
+      if (generation === consoleGeneration && consoleActive.value) handleAdminEvent(event)
+    },
+    () => {
+      if (generation !== consoleGeneration || !consoleActive.value) return
+      resetLogs()
+      requests.value = []
+      loading.requests = false
+      void loadAccountTasks()
+    },
+  )
 }
 
 // stopConsole 关闭事件订阅并提交等待中的删除
@@ -440,7 +479,6 @@ function stopConsole(): void {
 // useConsole 返回管理端共享的服务数据与操作
 export function useConsole() {
   return {
-    exitLookups,
     status,
     logs,
     accounts,
@@ -473,6 +511,7 @@ export function useConsole() {
     retryCamoufox,
     clearLogs,
     waitForRestart,
+    restartStalled,
     startConsole,
     stopConsole,
   }

@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	appconfig "github.com/Mag1cFall/AIStudio2API/internal/config"
@@ -131,6 +132,8 @@ func (e *AllCoolingError) accountRejection() bool {
 // AccountsNotReadyError 表示支持请求的账户都处于不可调度状态
 type AccountsNotReadyError struct {
 	Reasons []string
+	// States 是各不可调度账户的状态，与 Reasons 一一对应，停用的账户为 AccountDisabled
+	States []AccountState
 }
 
 func (e *AccountsNotReadyError) Error() string {
@@ -162,9 +165,24 @@ func accountStateReason(account *Account) string {
 	return reason
 }
 
+// MaxAccountNoteLength 是账户备注允许的最大字符数
+const MaxAccountNoteLength = 120
+
+// TruncateAccountNote 规范化账户备注：去掉首尾空白、折叠换行并在超过长度上限时按字符截断
+func TruncateAccountNote(note string) string {
+	cleaned := strings.Join(strings.FieldsFunc(strings.TrimSpace(note), func(r rune) bool {
+		return r == '\r' || r == '\n'
+	}), " ")
+	if utf8.RuneCountInString(cleaned) <= MaxAccountNoteLength {
+		return cleaned
+	}
+	return strings.TrimSpace(string([]rune(cleaned)[:MaxAccountNoteLength]))
+}
+
 // AccountConfig 表示账户目录中的固定最小配置
 type AccountConfig struct {
 	Label    string `json:"label"`
+	Note     string `json:"note,omitempty"`
 	Enabled  bool   `json:"enabled"`
 	Proxy    string `json:"proxy"`
 	Locale   string `json:"locale"`
@@ -333,11 +351,14 @@ type Account struct {
 	// verifiedGeneration 是 verifiedAt 记录时的模型资格目录版本
 	verifiedGeneration uint64
 	stateMessage       string
-	transition         AccountTransition
-	catalogErr         error
-	initializedAt      time.Time
-	buildModels        []Model
-	cachedCatalog      modelCatalog
+	// transition 是停用收尾、目录同步或账户保存的进度，refresh 是立即刷新的进度
+	// 约束：账户状态取操作非空的 transition，否则取 refresh
+	transition    accountProgress
+	refresh       accountProgress
+	catalogErr    error
+	initializedAt time.Time
+	buildModels   []Model
+	cachedCatalog modelCatalog
 	// catalogSyncedAt 是目录缓存最近一次同步的时刻，没有一致的缓存时为零值
 	catalogSyncedAt time.Time
 	// hiddenModels 是目录中官网隐藏模型 ID 到依据模型 ID 的映射，hiddenDiscovered 表示该目录同步时探测过官网隐藏模型
@@ -346,12 +367,15 @@ type Account struct {
 	boundProxy       atomic.Pointer[string]
 	// assistantBusy 表示账户正在运行写代码助手生成
 	assistantBusy bool
+	// pendingProofs 是已选定该账户、还没有取完 proof 的生成租约数
+	pendingProofs int
 }
 
 // AccountStatus 表示管理界面使用的脱敏账户状态
 type AccountStatus struct {
 	ID          string                   `json:"id"`
 	Label       string                   `json:"label"`
+	Note        string                   `json:"note,omitempty"`
 	State       AccountState             `json:"state"`
 	Enabled     bool                     `json:"enabled"`
 	Proxy       string                   `json:"proxy"`
@@ -364,26 +388,63 @@ type AccountStatus struct {
 	LastUsed    *time.Time               `json:"last_used,omitempty"`
 	Message     string                   `json:"message,omitempty"`
 	Directory   string                   `json:"-"`
-	// Transition 是账户启停的后台收尾阶段，没有收尾时为空
+	// Transition 是账户正在进行的后台操作，没有时为空
 	Transition AccountTransition `json:"-"`
+	// TransitionStep 是后台操作当前的步骤，操作没有分步时为空
+	TransitionStep AccountStep `json:"-"`
+	// TransitionIndex 与 TransitionTotal 是立即刷新当前步骤的序号与步数，其他操作为 0
+	TransitionIndex int `json:"-"`
+	TransitionTotal int `json:"-"`
+	// TransitionSince 是进入当前操作或步骤的时刻
+	TransitionSince time.Time `json:"-"`
 	// ActiveRequests 是账户上进行中的请求数
 	ActiveRequests int `json:"-"`
+	// CatalogError 是已有目录的账户最近一次权益或目录读取失败的原因，下一次读取成功后为空
+	CatalogError string `json:"-"`
 	// CatalogSyncedAt 是目录缓存最近一次同步的时刻，没有一致的缓存时为零值
 	CatalogSyncedAt time.Time `json:"-"`
 	// HiddenDiscovered 表示账户目录同步时探测过官网隐藏模型，HiddenModels 是目录中的官网隐藏模型数
 	HiddenDiscovered bool `json:"-"`
 	HiddenModels     int  `json:"-"`
+	// VerificationRequired 表示账户因上游要求验证而受限，可在官网验证页完成验证后恢复
+	VerificationRequired bool `json:"verification_required,omitempty"`
+	// DeviceBoundSession 表示账户会话带 __Secure-1PSIDRTS 且缺少本地续签材料，约 2 小时内失效
+	DeviceBoundSession bool `json:"device_bound_session,omitempty"`
 }
 
-// AccountTransition 是账户启停的后台收尾阶段
+// AccountTransition 是账户正在进行的后台操作
 type AccountTransition string
 
 const (
 	// AccountDraining 表示账户已停用，正在等待在途请求结束并关闭 Worker
 	AccountDraining AccountTransition = "draining"
-	// AccountSyncing 表示账户已启用，正在载入页面同步模型目录
+	// AccountSyncing 表示账户已启用、添加、导入或重新登录，正在载入页面同步模型目录
 	AccountSyncing AccountTransition = "syncing"
+	// AccountSaving 表示正在保存账户配置或登录状态
+	AccountSaving AccountTransition = "saving"
+	// AccountRefreshing 表示正在立即刷新账户
+	AccountRefreshing AccountTransition = "refreshing"
 )
+
+// AccountStep 是后台操作当前的步骤
+type AccountStep string
+
+const (
+	// AccountStepWaiting 表示操作正在等账户的在途请求结束
+	AccountStepWaiting AccountStep = "waiting"
+	// AccountStepCatalog 表示正在载入页面读取权益与模型目录
+	AccountStepCatalog AccountStep = "catalog"
+	// AccountStepVerifying 表示正在发一次生成请求核对验证状态
+	AccountStepVerifying AccountStep = "verifying"
+)
+
+// accountProgress 是一次后台操作的当前步骤、步骤序号与进入该步骤的时刻，没有序号时 index 与 total 为 0
+type accountProgress struct {
+	operation    AccountTransition
+	step         AccountStep
+	index, total int
+	since        time.Time
+}
 
 // AccountSelection 描述账户调度所需的能力或粘性条件
 type AccountSelection struct {
@@ -399,10 +460,12 @@ type AccountSelection struct {
 	PlaygroundOnly     bool
 	Channel            Channel
 	PreferredChannel   Channel
-	// IgnoreQuotaCooldown 为 true 时套餐限额与每日限额冷却中的账户照常参与选号
+	// IgnoreQuotaCooldown 为 true 时套餐限额、每日限额与权限拒绝冷却中的账户照常参与选号，拒绝记录有效期内拒绝过不大于 RequestSize 的请求的账户除外，余量多的账户优先
 	IgnoreQuotaCooldown bool
-	anyTier             bool
-	anyState            bool
+	// RequestSize 是请求输入正文的字节数，0 表示未知
+	RequestSize int64
+	anyTier     bool
+	anyState    bool
 }
 
 const preferredBootstrapModelID = "gemini-flash-latest"
@@ -437,6 +500,39 @@ type AccountCandidateState struct {
 type AccountStore struct {
 	paths               []string
 	restrictedImportsMu sync.Mutex
+	// failuresMu 保护 failures
+	failuresMu sync.Mutex
+	// failures 是最近一次 Load 中无法载入、尚未删除的账户目录
+	failures []AccountLoadFailure
+}
+
+// AccountLoadFailure 是一个无法载入的账户目录与原因
+type AccountLoadFailure struct {
+	ID        string
+	Directory string
+	Err       error
+}
+
+// Failures 返回最近一次 Load 中无法载入、尚未删除的账户目录
+func (s *AccountStore) Failures() []AccountLoadFailure {
+	s.failuresMu.Lock()
+	defer s.failuresMu.Unlock()
+	return slices.Clone(s.failures)
+}
+
+// DeleteFailure 删除无法载入的账户目录 id，返回它是否是无法载入的账户目录
+func (s *AccountStore) DeleteFailure(id string) (bool, error) {
+	s.failuresMu.Lock()
+	defer s.failuresMu.Unlock()
+	index := slices.IndexFunc(s.failures, func(failure AccountLoadFailure) bool { return failure.ID == id })
+	if index < 0 {
+		return false, nil
+	}
+	if err := os.RemoveAll(s.failures[index].Directory); err != nil {
+		return true, fmt.Errorf("删除账户目录: %w", err)
+	}
+	s.failures = slices.Delete(s.failures, index, index+1)
+	return true, nil
 }
 
 // restrictedImportsName 是账户根目录中记下导入时被 Google 限制使用 AI Studio 的账户邮箱与原因的文件
@@ -522,6 +618,10 @@ type AccountLease struct {
 	channel               Channel
 	// ignoreQuotaCooldown 表示租约在全部账户冷却时取自套餐限额或每日限额冷却中的账户，这两种冷却不阻止它发送
 	ignoreQuotaCooldown bool
+	// requestSize 是租约所服务请求的输入字节数
+	requestSize int64
+	// proofPending 表示生成租约还没有取完 proof，计入账户的 pendingProofs
+	proofPending bool
 	// assistantDone 表示本租约的写代码助手生成已结束，账户已可接其他 -build 请求
 	assistantDone bool
 	operation     sync.Mutex
@@ -530,7 +630,9 @@ type AccountLease struct {
 	holds int
 	// releaseDeferred 表示 Release 已被推迟
 	releaseDeferred bool
-	err             error
+	// afterRelease 是租约归还后在后台执行的函数
+	afterRelease []func()
+	err          error
 	// sessionOnce 使同一租约内的认证失败只检查一次会话
 	sessionOnce sync.Once
 	// sessionErr 是本租约会话检查的结果
@@ -573,7 +675,7 @@ func NewAccountStore(paths ...string) *AccountStore {
 	return &AccountStore{paths: cleaned}
 }
 
-// Load 扫描账户目录并恢复冷却与资源粘性
+// Load 扫描账户目录并恢复冷却与资源粘性，无法载入的账户目录跳过并记入 Failures
 func (s *AccountStore) Load() ([]*Account, error) {
 	if len(s.paths) == 0 {
 		return nil, fmt.Errorf("账户路径为空")
@@ -621,14 +723,30 @@ func (s *AccountStore) Load() ([]*Account, error) {
 	}
 	sort.Strings(directories)
 
+	type loaded struct {
+		account *Account
+		err     error
+	}
+	results := make([]loaded, len(directories))
+	catalogs := &catalogParses{entries: make(map[catalogCacheKey]catalogCacheParse)}
+	var group sync.WaitGroup
+	for index, directory := range directories {
+		group.Go(func() {
+			account, err := loadAccount(directory, catalogs)
+			results[index] = loaded{account, err}
+		})
+	}
+	group.Wait()
+
 	accounts := make([]*Account, 0, len(directories))
 	ids := make(map[string]struct{}, len(directories))
 	resources := make(map[string]string)
-	catalogs := make(map[catalogCacheKey]catalogCacheParse)
-	for _, directory := range directories {
-		account, err := loadAccount(directory, catalogs)
+	var failures []AccountLoadFailure
+	for index, directory := range directories {
+		account, err := results[index].account, results[index].err
 		if err != nil {
-			return nil, err
+			failures = append(failures, AccountLoadFailure{ID: filepath.Base(directory), Directory: directory, Err: err})
+			continue
 		}
 		if _, exists := ids[account.ID]; exists {
 			return nil, fmt.Errorf("账户 ID 重复: %s", account.ID)
@@ -642,6 +760,9 @@ func (s *AccountStore) Load() ([]*Account, error) {
 		}
 		accounts = append(accounts, account)
 	}
+	s.failuresMu.Lock()
+	s.failures = failures
+	s.failuresMu.Unlock()
 	return accounts, nil
 }
 
@@ -766,6 +887,9 @@ func (c AccountConfig) Validate() error {
 	}
 	if c.AuthUser < 0 || c.AuthUser > 9 {
 		return fmt.Errorf("账户 auth_user 无效: %d", c.AuthUser)
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(c.Note)) > MaxAccountNoteLength {
+		return fmt.Errorf("账户备注不能超过 %d 个字符", MaxAccountNoteLength)
 	}
 	if err := appconfig.ValidateProxy(c.Proxy); err != nil {
 		return fmt.Errorf("账户 proxy 无效: %w", err)
@@ -1224,11 +1348,10 @@ func (p *AccountPool) AcquireAccount(ctx context.Context, accountID string) (*Ac
 
 // AcquireFor 按模型方法账户或资源粘性获取账户槽位
 func (p *AccountPool) AcquireFor(ctx context.Context, selection AccountSelection) (*AccountLease, error) {
-	selection = selectionWithChannel(ctx, selection)
 	if p == nil {
 		return nil, ErrNoEligibleAccount
 	}
-	selection = p.scopedSelection(ctx, selection)
+	selection = p.ScopedSelection(ctx, selection)
 	if selection.ResourceID != "" {
 		if err := p.refreshResource(ctx, selection.ResourceID); err != nil {
 			return nil, err
@@ -1325,11 +1448,10 @@ func (p *AccountPool) resourceOwners() []string {
 
 // TryAcquireFor 尝试获取账户槽位并立即返回当前结果
 func (p *AccountPool) TryAcquireFor(ctx context.Context, selection AccountSelection) (*AccountLease, bool, error) {
-	selection = selectionWithChannel(ctx, selection)
 	if p == nil {
 		return nil, false, ErrNoEligibleAccount
 	}
-	selection = p.scopedSelection(ctx, selection)
+	selection = p.ScopedSelection(ctx, selection)
 	if selection.ResourceID != "" {
 		if err := p.refreshResource(ctx, selection.ResourceID); err != nil {
 			return nil, false, err
@@ -1428,6 +1550,7 @@ func (p *AccountPool) noEligibleErrorLocked(selection AccountSelection) error {
 	selection.ModelID = strings.TrimPrefix(strings.TrimSpace(selection.ModelID), "models/")
 	scope, bound := p.modelAccounts[selection.ModelID]
 	var reasons []string
+	var states []AccountState
 	for _, account := range p.accounts {
 		if account.Config.Enabled && account.State == AccountReady || bound && !slices.Contains(scope, account.ID) {
 			continue
@@ -1436,6 +1559,11 @@ func (p *AccountPool) noEligibleErrorLocked(selection AccountSelection) error {
 			continue
 		}
 		reasons = append(reasons, accountStateReason(account))
+		state := account.State
+		if !account.Config.Enabled {
+			state = AccountDisabled
+		}
+		states = append(states, state)
 	}
 	if len(reasons) == 0 && bound {
 		return fmt.Errorf("%w：模型 %s 绑定的账户都无法调用", ErrNoEligibleAccount, selection.ModelID)
@@ -1443,7 +1571,7 @@ func (p *AccountPool) noEligibleErrorLocked(selection AccountSelection) error {
 	if len(reasons) == 0 {
 		return ErrNoEligibleAccount
 	}
-	return &AccountsNotReadyError{Reasons: reasons}
+	return &AccountsNotReadyError{Reasons: reasons, States: states}
 }
 
 func (p *AccountPool) markStaleAccountUnavailable(account *Account) {
@@ -1586,7 +1714,7 @@ func (l *AccountLease) CoolingDown(modelID string) bool {
 	if account == nil {
 		return false
 	}
-	_, active := selectionCooldown(account, scope, AccountSelection{IgnoreQuotaCooldown: l.ignoreQuotaCooldown}, time.Now())
+	_, active := selectionCooldown(account, scope, AccountSelection{IgnoreQuotaCooldown: l.ignoreQuotaCooldown, RequestSize: l.requestSize}, time.Now())
 	return active
 }
 
@@ -1822,6 +1950,16 @@ func (l *AccountLease) SaveConfig(value AccountConfig) error {
 	return l.updateConfig(func(AccountConfig) AccountConfig { return value })
 }
 
+// SetDefaultNote fills an empty note without overwriting concurrent settings.
+func (l *AccountLease) SetDefaultNote(note string) error {
+	return l.updateConfig(func(value AccountConfig) AccountConfig {
+		if strings.TrimSpace(value.Note) == "" {
+			value.Note = TruncateAccountNote(note)
+		}
+		return value
+	})
+}
+
 // SetAuthUser 只提交认证会话编号，不覆盖认证期间并发更新的启停状态
 func (l *AccountLease) SetAuthUser(authUser int) error {
 	return l.updateConfig(func(value AccountConfig) AccountConfig {
@@ -1868,6 +2006,34 @@ func (p *AccountPool) applyEnabledLocked(account *Account) {
 	p.notifyLocked()
 }
 
+// SetNote 写回账户备注并立即生效，不等待账户上的在途请求
+func (p *AccountPool) SetNote(accountID string, note string) (*Account, error) {
+	accountID = strings.TrimSpace(accountID)
+	note = strings.TrimSpace(note)
+	p.mu.Lock()
+	account := p.byID[accountID]
+	p.mu.Unlock()
+	if account == nil {
+		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound, accountID)
+	}
+	account.storageMu.Lock()
+	defer account.storageMu.Unlock()
+	p.mu.Lock()
+	value := account.Config
+	p.mu.Unlock()
+	value.Note = note
+	if err := value.Validate(); err != nil {
+		return nil, err
+	}
+	if err := writeAccountConfig(account.ConfigPath, value); err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	account.Config.Note = note
+	return account, nil
+}
+
 // SetEnabled 写回账户启用状态并立即生效，不等待账户上的在途请求
 func (p *AccountPool) SetEnabled(accountID string, enabled bool) (*Account, error) {
 	accountID = strings.TrimSpace(accountID)
@@ -1893,13 +2059,59 @@ func (p *AccountPool) SetEnabled(accountID string, enabled bool) (*Account, erro
 	return account, nil
 }
 
-// SetTransition记录账户启停的后台收尾阶段，空值表示收尾结束
-func (p *AccountPool) SetTransition(accountID string, transition AccountTransition) {
+// SetTransition 记录停用收尾、目录同步或账户保存进行到的步骤，operation 为空表示结束
+func (p *AccountPool) SetTransition(accountID string, operation AccountTransition, step AccountStep) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if account := p.byID[strings.TrimSpace(accountID)]; account != nil {
-		account.transition = transition
+		p.setProgressLocked(&account.transition, accountProgress{operation: operation, step: step})
 	}
+}
+
+// SetRefreshStep 记录立即刷新进入第 index 步 step，共 total 步，step 为空表示刷新结束
+func (p *AccountPool) SetRefreshStep(accountID string, step AccountStep, index, total int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if account := p.byID[strings.TrimSpace(accountID)]; account != nil {
+		next := accountProgress{step: step, index: index, total: total}
+		if step != "" {
+			next.operation = AccountRefreshing
+		}
+		p.setProgressLocked(&account.refresh, next)
+	}
+}
+
+// setProgressLocked 在操作或步骤变化时记下新进度与进入时刻并通知账户池的订阅者
+func (p *AccountPool) setProgressLocked(current *accountProgress, next accountProgress) {
+	if current.operation == next.operation && current.step == next.step {
+		return
+	}
+	next.since = time.Now()
+	*current = next
+	p.notifyLocked()
+}
+
+// ReloadStorageState 重新读取账户的认证状态
+func (p *AccountPool) ReloadStorageState(accountID string) (StorageState, error) {
+	account, err := p.Account(accountID)
+	if err != nil {
+		return StorageState{}, err
+	}
+	return p.reloadStorageState(account)
+}
+
+// reloadStorageState 在账户存储锁内从磁盘读取认证状态并同步到池内缓存
+func (p *AccountPool) reloadStorageState(account *Account) (StorageState, error) {
+	account.storageMu.Lock()
+	defer account.storageMu.Unlock()
+	state, err := LoadStorageState(account.StoragePath)
+	if err != nil {
+		return StorageState{}, err
+	}
+	p.mu.Lock()
+	account.StorageState = state
+	p.mu.Unlock()
+	return state, nil
 }
 
 // ReloadStorageState 在租约内重新读取认证状态
@@ -1909,16 +2121,7 @@ func (l *AccountLease) ReloadStorageState() (StorageState, error) {
 	if l.released {
 		return StorageState{}, fmt.Errorf("账户租约已释放")
 	}
-	l.account.storageMu.Lock()
-	defer l.account.storageMu.Unlock()
-	state, err := LoadStorageState(l.account.StoragePath)
-	if err != nil {
-		return StorageState{}, err
-	}
-	l.pool.mu.Lock()
-	l.account.StorageState = state
-	l.pool.mu.Unlock()
-	return state, nil
+	return l.pool.reloadStorageState(l.account)
 }
 
 // ReplaceCookies 以固定指纹浏览器当前 Cookie 替换账户最新持久状态，只有轮换 Cookie 变化且磁盘状态在 rotatingCookieWriteInterval 内写过时不写盘
@@ -2010,28 +2213,42 @@ func (l *AccountLease) ReplaceResource(previousResourceID string, resourceID str
 }
 
 // MergeSetCookieHeaders 将响应 Cookie 合并到账户最新持久状态
-func (l *AccountLease) MergeSetCookieHeaders(headers []string, requestURL string, now time.Time) error {
-	l.operation.Lock()
-	defer l.operation.Unlock()
-	if l.released {
-		return fmt.Errorf("账户租约已释放")
+func (p *AccountPool) MergeSetCookieHeaders(accountID string, headers []string, requestURL string, now time.Time) error {
+	account, err := p.Account(accountID)
+	if err != nil {
+		return err
 	}
-	l.account.storageMu.Lock()
-	defer l.account.storageMu.Unlock()
-	state, err := LoadStorageState(l.account.StoragePath)
+	return p.mergeSetCookieHeaders(account, headers, requestURL, now)
+}
+
+// mergeSetCookieHeaders 在账户存储锁内合并响应 Cookie、写回磁盘并同步到池内缓存
+func (p *AccountPool) mergeSetCookieHeaders(account *Account, headers []string, requestURL string, now time.Time) error {
+	account.storageMu.Lock()
+	defer account.storageMu.Unlock()
+	state, err := LoadStorageState(account.StoragePath)
 	if err != nil {
 		return err
 	}
 	if err := state.MergeSetCookieHeaders(headers, requestURL, now); err != nil {
 		return err
 	}
-	if err := WriteStorageState(l.account.StoragePath, state); err != nil {
+	if err := WriteStorageState(account.StoragePath, state); err != nil {
 		return err
 	}
-	l.pool.mu.Lock()
-	l.account.StorageState = state
-	l.pool.mu.Unlock()
+	p.mu.Lock()
+	account.StorageState = state
+	p.mu.Unlock()
 	return nil
+}
+
+// MergeSetCookieHeaders 将响应 Cookie 合并到账户最新持久状态
+func (l *AccountLease) MergeSetCookieHeaders(headers []string, requestURL string, now time.Time) error {
+	l.operation.Lock()
+	defer l.operation.Unlock()
+	if l.released {
+		return fmt.Errorf("账户租约已释放")
+	}
+	return l.pool.mergeSetCookieHeaders(l.account, headers, requestURL, now)
 }
 
 // Release 释放账户文件和进程内租约
@@ -2046,12 +2263,44 @@ func (l *AccountLease) Release() error {
 	return l.err
 }
 
+// ProofDone 记录生成租约已取完 proof，账户不再为它排队取 proof
+func (l *AccountLease) ProofDone() {
+	l.pool.mu.Lock()
+	l.finishProofLocked()
+	l.pool.mu.Unlock()
+}
+
+// finishProofLocked 结束租约对账户 pendingProofs 的计数，调用方持有 pool.mu
+func (l *AccountLease) finishProofLocked() {
+	if l.proofPending {
+		l.proofPending = false
+		l.account.pendingProofs--
+	}
+}
+
+// WithoutPendingProofs 返回 accountIDs 中没有生成租约在等待或生成 proof 的账户，保持原顺序
+func (p *AccountPool) WithoutPendingProofs(accountIDs []string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	idle := make([]string, 0, len(accountIDs))
+	for _, accountID := range accountIDs {
+		if account := p.byID[accountID]; account == nil || account.pendingProofs == 0 {
+			idle = append(idle, accountID)
+		}
+	}
+	return idle
+}
+
 // Retain 让租约在返回的函数调用前保持占用，期间的 Release 推迟到该函数调用时生效
 func (l *AccountLease) Retain() func() error {
 	l.operation.Lock()
+	if l.released {
+		l.operation.Unlock()
+		return func() error { return l.err }
+	}
 	l.holds++
 	l.operation.Unlock()
-	return func() error {
+	return sync.OnceValue(func() error {
 		l.operation.Lock()
 		defer l.operation.Unlock()
 		l.holds--
@@ -2059,16 +2308,32 @@ func (l *AccountLease) Retain() func() error {
 			l.releaseLocked()
 		}
 		return l.err
-	}
+	})
 }
 
-// releaseLocked 归还租约占用的账户名额，调用方持有 operation，已归还时不重复归还
+// AfterRelease 在租约归还后于后台执行 run，租约已归还时立即在后台执行
+func (l *AccountLease) AfterRelease(run func()) {
+	l.operation.Lock()
+	defer l.operation.Unlock()
+	if l.released {
+		go run()
+		return
+	}
+	l.afterRelease = append(l.afterRelease, run)
+}
+
+// releaseLocked 归还租约占用的账户名额并在后台执行 afterRelease，调用方持有 operation，已归还时不重复归还
 func (l *AccountLease) releaseLocked() {
 	if l.released {
 		return
 	}
 	l.released = true
+	for _, run := range l.afterRelease {
+		go run()
+	}
+	l.afterRelease = nil
 	l.pool.mu.Lock()
+	l.finishProofLocked()
 	if l.exclusive {
 		l.account.exclusive = false
 	} else if l.account.active > 0 {
@@ -2417,7 +2682,7 @@ func (p *AccountPool) MarkCooldownIfGeneration(
 	return err
 }
 
-// MarkQuotaCooldownIfGeneration 保存当前目录版本下检查时间为 checkedAt 的额度冷却，递增冷却按同范围上一次冷却计算，同范围已有更晚恢复的冷却时保留它，套餐限额或每日限额冷却期间的其他额度失败只冷却回退选号，换成恢复更晚的同类冷却时回退选号的冷却保留；返回该冷却的恢复时刻与冷却是否因此改变，结果早于已记录的检查时间时恢复时刻为零值
+// MarkQuotaCooldownIfGeneration 保存当前目录版本下检查时间为 checkedAt 的额度冷却，递增冷却按同范围上一次冷却计算，同范围已有恢复更晚的冷却或恢复时刻相差不到一分钟的套餐限额冷却时保留它，套餐限额或每日限额冷却期间的其他额度失败只冷却回退选号，换成恢复更晚的同类冷却时回退选号的冷却保留；返回该冷却的恢复时刻与冷却是否因此改变，结果早于已记录的检查时间时恢复时刻为零值
 func (p *AccountPool) MarkQuotaCooldownIfGeneration(
 	accountID string,
 	modelAccessScope string,
@@ -2460,11 +2725,17 @@ func (p *AccountPool) MarkQuotaCooldownIfGeneration(
 			}
 		}
 		next := CooldownState{Until: cooldown.Until.UTC(), Reason: cooldown.Reason}
-		if cooldown.Escalate {
+		switch {
+		case cooldown.Escalate && strings.HasPrefix(cooldown.Reason, AccountRejectionKind) && !(baseExists && strings.HasPrefix(base.Reason, AccountRejectionKind)):
+			next = CooldownState{Until: now.UTC(), Reason: cooldown.Reason}
+		case cooldown.Escalate:
 			next = planLimitCooldown(base, baseExists, now, cooldown.Reason)
 		}
-		if baseExists && base.Active(now) && !next.Until.After(base.Until) && !(cooldown.explicitRetry && base.Level > 0) {
+		if baseExists && base.Active(now) && (!next.Until.After(base.Until) || samePlanWindow(base, next)) && !(cooldown.explicitRetry && base.Level > 0) {
 			next = base
+		}
+		if RequestQuotaCooldown(cooldown.Reason) {
+			next = next.withRejection(previous, cooldown.RequestSize, now)
 		}
 		until = next.Until
 		if layered && next.Until.Before(previous.Until) {
@@ -2735,6 +3006,11 @@ func verificationRestriction(reason string) bool {
 	return reason == verificationDenial
 }
 
+// VerificationRequired 判断账户是否因上游要求验证而受限
+func (p *AccountPool) VerificationRequired(accountID string) bool {
+	return p.verificationRestricted(accountID)
+}
+
 // verificationRestricted 判断账户因上游要求验证而服务受限
 func (p *AccountPool) verificationRestricted(accountID string) bool {
 	p.mu.Lock()
@@ -2753,6 +3029,23 @@ func (p *AccountPool) clearRestriction(accountID string) error {
 		return true, func(account *Account) {
 			if account.State == AccountRestricted {
 				account.State, account.stateMessage = AccountReady, ""
+			}
+		}, nil
+	})
+	return err
+}
+
+// ClearAccountState 清除账户的服务受限、全局冷却与需要重新登录的标记并删除 runtime-state.json 中的受限与全局冷却记录，各模型的冷却保留，启用的账户回到就绪
+func (p *AccountPool) ClearAccountState(accountID string) error {
+	_, err := p.updateRuntime(accountID, func(_ *Account, runtimeState *accountRuntimeState) (bool, func(*Account), error) {
+		_, cooling := runtimeState.Cooldowns[globalCooldownKey]
+		changed := runtimeState.Restricted != "" || cooling
+		runtimeState.Restricted = ""
+		delete(runtimeState.Cooldowns, globalCooldownKey)
+		return changed, func(account *Account) {
+			if account.Config.Enabled {
+				account.State, account.stateMessage = AccountReady, ""
+				account.authCheckedAt = time.Now().UTC()
 			}
 		}, nil
 	})
@@ -2800,6 +3093,7 @@ func (p *AccountPool) recordCatalogFailure(accountID string, err error) {
 	defer p.mu.Unlock()
 	if account := p.byID[accountID]; account != nil {
 		account.catalogErr = err
+		p.notifyLocked()
 	}
 }
 
@@ -2834,12 +3128,22 @@ func (p *AccountPool) Status() []AccountStatus {
 		if account.runtime.CatalogFingerprint == "" {
 			tier = "Unknown"
 		}
-		if message == "" && account.catalogErr != nil && (account.runtime.CatalogFingerprint == "" || errors.Is(account.catalogErr, camoufoxnative.ErrRegionNotSupported)) {
+		catalogError := ""
+		switch {
+		case account.catalogErr == nil:
+		case account.runtime.CatalogFingerprint != "" && !errors.Is(account.catalogErr, camoufoxnative.ErrRegionNotSupported):
+			catalogError = account.catalogErr.Error()
+		case message == "":
 			message = account.catalogErr.Error()
+		}
+		progress := account.transition
+		if progress.operation == "" {
+			progress = account.refresh
 		}
 		status := AccountStatus{
 			ID:          account.ID,
 			Label:       account.Config.Label,
+			Note:        account.Config.Note,
 			State:       state,
 			Enabled:     account.Config.Enabled,
 			Proxy:       account.Config.Proxy,
@@ -2852,11 +3156,18 @@ func (p *AccountPool) Status() []AccountStatus {
 			Message:     message,
 			Directory:   account.Directory,
 
-			Transition:       account.transition,
-			ActiveRequests:   account.active,
-			CatalogSyncedAt:  account.catalogSyncedAt,
-			HiddenDiscovered: account.hiddenDiscovered,
-			HiddenModels:     len(account.hiddenModels),
+			Transition:           progress.operation,
+			TransitionStep:       progress.step,
+			TransitionIndex:      progress.index,
+			TransitionTotal:      progress.total,
+			TransitionSince:      progress.since,
+			CatalogError:         catalogError,
+			ActiveRequests:       account.active,
+			CatalogSyncedAt:      account.catalogSyncedAt,
+			HiddenDiscovered:     account.hiddenDiscovered,
+			HiddenModels:         len(account.hiddenModels),
+			VerificationRequired: state == AccountRestricted && verificationRestriction(account.runtime.Restricted),
+			DeviceBoundSession:   account.StorageState.DeviceBoundSession(),
 		}
 		if !account.LastUsed.IsZero() {
 			status.LastUsed = timePointer(account.LastUsed)
@@ -2872,11 +3183,10 @@ func (p *AccountPool) ClassifyCandidates(
 	selection AccountSelection,
 	warmAccountIDs []string,
 ) (AccountCandidateGroups, error) {
-	selection = selectionWithChannel(ctx, selection)
 	if p == nil {
 		return AccountCandidateGroups{}, ErrNoEligibleAccount
 	}
-	selection = p.scopedSelection(ctx, selection)
+	selection = p.ScopedSelection(ctx, selection)
 	selection.ModelID = strings.TrimPrefix(strings.TrimSpace(selection.ModelID), "models/")
 	if selection.ResourceID != "" {
 		if err := p.refreshResource(ctx, selection.ResourceID); err != nil {
@@ -2978,6 +3288,11 @@ func (p *AccountPool) tryAcquireLocked(selection AccountSelection, now time.Time
 	waitable := false
 	var earliest time.Time
 	candidates := p.channelCandidatesLocked(indices, selection)
+	if selection.IgnoreQuotaCooldown {
+		sort.SliceStable(candidates, func(left, right int) bool {
+			return p.quotaHeadroomLocked(candidates[left], selection, now) > p.quotaHeadroomLocked(candidates[right], selection, now)
+		})
+	}
 	sort.SliceStable(candidates, func(left, right int) bool {
 		return p.accounts[candidates[left].index].ID == selection.PreferredAccountID && p.accounts[candidates[right].index].ID != selection.PreferredAccountID
 	})
@@ -3022,6 +3337,10 @@ func (p *AccountPool) tryAcquireLocked(selection AccountSelection, now time.Time
 			refreshRuntime = leaseLock != nil
 		}
 		account.active++
+		proofPending := selection.Method == "generateContent"
+		if proofPending {
+			account.pendingProofs++
+		}
 		if candidate.channel == ChannelAssistant {
 			account.assistantBusy = true
 		}
@@ -3031,7 +3350,8 @@ func (p *AccountPool) tryAcquireLocked(selection AccountSelection, now time.Time
 		return &AccountLease{
 			pool: p, account: account, authGeneration: account.authGeneration,
 			modelAccessGeneration: account.modelAccessGeneration, refreshRuntime: refreshRuntime, checkedAt: now.UTC(),
-			channel: candidate.channel, ignoreQuotaCooldown: selection.IgnoreQuotaCooldown,
+			channel: candidate.channel, ignoreQuotaCooldown: selection.IgnoreQuotaCooldown, requestSize: selection.RequestSize,
+			proofPending: proofPending,
 		}, time.Time{}, true, nil
 	}
 	return nil, earliest, waitable, nil
@@ -3278,6 +3598,14 @@ func (p *AccountPool) EnabledAccounts() []string {
 	return ids
 }
 
+// SlotBusy 表示账户此刻没有空闲的普通槽位，取槽位的操作要等在途请求结束；账户不存在时为 false
+func (p *AccountPool) SlotBusy(accountID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	account := p.byID[strings.TrimSpace(accountID)]
+	return account != nil && (account.exclusive || account.exclusiveWaiters > 0 || account.authRefreshers > 0 || account.active >= p.perAccountConcurrency)
+}
+
 // Activity 返回账户是否存在活动租约或独占操作及最近使用时间
 func (p *AccountPool) Activity(accountID string) (bool, time.Time) {
 	p.mu.Lock()
@@ -3302,7 +3630,7 @@ func (p *AccountPool) notifyLocked() {
 }
 
 // loadAccount 载入账户目录，catalogs 不为 nil 时保存本次载入已解析的目录缓存，内容与权益等级相同的账户共用一次解析
-func loadAccount(directory string, catalogs map[catalogCacheKey]catalogCacheParse) (*Account, error) {
+func loadAccount(directory string, catalogs *catalogParses) (*Account, error) {
 	directory, err := filepath.Abs(directory)
 	if err != nil {
 		return nil, fmt.Errorf("解析账户目录: %w", err)
@@ -3368,8 +3696,14 @@ type catalogCacheParse struct {
 	fingerprint string
 }
 
+// catalogParses 是一次载入中各账户共用的目录缓存解析结果
+type catalogParses struct {
+	mu      sync.Mutex
+	entries map[catalogCacheKey]catalogCacheParse
+}
+
 // readCatalogCache 读取 catalog.json，返回加入官网隐藏模型后的 ListModels 目录与缓存内容，内容与 runtime-state 的目录指纹不一致或无法读取时返回空目录与空缓存；catalogs 中已有同一权益等级与原文的解析结果时直接沿用，catalogs 不为 nil 时保存本次解析结果
-func readCatalogCache(filePath string, runtimeState accountRuntimeState, catalogs map[catalogCacheKey]catalogCacheParse) (modelCatalog, accountCatalogCache) {
+func readCatalogCache(filePath string, runtimeState accountRuntimeState, catalogs *catalogParses) (modelCatalog, accountCatalogCache) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return modelCatalog{}, accountCatalogCache{}
@@ -3379,7 +3713,13 @@ func readCatalogCache(filePath string, runtimeState accountRuntimeState, catalog
 		return modelCatalog{}, accountCatalogCache{}
 	}
 	key := catalogCacheKey{tier: runtimeState.BenefitTier, source: string(cache.ListModels)}
-	parsed, ok := catalogs[key]
+	var parsed catalogCacheParse
+	ok := false
+	if catalogs != nil {
+		catalogs.mu.Lock()
+		parsed, ok = catalogs.entries[key]
+		catalogs.mu.Unlock()
+	}
 	if !ok {
 		catalog, err := parseModelCatalog(bytes.NewReader(cache.ListModels))
 		if err != nil {
@@ -3391,7 +3731,9 @@ func readCatalogCache(filePath string, runtimeState accountRuntimeState, catalog
 		}
 		parsed = catalogCacheParse{catalog: catalog, fingerprint: fingerprint}
 		if catalogs != nil {
-			catalogs[key] = parsed
+			catalogs.mu.Lock()
+			catalogs.entries[key] = parsed
+			catalogs.mu.Unlock()
 		}
 	}
 	if parsed.fingerprint != runtimeState.CatalogFingerprint {
@@ -4008,7 +4350,17 @@ func accountCatalogFingerprint(tier BenefitTier, models []Model) (string, error)
 	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
 }
 
-// selectionCooldown 返回账户在作用域上对选择生效的冷却，IgnoreQuotaCooldown 的选择不受套餐限额与每日限额冷却限制，只受其中记录的回退冷却限制
+// quotaHeadroomLocked 返回候选在回退选号中的额度余量：套餐限额或每日限额冷却中为有效的拒绝记录记下的最小请求字节数，没有时为最大值
+func (p *AccountPool) quotaHeadroomLocked(candidate channelCandidate, selection AccountSelection, now time.Time) int64 {
+	account := p.accounts[candidate.index]
+	cooldown, exists := account.runtime.Cooldowns[ChannelCooldownScope(candidate.channel, selectionAccessScope(selection))]
+	if !exists || !cooldown.Active(now) || !now.Before(cooldown.RejectedUntil) {
+		return math.MaxInt64
+	}
+	return cooldown.RejectedSize
+}
+
+// selectionCooldown 返回账户在作用域上对选择生效的冷却，IgnoreQuotaCooldown 的选择不受套餐限额、每日限额与权限拒绝冷却限制，只受其中记录的非权限拒绝回退冷却与拒绝过不大于 RequestSize 的请求的有效拒绝记录限制，拒绝记录生效到它失效与冷却恢复中较早的一个，两种限制都有时生效到较晚结束的一个
 func selectionCooldown(account *Account, scope string, selection AccountSelection, now time.Time) (CooldownState, bool) {
 	var selected CooldownState
 	for _, key := range []string{globalCooldownKey, scope} {
@@ -4016,14 +4368,24 @@ func selectionCooldown(account *Account, scope string, selection AccountSelectio
 			continue
 		}
 		cooldown, exists := account.runtime.Cooldowns[key]
-		if !exists || !cooldown.Active(now) {
+		if !exists || !cooldown.Active(now) || selection.IgnoreQuotaCooldown && strings.HasPrefix(cooldown.Reason, AccountRejectionKind) {
 			continue
 		}
 		if selection.IgnoreQuotaCooldown && RequestQuotaCooldown(cooldown.Reason) {
-			if cooldown.Fallback == nil || !cooldown.Fallback.Active(now) {
+			blocking := CooldownState{}
+			if cooldown.rejects(selection.RequestSize, now) {
+				blocking = cooldown
+				if cooldown.RejectedUntil.Before(cooldown.Until) {
+					blocking.Until = cooldown.RejectedUntil
+				}
+			}
+			if fallback := cooldown.Fallback; fallback != nil && fallback.Active(now) && !strings.HasPrefix(fallback.Reason, AccountRejectionKind) && fallback.Until.After(blocking.Until) {
+				blocking = *fallback
+			}
+			if blocking.Until.IsZero() {
 				continue
 			}
-			cooldown = *cooldown.Fallback
+			cooldown = blocking
 		}
 		if selected.Until.IsZero() || cooldown.Until.After(selected.Until) {
 			selected = cooldown

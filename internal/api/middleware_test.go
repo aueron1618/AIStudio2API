@@ -121,11 +121,15 @@ func TestDynamicAPIKeysWithRequestedAccountAndChannel(t *testing.T) {
 	for _, route := range []struct {
 		prefix  string
 		channel aistudio.Channel
+		action  string
 	}{
-		{"/v1", aistudio.ChannelPlayground},
-		{"/build/v1", aistudio.ChannelBuild},
+		{"/v1", aistudio.ChannelPlayground, ""},
+		{"/build/v1", aistudio.ChannelBuild, ""},
+		{"/v1", aistudio.ChannelPlayground, "/models/test:generateContent"},
+		{"/build/v1", aistudio.ChannelBuild, "/models/test:generateContent"},
+		{"/v1beta", "", "/models/test:generateContent"},
 	} {
-		t.Run(string(route.channel), func(t *testing.T) {
+		t.Run(route.prefix+route.action, func(t *testing.T) {
 			keys := "old-key"
 			bindings := map[string][]string{keys: {"a"}}
 			pool := aistudio.NewAccountPool([]*aistudio.Account{
@@ -148,8 +152,16 @@ func TestDynamicAPIKeysWithRequestedAccountAndChannel(t *testing.T) {
 			request := func(key, account string, status int) {
 				t.Helper()
 				selected, channel = nil, ""
-				r := httptest.NewRequest(http.MethodPost, route.prefix+"/chat/completions", strings.NewReader(`{"model":"test","messages":[{"role":"user","content":"hi"}]}`))
-				r.Header.Set("Authorization", "Bearer "+key)
+				action, body := route.action, `{"contents":[{"parts":[{"text":"hi"}]}]}`
+				if action == "" {
+					action, body = "/chat/completions", `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
+				}
+				r := httptest.NewRequest(http.MethodPost, route.prefix+action, strings.NewReader(body))
+				if route.action == "" {
+					r.Header.Set("Authorization", "Bearer "+key)
+				} else {
+					r.Header.Set("X-Goog-API-Key", key)
+				}
 				r.Header.Set("X-AIStudio-Account", account)
 				w := httptest.NewRecorder()
 				handler.ServeHTTP(w, r)
@@ -164,9 +176,54 @@ func TestDynamicAPIKeysWithRequestedAccountAndChannel(t *testing.T) {
 			request("old-key", "b", http.StatusBadRequest)
 			keys, bindings = "new-key", map[string][]string{"new-key": {"b"}}
 			pool.SetAPIKeyAccounts(bindings)
-			request("old-key", "a", http.StatusUnauthorized)
+			removedKeyStatus := http.StatusUnauthorized
+			if route.action != "" {
+				removedKeyStatus = http.StatusBadRequest
+			}
+			request("old-key", "a", removedKeyStatus)
 			request("new-key", "a", http.StatusBadRequest)
 			request("new-key", "b", http.StatusOK)
+		})
+	}
+}
+
+type bodyReadSpy struct {
+	io.ReadCloser
+	reads int
+}
+
+func (body *bodyReadSpy) Read(buffer []byte) (int, error) {
+	body.reads++
+	return body.ReadCloser.Read(buffer)
+}
+
+func TestAuthenticationBeforeBodyCaptureAndDecoding(t *testing.T) {
+	for _, route := range []struct {
+		path   string
+		status int
+	}{
+		{"/v1/chat/completions", http.StatusUnauthorized},
+		{"/v1/models/test:generateContent", http.StatusBadRequest},
+		{"/build/v1/models/test:generateContent", http.StatusBadRequest},
+		{"/v1beta/models/test:generateContent", http.StatusBadRequest},
+	} {
+		t.Run(route.path, func(t *testing.T) {
+			admin, ledger := &modelLogAdmin{}, &modelLogLedger{enabled: true}
+			keyReads := 0
+			handler := NewHandler(nil, Config{Admin: admin, Ledger: ledger, APIKeys: func() (string, map[string][]string) {
+				keyReads++
+				return "authorized-key", map[string][]string{"authorized-key": {"allowed-account"}}
+			}})
+			request := httptest.NewRequest(http.MethodPost, route.path, nil)
+			body := &bodyReadSpy{ReadCloser: io.NopCloser(strings.NewReader("credential-secret"))}
+			request.Body = body
+			request.Header.Set("X-Goog-API-Key", "wrong-key")
+			request.Header.Set("Content-Encoding", "gzip")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != route.status || body.reads != 0 || keyReads != 1 || admin.entry.Authorized || ledger.body.ID != "" {
+				t.Fatalf("authentication read or captured an unadmitted body: status=%d reads=%d keys=%d entry=%+v body=%+v", response.Code, body.reads, keyReads, admin.entry, ledger.body)
+			}
 		})
 	}
 }

@@ -67,6 +67,12 @@ func writePairingRenewal(directory string, renewal pairingRenewal) error {
 	return os.Rename(file.Name(), filepath.Join(directory, pairingRenewalName))
 }
 
+// hasPairingRenewal 表示账户目录保存了远程配对的续签凭据
+func hasPairingRenewal(directory string) bool {
+	renewal, err := readPairingRenewal(directory)
+	return err == nil && renewal.TokenSHA256 != ""
+}
+
 // pairingRenewedAt 返回账户目录记录的最近一次配对续签时间，没有续签过时为 nil
 func pairingRenewedAt(directory string) *time.Time {
 	renewal, err := readPairingRenewal(directory)

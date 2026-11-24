@@ -16,7 +16,7 @@ func memoryTestManager(t *testing.T, warm, active int) *accountWorkerManager {
 	t.Helper()
 	account := &aistudio.Account{ID: "memory@example.test", Config: aistudio.DefaultAccountConfig("memory@example.test")}
 	pool := aistudio.NewAccountPool([]*aistudio.Account{account}, 1)
-	manager := newAccountWorkerManager(pool, []*aistudio.Account{account}, newRequestRegistry(t.Context()), "", "", time.Second, warm, active, 1)
+	manager := newAccountWorkerManager(pool, []*aistudio.Account{account}, newTestRequestRegistry(t), "", "", time.Second, warm, active, 1)
 	t.Cleanup(func() {
 		if err := manager.Close(); err != nil {
 			t.Error(err)
@@ -34,7 +34,7 @@ func TestGoRuntimeDoesNotPrepareCamoufox(t *testing.T) {
 	cfg := config.Default()
 	cfg.AuthStates = t.TempDir()
 	cfg.Proxy = "http://127.0.0.1:1"
-	service, admin, closeRuntime, err := newRuntime(t.Context(), t.Context(), cfg, newRequestRegistry(t.Context()))
+	service, admin, closeRuntime, err := newRuntime(t.Context(), t.Context(), cfg, newTestRequestRegistry(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,16 +85,22 @@ func TestZeroWarmPoolStartsWithoutWorker(t *testing.T) {
 	}
 }
 
+func testStartupLimit(limiter *startupLimiter) int {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	return limiter.limit
+}
+
 func TestGoWorkerStartupConcurrencyIsBounded(t *testing.T) {
 	manager := memoryTestManager(t, 1, 5)
-	if manager.startup.size() != 1 {
+	if testStartupLimit(&manager.startup) != 1 {
 		t.Fatal("pure Go ignored startup concurrency")
 	}
 	if manager.idleTimeout() != 5*time.Minute {
 		t.Fatal("explicit warm pools must keep existing timeout")
 	}
 	manager.SetCapacity(0, 3, 2)
-	if manager.warmLimit() != 0 || manager.activeLimit() != 3 || manager.startup.size() != 2 || manager.idleTimeout() != 30*time.Second {
+	if manager.warmLimit() != 0 || manager.activeLimit() != 3 || testStartupLimit(&manager.startup) != 2 || manager.idleTimeout() != 30*time.Second {
 		t.Fatal("live capacity update lost zero-warm or Go startup limits")
 	}
 }
@@ -106,7 +112,7 @@ func TestZeroWarmPoolEvictionReleasesRuntimeLease(t *testing.T) {
 	account.runtimeLease = &aistudio.AccountRuntimeLease{}
 	account.warm.Store(true)
 	account.readyAt.Store(time.Now().Add(-time.Minute).UnixNano())
-	if released, err := manager.evictIdleWorker(t.Context(), account.id); err != nil || !released {
+	if released, err := manager.evictIdleWorker(t.Context(), account.id, "test idle eviction"); err != nil || !released {
 		t.Fatalf("idle runtime lease not released: %v, %v", released, err)
 	}
 	if account.warm.Load() || account.runtimeLease != nil {

@@ -346,7 +346,7 @@ func TestRemoteRenewalStopsRevokedAccounts(t *testing.T) {
 			})}
 			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
-			if err := renewRemote(ctx, client, []remoteRenewal{revoked}, io.Discard); err != nil || ctx.Err() != nil {
+			if err := renewRemote(ctx, []remoteRenewal{revoked}, io.Discard, pushTo(client)); err != nil || ctx.Err() != nil {
 				t.Fatalf("revoked renewal did not stop immediately: %v", err)
 			}
 			stored, err := readRenewals()

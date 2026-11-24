@@ -17,6 +17,9 @@ const (
 // FunctionCallMarker 是 GenerateContent 响应流中函数调用 Part 的开头：十个空字段后为带函数名的 functionCall
 var FunctionCallMarker = []byte(`[null,null,null,null,null,null,null,null,null,null,["`)
 
+// ErrFunctionTabUnavailable 表示没有最后一轮是本请求回应的函数调用的空闲标签页
+var ErrFunctionTabUnavailable = errors.New("没有最后一轮是本请求回应的函数调用的标签页")
+
 // functionTab 返回最后一轮是 contents 所回应的函数调用、输入框中没有未发出输入的空闲标签页，即 contents 在其上一轮的对话后追加了 model 与 user 两轮，没有时为 nil；调用方持有 mu
 func (worker *Worker) functionTab(contents []json.RawMessage) *chatTab {
 	if worker.closed {
@@ -48,26 +51,34 @@ func (worker *Worker) acquireFunctionChat(contents []json.RawMessage) (*chatTab,
 	defer worker.mu.Unlock()
 	tab := worker.functionTab(contents)
 	if tab == nil {
-		return nil, errors.New("没有最后一轮是本请求回应的函数调用的标签页")
+		return nil, ErrFunctionTabUnavailable
 	}
 	tab.busy = true
 	worker.useTab(tab.contextID)
 	return tab, nil
 }
 
-// submitResult 像官网用户一样在最后一轮的函数调用块中以可信指针点击函数响应输入框、以 Ctrl+V 粘贴 turn 的函数结果，随后安装一次性钩子并点击提交
-func (worker *Worker) submitResult(ctx, input context.Context, tab *chatTab, turn GenerateTurn, requestID string) error {
+// submitResult 像官网用户一样在最后一轮的函数调用块中以可信指针点击函数响应输入框、以 Ctrl+V 粘贴 turn 的函数结果，随后安装一次性钩子并点击提交，进入每个界面步骤时调用 step
+func (worker *Worker) submitResult(ctx, input context.Context, tab *chatTab, turn GenerateTurn, requestID string, step func(GenerateStep)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	step(StepPasteResult)
 	if err := worker.click(input, tab.contextID, functionResultInputSelector, "", "官网函数响应输入框", pointerMoveDuration); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	worker.mu.Lock()
 	tab.unsent = true
 	worker.mu.Unlock()
-	if err := pasteText(input, worker.client, tab.contextID, turn.Result); err != nil {
+	if err := pasteText(input, worker.client, tab.contextID, turn.Result, false); err != nil {
 		return fmt.Errorf("粘贴函数结果: %w", err)
 	}
 	if err := worker.arm(ctx, tab, turn, requestID); err != nil {
 		return err
 	}
-	return worker.click(input, tab.contextID, functionResultSubmitSelector, "", "官网函数响应提交按钮", pointerMoveDuration)
+	step(StepClickSubmit)
+	return worker.clickArmed(ctx, tab, requestID, functionResultSubmitSelector, "官网函数响应提交按钮", pointerMoveDuration)
 }

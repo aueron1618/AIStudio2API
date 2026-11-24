@@ -83,7 +83,7 @@ func TestAccountTaskCancellationWaitsForRelease(t *testing.T) {
 			t.Cleanup(func() { close(release) })
 			calls := 0
 			task := tasks.start(request, lifecycle, AccountTask{Items: []AccountTaskItem{{State: "pending"}, {State: "pending"}, {State: "pending"}}}, func(ctx context.Context, update accountTaskUpdate) {
-				runAccountTaskItems(ctx, update, 3, func(index int) (AdminAccount, error) {
+				runAccountTaskItems(ctx, update, 3, func(_ context.Context, index int) (AdminAccount, error) {
 					calls++
 					if index == 0 {
 						return AdminAccount{Label: "finished@example.test"}, nil
@@ -166,12 +166,45 @@ func TestAccountTaskCanceledSuccessIsNotDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	task := AccountTask{Items: []AccountTaskItem{{State: "pending"}}}
-	runAccountTaskItems(ctx, func(update func(*AccountTask)) { update(&task) }, 1, func(int) (AdminAccount, error) {
+	runAccountTaskItems(ctx, func(update func(*AccountTask)) { update(&task) }, 1, func(context.Context, int) (AdminAccount, error) {
 		cancel()
 		return AdminAccount{Label: "uncommitted@example.test"}, nil
 	})
 	if item := task.Items[0]; item.State != "failed" || item.Code != "account_task_canceled" || item.Label != "" {
 		t.Fatalf("canceled operation reported success: %+v", item)
+	}
+}
+
+func TestAccountTaskProgressCallbacks(t *testing.T) {
+	task := AccountTask{Items: []AccountTaskItem{{Label: "known-account", State: "pending"}}}
+	runAccountTaskItems(t.Context(), func(update func(*AccountTask)) { update(&task) }, 1, func(ctx context.Context, _ int) (AdminAccount, error) {
+		if TaskLabel(ctx) != "known-account" {
+			t.Fatal("item context lost its account label")
+		}
+		ReportTaskStep(ctx, TaskStepSaving)
+		ReportTaskLabel(ctx, "verified-account")
+		if task.Items[0].Step != TaskStepSaving || task.Items[0].Label != "verified-account" {
+			t.Fatal("per-item progress was not published")
+		}
+		return AdminAccount{Label: "verified-account"}, nil
+	})
+	if item := task.Items[0]; item.State != "done" || item.Label != "verified-account" || item.Step != "" {
+		t.Fatalf("finished item retained a running step: %+v", item)
+	}
+}
+
+func TestAccountTaskAdmissionDuringRuntimeTransition(t *testing.T) {
+	lifecycle, cancel := context.WithCancel(t.Context())
+	cancel()
+	admin := &taskEndpointAdmin{cookieImportAdmin: cookieImportAdmin{lifecycle: lifecycle}}
+	handler := NewHandler(nil, Config{Admin: admin})
+	response := accountTaskRequest(handler, http.MethodPost, "/api/accounts", `{}`, nil)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"account_task_canceled"`) {
+		t.Fatalf("runtime transition admitted a new task: %d %s", response.Code, response.Body)
+	}
+	listed := accountTaskRequest(handler, http.MethodGet, "/api/accounts/tasks", "", nil)
+	if strings.TrimSpace(listed.Body.String()) != `{"tasks":[]}` {
+		t.Fatalf("canceled lifecycle registered a task: %s", listed.Body)
 	}
 }
 

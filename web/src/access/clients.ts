@@ -6,6 +6,7 @@ import openClawIcon from '@lobehub/icons-static-svg/icons/openclaw-color.svg?raw
 import hermesIcon from '@lobehub/icons-static-svg/icons/hermesagent.svg?raw'
 import magpieIcon from '@lobehub/icons-static-svg/icons/magpie.svg?raw'
 import deepSeekIcon from '@lobehub/icons-static-svg/icons/deepseek-color.svg?raw'
+import antigravityIcon from '@lobehub/icons-static-svg/icons/antigravity-color.svg?raw'
 import cherryIcon from '@lobehub/icons-static-svg/icons/cherrystudio-color.svg?raw'
 import sillyTavernIcon from '@lobehub/icons-static-svg/icons/sillytavern-color.svg?raw'
 import openWebuiIcon from '@lobehub/icons-static-svg/icons/openwebui.svg?raw'
@@ -31,13 +32,13 @@ export const protocolNames: Record<Protocol, string> = {
   gemini: 'Gemini API',
 }
 
-// ClientInput 是生成客户端配置所需的服务地址、API key、所选模型、Claude Code 三档模型、全部对话模型、实时目录、终端、接入协议与界面文案
+// ClientInput 是生成客户端配置所需的服务地址、API key、所选模型、Claude Code 四档模型、全部对话模型、实时目录、终端、接入协议与界面文案
 export interface ClientInput {
   origin: string
   key: string
   model: Model | undefined
   modelID: string
-  tiers: { opus: string; sonnet: string; haiku: string }
+  tiers: { fable: string; opus: string; sonnet: string; haiku: string }
   models: Model[]
   catalog: Model[]
   shell: Shell
@@ -246,12 +247,13 @@ function cherryHost(input: ClientInput): string {
   return input.protocol === 'gemini' ? input.origin : protocolURL(input)
 }
 
-// claudeVariables 是 Claude Code 使用的环境变量：Anthropic 地址、key、主模型、opus、sonnet、haiku 三档模型与主模型的上下文窗口
+// claudeVariables 是 Claude Code 使用的环境变量：Anthropic 地址、key、主模型、fable、opus、sonnet、haiku 四档模型与主模型的上下文窗口
 function claudeVariables(input: ClientInput): [string, string][] {
   return [
     ['ANTHROPIC_BASE_URL', clientBase(input).replace(/\/v1$/, '')],
     ['ANTHROPIC_AUTH_TOKEN', input.key],
     ['ANTHROPIC_MODEL', input.modelID],
+    ['ANTHROPIC_DEFAULT_FABLE_MODEL', input.tiers.fable],
     ['ANTHROPIC_DEFAULT_OPUS_MODEL', input.tiers.opus],
     ['ANTHROPIC_DEFAULT_SONNET_MODEL', input.tiers.sonnet],
     ['ANTHROPIC_DEFAULT_HAIKU_MODEL', input.tiers.haiku],
@@ -683,6 +685,35 @@ export const clients: Client[] = [
         'access.step.keyRun',
         [[keyVariable, input.key]],
         'dsh --patch aistudio2api.patch.yml',
+      ),
+    ],
+  },
+  {
+    id: 'agy',
+    name: 'Antigravity CLI',
+    icon: antigravityIcon,
+    group: 'agent',
+    protocols: ['gemini'],
+    summary: 'access.client.agy',
+    homepage: 'https://github.com/google-antigravity/antigravity-cli',
+    noModel: true,
+    shell: true,
+    steps: (input) => [
+      {
+        kind: 'code',
+        text: 'access.step.configFile',
+        file: '~/.gemini/antigravity-cli/settings.json',
+        language: 'json',
+        code: json({ modelProvider: 'gemini' }),
+      },
+      envStep(
+        input,
+        'access.step.envRun',
+        [
+          ['GEMINI_API_KEY', input.key],
+          ['GOOGLE_GEMINI_BASE_URL', input.origin],
+        ],
+        'agy',
       ),
     ],
   },

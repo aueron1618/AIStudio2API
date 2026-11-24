@@ -21,6 +21,7 @@ type NativeLoginDriver struct {
 
 var _ IsolatedLoginDriver = (*NativeLoginDriver)(nil)
 var _ CookieLoginDriver = (*NativeLoginDriver)(nil)
+var _ AccountVerifyDriver = (*NativeLoginDriver)(nil)
 
 // NewNativeLoginDriver 创建纯 Go Camoufox 登录驱动
 func NewNativeLoginDriver(camoufoxPath string) (*NativeLoginDriver, error) {
@@ -36,7 +37,33 @@ func (driver *NativeLoginDriver) Login(ctx context.Context, request IsolatedLogi
 	if driver == nil {
 		return IsolatedLoginResult{}, errors.New("纯 Go Camoufox 登录驱动未初始化")
 	}
-	result, err := camoufoxnative.Login(ctx, driver.options(request))
+	options := driver.options(request)
+	options.OnVerifyStep = request.OnVerifyStep
+	options.VerifyPollInterval = request.VerifyPollInterval
+	if request.OnLoggedIn != nil {
+		options.OnLoggedIn = func(callbackCtx context.Context, raw camoufoxnative.LoginResult) error {
+			result, err := decodeNativeLoginResult(raw, "camoufox")
+			if err != nil {
+				return err
+			}
+			return request.OnLoggedIn(callbackCtx, result)
+		}
+	}
+	if request.CheckVerification != nil {
+		options.CheckVerification = func(callbackCtx context.Context, raw []byte) (bool, error) {
+			var state StorageState
+			if len(raw) > 0 {
+				if err := json.Unmarshal(raw, &state); err != nil {
+					return true, fmt.Errorf("解析验证状态: %w", err)
+				}
+				if err := state.Validate(); err != nil {
+					return true, err
+				}
+			}
+			return request.CheckVerification(callbackCtx, state)
+		}
+	}
+	result, err := camoufoxnative.Login(ctx, options)
 	if err != nil {
 		return IsolatedLoginResult{}, err
 	}
@@ -77,6 +104,7 @@ func decodeNativeLoginResult(result camoufoxnative.LoginResult, source string) (
 	return IsolatedLoginResult{
 		StorageState: state, Email: result.Email, VerifiedAt: result.VerifiedAt,
 		DriveError: result.DriveError, CloseError: result.CloseError,
+		Saved: result.Saved, VerificationPending: result.VerificationPending, VerificationError: result.VerificationError,
 	}, nil
 }
 
@@ -91,4 +119,46 @@ func (driver *NativeLoginDriver) options(request IsolatedLoginRequest) camoufoxn
 		Timeout:        loginTimeout,
 		View:           request.View,
 	}
+}
+
+// Verify 启动隔离 Camoufox 载入已有账户的认证状态并停在官网验证页，自动再核对直到通过或窗口关闭
+func (driver *NativeLoginDriver) Verify(ctx context.Context, request AccountVerifyRequest) (bool, error) {
+	if driver == nil {
+		return true, errors.New("纯 Go Camoufox 登录驱动未初始化")
+	}
+	if err := request.StorageState.Validate(); err != nil {
+		return true, err
+	}
+	encoded, err := json.Marshal(request.StorageState)
+	if err != nil {
+		return true, fmt.Errorf("编码账户认证状态: %w", err)
+	}
+	options := camoufoxnative.VerifyOptions{
+		ExecutablePath:   driver.camoufox,
+		Directory:        request.Directory,
+		StorageStateJSON: encoded,
+		AuthUser:         request.AuthUser,
+		Locale:           request.Locale,
+		Timezone:         request.Timezone,
+		Proxy:            request.Proxy,
+		Timeout:          loginTimeout,
+		View:             request.View,
+		OnVerifyStep:     request.OnVerifyStep,
+		PollInterval:     request.PollInterval,
+	}
+	if request.CheckVerification != nil {
+		options.CheckVerification = func(callbackCtx context.Context, raw []byte) (bool, error) {
+			var state StorageState
+			if len(raw) > 0 {
+				if err := json.Unmarshal(raw, &state); err != nil {
+					return true, fmt.Errorf("解析验证状态: %w", err)
+				}
+				if err := state.Validate(); err != nil {
+					return true, err
+				}
+			}
+			return request.CheckVerification(callbackCtx, state)
+		}
+	}
+	return camoufoxnative.Verify(ctx, options)
 }

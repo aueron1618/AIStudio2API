@@ -68,6 +68,11 @@ func (c *Client) setBenefitTier(accountID string, tier BenefitTier) {
 	c.tierMu.Unlock()
 }
 
+// DecodeBenefitTier 解码 GetAiStudioBenefitTier 响应正文为账户权益等级
+func DecodeBenefitTier(raw []byte) (BenefitTier, error) {
+	return decodeBenefitTier(raw)
+}
+
 func decodeBenefitTier(raw []byte) (BenefitTier, error) {
 	value, err := decodeJSONValue(raw)
 	if err != nil {
@@ -128,7 +133,10 @@ func (e *ModelAccessError) Error() string {
 			names = append(names, fmt.Sprintf("访问方式 %d", mode))
 		}
 	}
-	return fmt.Sprintf("模型 %s 需要 %s，启用的账户都不具备", e.Model, strings.Join(names, " 或 "))
+	if len(names) == 1 {
+		return fmt.Sprintf("模型 %s 需要 %s，启用的账户都不具备", e.Model, names[0])
+	}
+	return fmt.Sprintf("模型 %s 需要以下任一权益，启用的账户都不具备：%s", e.Model, strings.Join(names, "；"))
 }
 
 // HTTPStatus 返回权益不足对应的状态码

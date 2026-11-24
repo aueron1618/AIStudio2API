@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Mag1cFall/AIStudio2API/internal/api"
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	"github.com/Mag1cFall/AIStudio2API/internal/proxydial"
 )
@@ -58,9 +59,12 @@ func (service *trackedService) reportProxyFailure(proxy string, label string, er
 
 // probeProxyPool 在生成服务启动时检测多个代理，账户先改绑到可用代理再载入页面与预热 Worker
 func (service *trackedService) probeProxyPool(ctx context.Context) {
-	if len(service.proxies.Status()) < 2 {
+	proxies := len(service.proxies.Status())
+	if proxies < 2 {
 		return
 	}
+	service.enterLaunchStep("probe_proxies")
+	service.requests.logStage("service", "INFO", api.LogStage{Name: "生成服务启动"}, "检测代理池", "proxies", proxies)
 	changed, err := service.proxies.Probe(ctx, checkProxy)
 	if err != nil && ctx.Err() == nil {
 		service.requests.log("service", "WARN", "代理改绑失败", "error", err)
@@ -86,18 +90,15 @@ func (admin *runtimeAdmin) probeProxies(ctx context.Context) {
 	}
 }
 
-// rebindAccounts 在后台按代理池的新绑定重建账户的请求头客户端与 Worker
+// rebindAccounts 在后台按代理池的新绑定各自重建受影响账户的请求头客户端与 Worker
 func (admin *runtimeAdmin) rebindAccounts(accountIDs []string) {
-	if len(accountIDs) == 0 {
-		return
-	}
-	go func() {
-		for _, accountID := range accountIDs {
+	for _, accountID := range accountIDs {
+		go func() {
 			if err := admin.rebindAccount(admin.lifecycle, accountID); err != nil && admin.lifecycle.Err() == nil {
 				admin.requests.log(accountID, "WARN", "代理改绑失败", "error", err)
 			}
-		}
-	}()
+		}()
+	}
 }
 
 func (admin *runtimeAdmin) rebindAccount(ctx context.Context, accountID string) error {

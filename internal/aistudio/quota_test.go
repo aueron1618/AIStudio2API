@@ -328,7 +328,7 @@ func TestQuotaCooldownKeepsKnownResetWithShortFallback(t *testing.T) {
 		{30 * time.Second, 45 * time.Second, true},
 		{CooldownQueueLimit, time.Second, true},
 	} {
-		err := QueuedCoolingError("shared", CooldownState{Until: time.Now().Add(test.delay)}, test.queued)
+		err := QueuedCoolingError(t.Context(), "shared", CooldownState{Until: time.Now().Add(test.delay)}, test.queued)
 		var cooling *AllCoolingError
 		if errors.As(err, &cooling) != test.blocked {
 			t.Fatalf("queued=%v delay=%v err=%v", test.queued, test.delay, err)

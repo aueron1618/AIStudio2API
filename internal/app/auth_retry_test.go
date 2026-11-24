@@ -124,8 +124,8 @@ func TestBoundCookieRefreshUpdatesStoredStateAndWorker(t *testing.T) {
 	}
 }
 
-// TestAuthRefreshWithoutExtension 验证缺少续签扩展的账户从当前 Chrome 导入同一邮箱并写回扩展，重新登录保留扩展
-func TestAuthRefreshWithoutExtension(t *testing.T) {
+// TestAuthRefreshKeepsAccountSource verifies that missing renewal material never triggers local identity discovery.
+func TestAuthRefreshKeepsAccountSource(t *testing.T) {
 	directory := t.TempDir()
 	storage := filepath.Join(directory, "storage-state.json")
 	state := `{"cookies":[{"name":"SAPISID","value":"old","domain":".google.com","path":"/","secure":true,"sameSite":"Lax"}],"origins":[]}`
@@ -152,9 +152,8 @@ func TestAuthRefreshWithoutExtension(t *testing.T) {
 		cookies = append(cookies, aistudio.StateCookie{Name: name, Value: "chrome", Domain: ".google.com", Path: "/", Expires: -1, Secure: true, SameSite: "Lax"})
 	}
 	refresher := &authRuntimeRefresher{
-		pool: pool, requests: newRequestRegistry(t.Context()),
-		chromeHas: func(email string) bool { return email == account.ID },
-		importCurrent: func(_ context.Context, source aistudio.AuthSource, _ *aistudio.ChromeOAuthMaterial, _ string) (aistudio.StorageState, error) {
+		pool: pool, requests: newTestRequestRegistry(t),
+		importCurrent: func(_ context.Context, source aistudio.AuthSource, _ aistudio.ChromeOAuthMaterial, _ string) (aistudio.StorageState, error) {
 			updated := aistudio.StorageState{Cookies: cookies}
 			updated.SetAuthExtension(aistudio.AuthExtension{
 				Source: source, OAuth: &aistudio.ChromeOAuthMaterial{GaiaID: "gaia", RefreshToken: "token"},
@@ -164,28 +163,35 @@ func TestAuthRefreshWithoutExtension(t *testing.T) {
 		reset: func(string) error { return nil },
 	}
 	ctx := aistudio.ContextWithAccountLease(t.Context(), lease)
-	if !refresher.Available(ctx) {
-		t.Fatal("账户在 Chrome 中登录但被判定为不可续签")
+	if refresher.Available(ctx) {
+		t.Fatal("没有 OAuth 续签材料的账户被判定为可续签")
 	}
-	if err := refresher.Refresh(ctx, lease.AuthGeneration()); err != nil {
+	if err := refresher.Refresh(ctx, lease.AuthGeneration()); err == nil {
+		t.Fatal("没有 OAuth 续签材料的账户续签成功")
+	}
+	if stored, err := os.ReadFile(storage); err != nil || string(stored) != state {
+		t.Fatalf("续签失败后认证状态被改写: %s err=%v", stored, err)
+	}
+
+	chrome := aistudio.StorageState{Cookies: cookies}
+	chrome.SetAuthExtension(aistudio.AuthExtension{
+		Source: aistudio.AuthSource{Browser: "chrome", Email: account.ID},
+		OAuth:  &aistudio.ChromeOAuthMaterial{GaiaID: "gaia", RefreshToken: "token"},
+	})
+	if err := lease.SaveStorageState(chrome); err != nil {
+		t.Fatal(err)
+	}
+	login := aistudio.StorageState{Cookies: cookies}
+	login.SetAuthExtension(aistudio.AuthExtension{Source: aistudio.AuthSource{Browser: "camoufox", Email: account.ID}})
+	if err := replaceAccountState(t.Context(), lease, login, ""); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := aistudio.LoadStorageState(storage)
 	if err != nil {
 		t.Fatal(err)
 	}
-	extension, exists, err := stored.AuthExtension()
-	if err != nil || !exists || extension.OAuth == nil || extension.Source.Email != account.ID || stored.Cookies[0].Value != "chrome" {
-		t.Fatalf("续签结果 exists=%t extension=%+v cookies=%+v err=%v", exists, extension, stored.Cookies, err)
-	}
-
-	login := aistudio.StorageState{Cookies: cookies}
-	login.SetAuthExtension(aistudio.AuthExtension{Source: aistudio.AuthSource{Browser: "camoufox", Email: account.ID}})
-	if err := keepAuthExtension(&login, stored); err != nil {
-		t.Fatal(err)
-	}
-	if kept, exists, _ := login.AuthExtension(); !exists || kept.OAuth == nil || kept.OAuth.RefreshToken != "token" {
-		t.Fatalf("重新登录丢失续签扩展: %+v", kept)
+	if extension, _, err := stored.AuthExtension(); err != nil || extension.OAuth == nil || extension.Source.Browser != "chrome" || extension.Bound != nil {
+		t.Fatalf("重新登录后的认证扩展 %+v err=%v", extension, err)
 	}
 }
 

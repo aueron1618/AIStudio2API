@@ -3,8 +3,7 @@ import { computed } from 'vue'
 import { useI18n } from '@/i18n'
 import UiIcon from '@/playground/ui/UiIcon.vue'
 import AddImageButton from './AddImageButton.vue'
-import { dataURL } from '../protocols'
-import type { VideoFrame } from './video'
+import { frameURL, type VideoFrame } from './video'
 
 const props = defineProps<{
   frame: VideoFrame | undefined
@@ -12,7 +11,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ add: [image: File]; remove: [] }>()
 const { t } = useI18n()
-const source = computed(() => (props.frame ? dataURL(props.frame) : ''))
+const source = computed(() => (props.frame ? frameURL(props.frame) : ''))
 </script>
 
 <template>

@@ -228,31 +228,37 @@ func (copies *TemporaryFileCopies) Cleanup() error {
 	return copies.cleanup(context.Background())
 }
 
-// cleanup 以 parent 为父 context 删除全部临时 Drive 副本，删除成功或文件已不存在的副本解除绑定，删除失败的保留绑定
+// cleanup 以 parent 为父 context 同时删除全部临时 Drive 副本，删除成功或文件已不存在的副本解除绑定，删除失败的保留绑定
 func (copies *TemporaryFileCopies) cleanup(parent context.Context) error {
 	copies.once.Do(func() {
 		if copies.release != nil {
 			copies.release()
 		}
-		for index := len(copies.copies) - 1; index >= 0; index-- {
-			cleanupCtx, cancel := context.WithTimeout(parent, driveCleanupTimeout)
-			cleanupCtx = ContextWithAccountLease(cleanupCtx, copies.lease)
-			copy := copies.copies[index]
-			deleteErr := copies.client.deleteDriveFile(
-				cleanupCtx, copies.lease.Account().ID, copy.token, copy.id,
-			)
-			if driveFileNotFound(deleteErr, "DriveDelete") {
-				deleteErr = nil
-			}
-			bindErr := error(nil)
-			if deleteErr == nil && copy.bound {
-				if bindErr = copies.lease.pool.unbindResourceContext(cleanupCtx, copy.id); errors.Is(bindErr, ErrResourceNotFound) {
-					bindErr = nil
+		errs := make([]error, len(copies.copies))
+		var group sync.WaitGroup
+		for index, copy := range copies.copies {
+			group.Go(func() {
+				cleanupCtx, cancel := context.WithTimeout(parent, driveCleanupTimeout)
+				defer cancel()
+				cleanupCtx = ContextWithAccountLease(cleanupCtx, copies.lease)
+				deleteErr := copies.client.deleteDriveFile(
+					cleanupCtx, copies.lease.Account().ID, copy.token, copy.id,
+				)
+				if driveFileNotFound(deleteErr, "DriveDelete") {
+					deleteErr = nil
 				}
-			}
-			cancel()
-			copies.err = errors.Join(copies.err, deleteErr, bindErr)
+				bindErr := error(nil)
+				if deleteErr == nil && copy.bound {
+					if bindErr = copies.lease.pool.unbindResourceContext(cleanupCtx, copy.id); errors.Is(bindErr, ErrResourceNotFound) {
+						bindErr = nil
+					}
+				}
+				errs[index] = errors.Join(deleteErr, bindErr)
+			})
 		}
+		group.Wait()
+		slices.Reverse(errs)
+		copies.err = errors.Join(errs...)
 	})
 	return copies.err
 }
@@ -489,7 +495,7 @@ func (s *PooledService) UploadFile(ctx context.Context, request UploadRequest) (
 
 // fileUploadAccountIDs 返回请求所用 API key 可用的上传候选账户，空闲账户在前
 func (p *AccountPool) fileUploadAccountIDs(ctx context.Context) []string {
-	selection := p.scopedSelection(ctx, AccountSelection{})
+	selection := p.ScopedSelection(ctx, AccountSelection{})
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	available := make([]string, 0, len(p.accounts))
@@ -834,11 +840,11 @@ type inlineMediaKey struct {
 
 // inlineMediaKeyOf 返回内联附件 part 的标识
 func inlineMediaKeyOf(part Part) inlineMediaKey {
-	digest := sha256.Sum256(part.InlineData.Data)
+	digest := part.InlineData.SHA256()
 	return inlineMediaKey{mime: part.InlineData.MIME, sha256: base64.StdEncoding.EncodeToString(digest[:]), name: part.DisplayName}
 }
 
-// InlineMediaAccount 返回已上传 contents 中最多内联附件的账户，没有账户上传过时返回空串
+// InlineMediaAccount 返回已上传 contents 中最多未过期内联附件的可用账户，没有符合条件的账户时返回空串
 func (p *AccountPool) InlineMediaAccount(contents []Content) string {
 	keys := make(map[inlineMediaKey]bool)
 	for _, content := range contents {
@@ -853,11 +859,15 @@ func (p *AccountPool) InlineMediaAccount(contents []Content) string {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	now := time.Now().UTC()
 	best, bestHits := "", 0
 	for _, account := range p.accounts {
+		if !account.Config.Enabled || account.State != AccountReady {
+			continue
+		}
 		hits := 0
 		for _, binding := range account.runtime.Resources {
-			if binding.Kind == "inline-media" && keys[inlineMediaKey{mime: binding.MIME, sha256: binding.SHA256, name: binding.DisplayName}] {
+			if binding.Kind == "inline-media" && binding.expiresAt().After(now) && keys[inlineMediaKey{mime: binding.MIME, sha256: binding.SHA256, name: binding.DisplayName}] {
 				hits++
 			}
 		}
@@ -1048,7 +1058,10 @@ func (s *PooledService) inlineMediaBusy(id string) bool {
 	return s.inlineMediaUses[id] > 0
 }
 
-// UploadInlineMediaToLease 把内联附件改写为目标账户 Drive 文件的引用，keepImages 为真时 CreateInteractionStream 可内联的图片保持内联，同一账户已上传过的相同内容直接引用，Drive 存储空间已满时没有上传成功的附件保持内联（keepImages 为真时只接受内联图片，仍返回上传错误），闲置超过 inlineMediaIdle 的旧文件在本次请求结束时删除
+// UploadInlineMediaToLease 把内联附件改写为目标账户 Drive 文件的引用
+// keepImages 为真时 CreateInteractionStream 可内联的图片保持内联
+// 同一账户已上传过的相同内容直接引用；闲置超过 inlineMediaIdle 的旧文件在本次请求结束时删除
+// Drive 存储空间已满时没有上传成功的附件保持内联，keepImages 为真时只接受内联图片，仍返回上传错误
 func (s *PooledService) UploadInlineMediaToLease(
 	ctx context.Context,
 	target *AccountLease,
@@ -1125,9 +1138,30 @@ func (s *PooledService) UploadInlineMediaToLease(
 	staged := slices.DeleteFunc(slices.Clone(pending), func(job uploadJob) bool {
 		return rewritten[last].Role != RoleUser || !slices.ContainsFunc(parts[job.key], func(index partIndex) bool { return index.content == last })
 	})
-	uploader, _ := pageOf(targetID).(pageUploader)
+	var uploader pageUploader
+	if worker := pageWorker(targetID); worker != nil {
+		tab, pageErr := worker.usePage(targetCtx)
+		if pageErr != nil {
+			return nil, nil, errors.Join(pageErr, temporary.Cleanup())
+		}
+		uploader, _ = worker.tabPage(tab).(pageUploader)
+	}
+	rerun := false
 	if uploader != nil && len(staged) > 0 {
-		token = uploader.beforeUpload(targetCtx)
+		runs, _ := s.client.protected.(PageRunsProtectedTransport)
+		rerun = runs != nil && runs.RanBefore(targetID, contents)
+		token = uploader.beforeUpload(targetCtx, rerun)
+	}
+	if uploader != nil && (len(pending) > 0 || len(expired) > 0) && uploader.driveDenied(targetCtx) {
+		temporary.release = s.useInlineMedia(used)
+		inline := make([]inlineFile, 0, len(staged))
+		for _, job := range staged {
+			inline = append(inline, inlineFile{name: job.name, blob: job.blob})
+		}
+		uploader.inlined(targetCtx, rerun, inline, func(ctx context.Context, body []byte) ([]byte, error) {
+			return s.client.readRPC(issuedByPage(ctx), "CountTokens", targetID, body)
+		})
+		return rewritten, temporary, nil
 	}
 	if len(pending) > 0 || len(expired) > 0 {
 		var lookup sync.WaitGroup
@@ -1148,6 +1182,10 @@ func (s *PooledService) UploadInlineMediaToLease(
 			}
 			return nil, nil, errors.Join(err, temporary.Cleanup())
 		}
+		if driveAuthorizationMissing(folderErr) {
+			temporary.release = s.useInlineMedia(used)
+			return rewritten, temporary, nil
+		}
 	}
 	for _, id := range expired {
 		temporary.copies = append(temporary.copies, temporaryDriveCopy{id: id, token: token, bound: true})
@@ -1157,8 +1195,16 @@ func (s *PooledService) UploadInlineMediaToLease(
 		drive := s.client.transport.(DriveTransport)
 		uploadCtx, cancelUploads := context.WithCancel(targetCtx)
 		resultChannel := make(chan uploadResult, len(pending))
+		sem := make(chan struct{}, min(len(pending), 4))
 		for index, job := range pending {
 			go func(index int, job uploadJob) {
+				select {
+				case sem <- struct{}{}:
+				case <-uploadCtx.Done():
+					resultChannel <- uploadResult{index: index, err: uploadCtx.Err()}
+					return
+				}
+				defer func() { <-sem }()
 				file, err := drive.UploadDrive(uploadCtx, targetID, token, UploadRequest{
 					AccountID: targetID,
 					Name:      job.name,
@@ -1224,7 +1270,7 @@ func (s *PooledService) UploadInlineMediaToLease(
 		reader := s.client.transport.(DriveFileReader)
 		uploader.uploaded(targetCtx, refs, pageDrive{
 			count: func(ctx context.Context, body []byte) ([]byte, error) {
-				return s.client.readRPC(ctx, "CountTokens", targetID, body)
+				return s.client.readRPC(issuedByPage(ctx), "CountTokens", targetID, body)
 			},
 			read: func(ctx context.Context, fileID string) {
 				reader.ReadDriveFile(ctx, targetID, token, fileID)
@@ -1285,7 +1331,7 @@ func (t *MakerSuiteHTTPTransport) UploadDrive(ctx context.Context, accountID str
 	if owned {
 		defer func() { err = errors.Join(err, lease.Release()) }()
 	}
-	client, err := t.clientForProxy(lease.Account().EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(lease.Account())
 	if err != nil {
 		return FileRef{}, err
 	}
@@ -1296,7 +1342,7 @@ func (t *MakerSuiteHTTPTransport) UploadDrive(ctx context.Context, accountID str
 	if err != nil {
 		return FileRef{}, err
 	}
-	if err := t.loadDriveDiscovery(ctx, lease, client, headers, apiKey); err != nil {
+	if err := t.loadDriveDiscovery(ctx, lease.Account(), client, headers, apiKey); err != nil {
 		return FileRef{}, err
 	}
 	headers.Set("Authorization", "Bearer "+token)
@@ -1345,24 +1391,22 @@ func uriComponent(value string) string {
 }
 
 // loadDriveDiscovery 在账户第一次经 gapi 上传前按官网页面读取 Drive v3 discovery 文档，每个账户读取一次，同时上传的多个文件等待同一次读取
-func (t *MakerSuiteHTTPTransport) loadDriveDiscovery(ctx context.Context, lease *AccountLease, client *http.Client, gapi http.Header, apiKey string) error {
-	account := lease.Account()
+func (t *MakerSuiteHTTPTransport) loadDriveDiscovery(ctx context.Context, account *Account, client *http.Client, gapi http.Header, apiKey string) error {
 	_, err, _ := t.driveDiscovery.Do(account.ID, func() (any, error) {
-		return nil, t.readDriveDiscovery(ctx, lease, client, gapi, apiKey)
+		return nil, t.readDriveDiscovery(ctx, account, client, gapi, apiKey)
 	})
 	return err
 }
 
 // readDriveDiscovery 读取账户尚未读取过的 Drive v3 discovery 文档
-func (t *MakerSuiteHTTPTransport) readDriveDiscovery(ctx context.Context, lease *AccountLease, client *http.Client, gapi http.Header, apiKey string) error {
-	account := lease.Account()
+func (t *MakerSuiteHTTPTransport) readDriveDiscovery(ctx context.Context, account *Account, client *http.Client, gapi http.Header, apiKey string) error {
 	t.driveMu.Lock()
 	loaded := t.driveDiscovered[account.ID]
 	t.driveMu.Unlock()
 	if loaded {
 		return nil
 	}
-	if err := t.getDriveDiscovery(ctx, lease, client, gapi, apiKey); err != nil {
+	if err := t.getDriveDiscovery(ctx, account, client, gapi, apiKey); err != nil {
 		return err
 	}
 	t.driveMu.Lock()
@@ -1371,13 +1415,12 @@ func (t *MakerSuiteHTTPTransport) readDriveDiscovery(ctx context.Context, lease 
 	return nil
 }
 
-// getDriveDiscovery 以页面 gapi 的请求形状读取 Drive v3 discovery 文档
-func (t *MakerSuiteHTTPTransport) getDriveDiscovery(ctx context.Context, lease *AccountLease, client *http.Client, gapi http.Header, apiKey string) error {
-	account := lease.Account()
+// getDriveDiscovery 以页面 gapi 的请求形状、页面的登录凭据读取 Drive v3 discovery 文档
+func (t *MakerSuiteHTTPTransport) getDriveDiscovery(ctx context.Context, account *Account, client *http.Client, gapi http.Header, apiKey string) error {
 	address := fmt.Sprintf(driveDiscoveryURL, url.QueryEscape(apiKey))
-	state, err := lease.ReloadStorageState()
+	state, err := pageLoginState(ctx, account)
 	if err != nil {
-		return fmt.Errorf("读取账户 storage state: %w", err)
+		return fmt.Errorf("读取账户登录状态: %w", err)
 	}
 	authorization, err := t.signer.Authorization(state)
 	if err != nil {
@@ -1426,24 +1469,21 @@ func (t *MakerSuiteHTTPTransport) ReadDriveFile(ctx context.Context, accountID, 
 	}
 }
 
-// getDriveFile 读取一次对话附件的 discovery 文档、元数据与缩略图
-func (t *MakerSuiteHTTPTransport) getDriveFile(ctx context.Context, accountID, token, fileID string) (err error) {
-	lease, owned, err := resolveAccountLease(ctx, t.pool, AccountSelection{AccountID: accountID})
+// getDriveFile 像页面显示附件一样不占用账户读取一次对话附件的 discovery 文档、元数据与缩略图
+func (t *MakerSuiteHTTPTransport) getDriveFile(ctx context.Context, accountID, token, fileID string) error {
+	account, err := t.pool.Account(accountID)
 	if err != nil {
 		return err
 	}
-	if owned {
-		defer func() { err = errors.Join(err, lease.Release()) }()
-	}
-	client, err := t.clientForProxy(lease.Account().EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(account)
 	if err != nil {
 		return err
 	}
-	headers, apiKey, err := t.gapiHeaders(ctx, lease.Account())
+	headers, apiKey, err := t.gapiHeaders(ctx, account)
 	if err != nil {
 		return err
 	}
-	if err := t.getDriveDiscovery(ctx, lease, client, headers, apiKey); err != nil {
+	if err := t.getDriveDiscovery(ctx, account, client, headers, apiKey); err != nil {
 		return err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(driveFileURL, url.PathEscape(fileID), url.QueryEscape(apiKey)), nil)
@@ -1697,7 +1737,7 @@ func (t *MakerSuiteHTTPTransport) DownloadDrive(ctx context.Context, accountID s
 		return MediaStream{}, release(err)
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+token)
-	client, err := t.clientForProxy(lease.Account().EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(lease.Account())
 	if err != nil {
 		return MediaStream{}, release(err)
 	}
@@ -1737,7 +1777,7 @@ func (t *MakerSuiteHTTPTransport) DeleteDrive(ctx context.Context, accountID str
 		return err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
-	client, err := t.clientForProxy(lease.Account().EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(lease.Account())
 	if err != nil {
 		return err
 	}
@@ -1770,7 +1810,7 @@ func (t *MakerSuiteHTTPTransport) DriveFileExists(ctx context.Context, accountID
 		return false, err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
-	client, err := t.clientForProxy(lease.Account().EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(lease.Account())
 	if err != nil {
 		return false, err
 	}

@@ -12,12 +12,11 @@ import (
 	"github.com/mattn/go-sqlite3"
 )
 
-// driverName 是每个连接都设置好收缩、日志与等待参数的 SQLite 驱动名
+// driverName 是每个连接都设置好日志与等待参数的 SQLite 驱动名
 const driverName = "sqlite3_aistudio2api"
 
-// connectPragmas 是每个新连接执行的设置，增量收缩须在启用 WAL 之前设置
-const connectPragmas = `PRAGMA auto_vacuum = INCREMENTAL;
-PRAGMA busy_timeout = 10000;
+// connectPragmas 是每个新连接执行的设置
+const connectPragmas = `PRAGMA busy_timeout = 10000;
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA journal_size_limit = 524288;`
@@ -32,32 +31,52 @@ func init() {
 	}})
 }
 
-// Open 打开或创建数据库，为已有表补上缺少的列、执行 schema 并删除 schema 没有定义的对象，非增量收缩的已有库先整理为增量收缩，最后交还空闲页
-func Open(path string, schema string) (*sql.DB, error) {
-	db, err := sql.Open(driverName, "file:"+filepath.ToSlash(path))
+// Open 打开或创建数据库，每个连接缓存最近用过的 statements 条预编译语句；新库与非增量收缩的已有库先整理为增量收缩，再为已有表补上缺少的列、执行 schema 并删除 schema 没有定义的对象
+func Open(path string, schema string, statements int) (*sql.DB, error) {
+	return OpenWithMigration(path, schema, statements, nil)
+}
+
+// OpenWithMigration migrates legacy data in the same transaction as schema cleanup.
+func OpenWithMigration(path string, schema string, statements int, migrate func(*sql.Tx) error) (*sql.DB, error) {
+	db, err := sql.Open(driverName, fmt.Sprintf("file:%s?_stmt_cache_size=%d", filepath.ToSlash(path), statements))
 	if err != nil {
 		return nil, err
 	}
-	var mode int
-	if err := db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err != nil {
-		return nil, errors.Join(fmt.Errorf("读取收缩模式: %w", err), db.Close())
-	}
-	if mode != incrementalVacuum {
-		if _, err := db.Exec(`VACUUM`); err != nil {
-			return nil, errors.Join(fmt.Errorf("整理数据库: %w", err), db.Close())
-		}
-	}
-	if err := applySchema(db, schema); err != nil {
-		return nil, errors.Join(fmt.Errorf("同步表结构: %w", err), db.Close())
-	}
-	if err := Reclaim(context.Background(), db); err != nil {
+	if err := useIncrementalVacuum(db); err != nil {
 		return nil, errors.Join(err, db.Close())
+	}
+	if err := applySchema(db, schema, migrate); err != nil {
+		return nil, errors.Join(fmt.Errorf("同步表结构: %w", err), db.Close())
 	}
 	return db, nil
 }
 
+// useIncrementalVacuum 在同一连接上把不是增量收缩的库设为增量收缩并整理一次
+func useIncrementalVacuum(db *sql.DB) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var mode int
+	if err := conn.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		return fmt.Errorf("读取收缩模式: %w", err)
+	}
+	if mode == incrementalVacuum {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA auto_vacuum = INCREMENTAL`); err != nil {
+		return fmt.Errorf("设置收缩模式: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `VACUUM`); err != nil {
+		return fmt.Errorf("整理数据库: %w", err)
+	}
+	return nil
+}
+
 // applySchema 为已有表补上 schema 定义而缺少的列，执行 schema，再删除 schema 没有定义的表、索引、视图与触发器
-func applySchema(db *sql.DB, schema string) error {
+func applySchema(db *sql.DB, schema string, migrate func(*sql.Tx) error) (err error) {
 	defined, err := sql.Open(driverName, ":memory:")
 	if err != nil {
 		return err
@@ -71,32 +90,51 @@ func applySchema(db *sql.DB, schema string) error {
 	if err != nil {
 		return err
 	}
-	have, err := schemaObjects(db)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, tx.Rollback())
+		}
+	}()
+	if migrate != nil {
+		if err = migrate(tx); err != nil {
+			return err
+		}
+	}
+	have, err := schemaObjects(tx)
 	if err != nil {
 		return err
 	}
 	for name, kind := range want {
 		if kind == "table" && have[name] == "table" {
-			if err := addMissingColumns(defined, db, name); err != nil {
+			if err := addMissingColumns(defined, tx, name); err != nil {
 				return err
 			}
 		}
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := tx.Exec(schema); err != nil {
 		return err
 	}
 	for name, kind := range have {
 		if _, ok := want[name]; !ok {
-			if _, err := db.Exec(`DROP ` + strings.ToUpper(kind) + ` IF EXISTS ` + quoteIdentifier(name)); err != nil {
+			if _, err := tx.Exec(`DROP ` + strings.ToUpper(kind) + ` IF EXISTS ` + quoteIdentifier(name)); err != nil {
 				return err
 			}
 		}
 	}
-	return nil
+	return tx.Commit()
+}
+
+type schemaDatabase interface {
+	Query(string, ...any) (*sql.Rows, error)
+	Exec(string, ...any) (sql.Result, error)
 }
 
 // schemaObjects 返回库中除 SQLite 内部对象外的表、索引、视图与触发器的名称与类型
-func schemaObjects(db *sql.DB) (map[string]string, error) {
+func schemaObjects(db schemaDatabase) (map[string]string, error) {
 	rows, err := db.Query(`SELECT name, type FROM sqlite_master WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite_%'`)
 	if err != nil {
 		return nil, err
@@ -114,7 +152,7 @@ func schemaObjects(db *sql.DB) (map[string]string, error) {
 }
 
 // addMissingColumns 按 defined 中同名表的列定义为 db 中的表追加缺少的列
-func addMissingColumns(defined *sql.DB, db *sql.DB, table string) error {
+func addMissingColumns(defined *sql.DB, db schemaDatabase, table string) error {
 	existing := make(map[string]bool)
 	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
 	if err != nil {

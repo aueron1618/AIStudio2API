@@ -92,7 +92,7 @@ func (s *server) startChatChoices(ctx context.Context, request aistudio.Generate
 	return choices
 }
 
-// relayEvents 经内存队列把 source 的事件转发到 out
+// relayEvents forwards observed events and clears consumed queue slots.
 func relayEvents(ctx context.Context, source <-chan aistudio.Event, out chan<- aistudio.Event, observe func(aistudio.Event)) {
 	var queue []aistudio.Event
 	for source != nil || len(queue) > 0 {
@@ -105,7 +105,12 @@ func relayEvents(ctx context.Context, source <-chan aistudio.Event, out chan<- a
 		case <-ctx.Done():
 			return
 		case send <- next:
-			queue = queue[1:]
+			queue[0] = aistudio.Event{}
+			if len(queue) == 1 {
+				queue = queue[:0]
+			} else {
+				queue = queue[1:]
+			}
 		case event, ok := <-source:
 			if !ok {
 				source = nil
