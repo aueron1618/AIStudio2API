@@ -94,10 +94,10 @@ const revealClass =
 const placeholderKey = 'aistudio2api'
 const key = computed(() => keys.value[keyIndex.value] ?? placeholderKey)
 
-// masked 在密钥隐藏时把文字中的 API key 显示为圆点，复制时仍用原文
-function masked(text: string): string {
-  return keys.value.length === 0 || keyShown.value ? text : text.replaceAll(key.value, '••••••••')
-}
+const displayKey = computed(() =>
+  keys.value.length === 0 || keyShown.value ? key.value : '••••••••',
+)
+watch(key, () => (keyShown.value = false))
 
 // baseUrls 是三种协议的 base URL 与填写说明
 const baseUrls = computed(() => [
@@ -121,13 +121,13 @@ const shells: { value: Shell; label: TranslationKey }[] = [
   { value: 'windows', label: 'access.shellWindows' },
 ]
 // envCode 是示例代码读取 key 的三个环境变量的设置命令
-const envCode = computed(() =>
-  ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY']
+function envCode(value: string): string {
+  return ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY']
     .map((name) =>
-      shell.value === 'windows' ? `$env:${name} = "${key.value}"` : `export ${name}="${key.value}"`,
+      shell.value === 'windows' ? `$env:${name} = "${value}"` : `export ${name}="${value}"`,
     )
-    .join('\n'),
-)
+    .join('\n')
+}
 
 // chatModels 是实时目录中的普通对话模型
 const chatModels = computed(() => props.models.filter(chatModel))
@@ -303,8 +303,17 @@ const clientInput = computed(() => ({
   protocol: clientProtocol.value,
   t,
 }))
-const steps = computed(() => client.value.steps(clientInput.value))
+// Mask before serialization: a key may contain characters escaped in a client's config format.
+const steps = computed(() => client.value.steps({ ...clientInput.value, key: displayKey.value }))
+const copySteps = computed(() => client.value.steps(clientInput.value))
+function copyValue(index: number, field = 0): string {
+  const step = copySteps.value[index]!
+  return step.kind === 'code' ? step.code : step.fields[field]!.value
+}
 const links = computed(() => client.value.links?.(clientInput.value) ?? [])
+function openClient(href: string): void {
+  window.location.assign(href)
+}
 
 const capabilityID = useQueryParam(
   'capability',
@@ -496,7 +505,7 @@ function methodClass(method: string): string {
                       </option>
                     </UiSelect>
                     <code class="min-w-0 flex-1 truncate font-mono text-sm text-white">{{
-                      masked(key)
+                      displayKey
                     }}</code>
                   </div>
                   <div class="flex items-center gap-2">
@@ -562,8 +571,8 @@ function methodClass(method: string): string {
               </div>
               <AccessCode
                 class="mt-3"
-                :code="masked(envCode)"
-                :copy="envCode"
+                :code="envCode(displayKey)"
+                :copy="envCode(key)"
                 language="bash"
                 :label="t(shell === 'windows' ? 'access.shellWindows' : 'access.shellUnix')"
               />
@@ -781,15 +790,16 @@ function methodClass(method: string): string {
 
               <div class="space-y-5 py-4">
                 <div v-if="links.length > 0" class="flex flex-wrap items-center gap-3">
-                  <a
+                  <button
                     v-for="link in links"
-                    :key="link.href"
-                    :href="link.href"
+                    :key="link.label"
+                    type="button"
                     class="flex items-center gap-2 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
+                    @click="openClient(link.href)"
                   >
                     <UiIcon name="importAccounts" :size="14" />
                     {{ t(link.label) }}
-                  </a>
+                  </button>
                   <span class="text-xs text-gray-500">{{ t('access.importHelp') }}</span>
                 </div>
                 <p v-if="client.docker && loopback" class="text-xs text-gray-500">
@@ -806,8 +816,8 @@ function methodClass(method: string): string {
                       </p>
                       <AccessCode
                         v-if="step.kind === 'code'"
-                        :code="masked(step.code)"
-                        :copy="step.code"
+                        :code="step.code"
+                        :copy="copyValue(index)"
                         :language="step.language"
                         :label="
                           step.file ??
@@ -815,7 +825,7 @@ function methodClass(method: string): string {
                         "
                       />
                       <dl v-else class="divide-y divide-line/60 border-y border-line/60">
-                        <div v-for="field in step.fields" :key="field.label" :class="rowClass">
+                        <div v-for="(field, i) in step.fields" :key="field.label" :class="rowClass">
                           <dt class="col-span-2 text-xs text-gray-500 @lg:col-span-1">
                             {{ field.label }}
                           </dt>
@@ -827,13 +837,13 @@ function methodClass(method: string): string {
                           </dd>
                           <template v-else>
                             <dd
-                              v-tooltip.overflow="masked(field.value)"
+                              v-tooltip.overflow="field.value"
                               class="min-w-0 truncate font-mono text-sm text-white"
                             >
-                              {{ masked(field.value) }}
+                              {{ field.value }}
                             </dd>
                             <CopyButton
-                              :text="field.value"
+                              :text="copyValue(index, i)"
                               :label="t('access.copyValue').replace('{name}', field.label)"
                             />
                           </template>

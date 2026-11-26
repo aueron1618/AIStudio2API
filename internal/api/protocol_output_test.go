@@ -734,7 +734,7 @@ func TestProtocolFinishReasons(t *testing.T) {
 					if got := chatCompletionChoice(0, result, nil, mediaOutput{})["finish_reason"]; got != chat {
 						t.Errorf("chat=%v want=%s", got, chat)
 					}
-					message := buildAnthropicResponse("test", "test", result, "", false, mediaOutput{})
+					message := buildAnthropicResponse("test", "test", result, anthropicSearchCipher(""), false, mediaOutput{})
 					if message["stop_reason"] != anthropic {
 						t.Errorf("anthropic=%v want=%s", message["stop_reason"], anthropic)
 					}

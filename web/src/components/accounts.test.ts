@@ -217,6 +217,7 @@ describe('Cookie import preferences and layout', () => {
     const instance = mountSetup<{
       loadExits: () => Promise<void>
       groups: { ip: string; accounts: number; error: string }[]
+      summary: string
       loading: boolean
       proxyText: (proxies: string[]) => string
     }>(AccountExits, {
@@ -230,15 +231,16 @@ describe('Cookie import preferences and layout', () => {
     expect(instance.state.loading).toBe(true)
     await instance.state.loadExits()
     expect(instance.state.groups).toMatchObject([
-      { ip: '192.0.2.1', accounts: 2 },
       { accounts: 1, error: 'offline' },
+      { ip: '192.0.2.1', accounts: 2 },
     ])
+    expect(instance.state.summary).toBe('2 total · 1 shared · 1 failed')
     expect(instance.state.proxyText(['http://user:secret@proxy.example.test:8080'])).not.toContain(
       'secret',
     )
     resolveFirst([{ proxy: '', ip: '192.0.2.2' }])
     await nextTick()
-    expect(instance.state.groups[0]?.ip).toBe('192.0.2.1')
+    expect(instance.state.groups[1]?.ip).toBe('192.0.2.1')
     expect(instance.state.loading).toBe(false)
   })
 

@@ -107,12 +107,17 @@ describe('shared account task recovery', () => {
     await starting
     expect(openAdminEvents).not.toHaveBeenCalled()
     expect(window.setInterval).not.toHaveBeenCalled()
+    expect(state.config.value).toBeNull()
+    expect(state.loading.config).toBe(true)
   })
 
   it('ignores events and reconnect callbacks from a closed console generation', async () => {
     const state = await start()
     const [oldReceive, oldReconnect] = vi.mocked(openAdminEvents).mock.calls[0]!
     state.stopConsole()
+    expect(state.config.value).toBeNull()
+    expect(state.status.value).toBeNull()
+    expect(state.accountTasks.value).toEqual([])
     await state.startConsole()
     const reads = vi.mocked(api.accountTasks).mock.calls.length
     oldReceive({

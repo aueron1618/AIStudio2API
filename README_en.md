@@ -87,7 +87,7 @@ The three projects connect to AI Studio, the Gemini web app and Antigravity, and
 - **Image Generation**: Nano Banana image generation
 - **Video Generation**: Gemini Omni generates video tasks and image-to-video; Gemini Omni accepts text, image, and video input and returns text and MP4 video through the four generation APIs
 - **Deep Research**: Pro and Ultra accounts can run Deep Research through the four generation APIs and the Interactions `agent` field, returning the research process, a cited report, and charts
-- **Agents and Antigravity**: Agents marked `interaction_task` in the live catalog run as upstream background Interactions. The playground exposes catalog-supported tools and settings, and Antigravity model selection follows its catalog configuration rather than forcing ordinary models or Build routes into Agent mode
+- **Agents and Antigravity**: Playground uses the selected account's catalog to distinguish an agent (`interaction_agent`) from a regular model routed through Interactions (`interaction_model`). Either can be a background task (`interaction_task`). The playground exposes the agent's supported tools and settings, including Antigravity's catalog-defined model choices. Build keeps its own routes
 - **Decision Model**: `gemini-decision-1` answers many yes/no, choice, and score questions about one shared input in a single call to `/v1beta/decisions`, returning calibrated probabilities and confidence; input can be text, images, audio, video, and PDF, and only input tokens are billed; this model is hidden on the AI Studio website, where choosing it only shows sample apps, and this service can use it directly
 - **YouTube Input**: YouTube video URLs are read as external video attachments; with `YOUTUBE_LINKS` enabled, YouTube links in message text are read as video too
 - **Video Understanding Controls**: Gemini and Interactions support per-video start/end offsets, sampling rates greater than 0 and up to 24 FPS, and static/agentic processing; agentic results preserve server-side processing steps and conversation history
@@ -340,9 +340,16 @@ Closing or refreshing the page, or hiding the sign-in window, does not cancel an
 3. "Stop service" cancels an in-progress launch or active requests and closes WAA workers while the management UI and Logs remain available
 4. Click "Start service" again to resume the APIs
 
-Starting again loads the latest data-plane settings from `.env`. Account selection, Worker capacity, and the account-switch limit apply on save. Model mapping, non-streaming keepalive, fake streaming, search aliases, Google Search, thinking guidance, user-text rewriting, and media output apply to new requests. Anti-truncation and auto-continuation retain separate live switches. Changes to `LISTEN_ADDR` or `PREVIEW_LISTEN_ADDR` require restarting the manager; saving `PROXY_API_KEY` and per-key account bindings applies to new requests immediately, without restarting the manager or generation service. Other settings follow the console's Stop/Start notices.
+When you save changes in Settings:
 
-With a system tray available, closing the desktop window keeps the app running; choose Quit in the tray menu to exit the manager. On Linux without a tray host, closing the window exits the app. For the command-line build, press `Ctrl+C` in the launch window or close that window to exit the manager. Closing the browser tab does not stop the manager.
+| When | Settings |
+| --- | --- |
+| Next request, no restart | Most settings, including API keys and their account bindings, console login, channels, timeouts, hedging, rewrites and logging. Proxy and proxy-pool changes rebind affected workers after their in-flight requests finish. |
+| Next generation-service start | `WAA_BACKEND` and `AISTUDIO_AUTH_STATES`. If the service is running, Settings offers a restart; this interrupts active requests. If it is stopped, start it normally. |
+| After restarting the management process | `LISTEN_ADDR` and `PREVIEW_LISTEN_ADDR`. Restarting just the generation service does not change either listener. |
+| Next program launch | `AUTO_START`. Saving it does not start or stop the current service. |
+
+Saving does not restart an in-flight request. `ANTI_TRUNCATION` applies to new requests; the separate `AUTO_CONTINUATION` switch can stop an unsent continuation round without interrupting the round already in progress.
 
 Exiting:
 
@@ -725,7 +732,9 @@ Copy and edit the environment file:
 cp .env.example .env
 ```
 
-Process environment variables normally override the same keys in `.env` and lock those settings in the console. `PROXY_API_KEY` always remains editable: saving new keys applies them immediately and automatically writes `PROXY_API_KEY_WEB_OVERRIDE=true` to `.env`, keeping the saved keys ahead of the process environment after restart. Apart from this marker, saving settings writes only values that differ from the defaults. Invalid ordinary settings use their defaults and are listed at the top of the console and in the log. Invalid `API_KEY_ACCOUNTS` syntax or duplicate entries for a configured key reject loading and saving instead of falling back to unrestricted account access. Back up configuration before upgrading: an uncommented `.env` containing the old full set of keys may be compacted when loaded, not only when Save is clicked.
+Process environment variables override `.env` and lock their settings in the console. **`PROXY_API_KEY` is the only exception.** Explicitly changing or clearing it in Settings writes `PROXY_API_KEY_WEB_OVERRIDE=true` to the local `.env`. The saved value, even an empty one, takes precedence across restarts; remove the marker and restart the manager to use the injected key again. An unrelated save does not opt into this override. Clearing the last key disables key authentication for the public APIs; keep a key configured on network-accessible deployments. The key list and effective account bindings take effect together for new requests. If `API_KEY_ACCOUNTS` or administrator credentials are supplied by the environment, they remain read-only.
+
+Apart from the override marker, saving settings writes only values that differ from the defaults to `.env`, preserving existing file values for environment-managed settings. Invalid ordinary settings use their defaults and are listed at the top of the console and in the log. Invalid `API_KEY_ACCOUNTS` syntax or duplicate entries for a configured key reject loading and saving instead of falling back to unrestricted account access. Back up configuration before upgrading: an uncommented `.env` containing the old full set of keys may be compacted when loaded, not only when Save is clicked.
 
 The table lists program defaults when settings are omitted. `.env.example` explicitly selects Playground only and disables Build non-stream preference, assistant-prefix rewriting, and automatic output continuation; enable them as needed.
 
@@ -753,7 +762,9 @@ The table lists program defaults when settings are omitted. `.env.example` expli
 | `PER_ACCOUNT_CONCURRENCY` | `1` | Concurrent requests allowed per account |
 | `ROUTING_STRATEGY` | `round-robin` | `round-robin` rotates accounts; `fill-first` reuses the first available account |
 | `ACCOUNT_ORDER` | empty | Accounts `fill-first` uses in order, comma-separated; unlisted accounts follow in ID order. Also adjustable on the Settings page, applied on save |
-| `MAX_ACCOUNT_SWITCHES` | `3` | How many times a request moves to another account after a non-quota error such as 403, 5xx, or a first-event timeout; `0` disables switching. Expired sessions and quota errors do not count; remaining accounts are still tried. Applies on save |
+| `MAX_ACCOUNT_SWITCHES` | `3` | Maximum switches per request after a non-quota failure such as 403, 5xx, or a first-event timeout; `0` disables these switches. Expired sessions and quota errors do not count toward this limit |
+| `ACCOUNT_SWITCH_INTERVAL` | `off` | Minimum delay after a failed account before trying the next one: `off` or a positive integer in seconds. The wait happens before a cold worker starts, not again before it sends; disconnecting cancels the wait |
+| `MAX_QUOTA_SWITCHES` | `off` | Separate limit on switches per request after quota exhaustion (429). `off` allows all remaining eligible accounts, `0` returns the first 429, and a positive integer caps switches before the last 429 is returned |
 | `UPSTREAM_CHANNELS` | `playground,build` | Retain fixed channel URLs; upstream has disabled generation through the legacy Build proxy, and its errors are returned unchanged |
 | `MODEL_MAPPING` | empty | Client model names mapped to catalog models, each item `alias:model ID`, comma separated |
 | `MODEL_CHANNELS` | empty | Limit a model to one channel, each item `model ID:playground` or `model ID:build`; also selectable in model details on the Model catalog page, applied on save |
@@ -774,7 +785,7 @@ The table lists program defaults when settings are omitted. `.env.example` expli
 | `USER_MESSAGE_REWRITE` | `off` | Rewrite Chinese user text in text-generation requests to Traditional or Martian Chinese without changing assistant history, thought parts, media, or function arguments/results; append a default Simplified Chinese reply instruction unless the user explicitly requests another language. `off`, `traditional`, or `martian`; applies to new requests on save |
 | `FIRST_EVENT_HEDGE` | `off` | When a request has no first token for a while, send a backup request on an idle account (another account first, otherwise a free slot on the same account); the first to answer continues and the other is cancelled. `auto` waits for the p95 of each model and channel over the last 24 hours, and models with fewer than 20 requests are not hedged; a positive integer is the wait in seconds, and choosing Custom in settings fills in the recent p95 of the busiest model |
 | `FIRST_EVENT_HEDGE_MODELS` | `gemini-4-argon` | Comma-separated model IDs that get backup requests when `FIRST_EVENT_HEDGE` is not `off`; backup requests also count against account quota |
-| `FIRST_EVENT_TIMEOUT` | `off` | Limit from account acquisition to the first upstream semantic event for each generation attempt; `off` or positive seconds. Cancels and switches accounts, counting toward `MAX_ACCOUNT_SWITCHES` without cooling the account. Applies after Stop/Start |
+| `FIRST_EVENT_TIMEOUT` | `off` | Limit from account acquisition to the first upstream semantic event for each generation attempt; `off` or positive seconds. Cancels and switches accounts, counting toward `MAX_ACCOUNT_SWITCHES` without cooling the account. Applies to new requests on save |
 | `WAA_BACKEND` | `spidermonkey` | Run WAA in-process without a browser; `camoufox` remains optional, and legacy `go` settings migrate automatically |
 | `MEDIA_OUTPUT` | `inline` | How Chat Completions and Messages include generated images and audio: `inline` embeds a data URI; `url` saves the file under `runtime/media/`, named by its content, and links to it at `/media/<file>` on this service, a path that does not check the API key; when the directory exceeds 1 GiB, the least recently used files are deleted first |
 | `MEDIA_BASE_URL` | empty | Service address used in media URLs, such as `https://ai.example.com`; empty uses the address of each request and follows `X-Forwarded-Proto` behind a reverse proxy |
@@ -787,21 +798,21 @@ Hedging applies only to `FIRST_EVENT_HEDGE_MODELS` and still requires idle Worke
 
 Usage records show both `requested_model` and `response_model`, preserving model-mapping traceability. Unauthorized requests do not display models, accounts, bodies or raw paths. Large log details render only while expanded; bodies are loaded explicitly and formatted views are released when collapsed. `REQUEST_BODY_LOG=false` remains the default.
 
-`FIRST_EVENT_TIMEOUT` stops at the first semantic event, not response headers, network bytes, or client heartbeats. It returns 504 when no account or switch remains without cooling the account, changing its state, or rebuilding the Worker. Background Responses, background Interactions, and `interaction_task` agents are excluded; foreground `-build` assistants are included. Primary and hedge attempts have separate timers; choose a threshold above the hedge wait, allowing several minutes for slow thinking when needed. An earlier continuous-inactivity `REQUEST_TIMEOUT` ends the whole request instead of triggering a first-event account switch.
+`FIRST_EVENT_TIMEOUT` stops at the first semantic event, not response headers, network bytes, or client heartbeats. It returns 504 when no account or switch remains without cooling the account, changing its state, or rebuilding the Worker. Background Responses, background Interactions, and `interaction_agent` targets are excluded; regular models routed through Interactions and foreground `-build` assistants are not excluded on that basis. Primary and hedge attempts have separate timers; choose a threshold above the hedge wait, allowing several minutes for slow thinking when needed. An earlier continuous-inactivity `REQUEST_TIMEOUT` ends the whole request instead of triggering a first-event account switch.
 
-`AUTO_START` retries startup failures unrelated to account/configuration errors at intervals starting at 5 seconds and doubling to 5 minutes until a manual start or stop. Stripping historical thought signatures sends function calls with `skip_thought_signature_validator` and omits earlier reasoning attached to signatures. Hidden-model discovery runs at startup, every 24 hours, and on Refresh all, adds only models confirmed by `CountTokens`, and uses official entries once listed; turning it off removes them on the next service start.
+`AUTO_START` retries startup failures unrelated to account/configuration errors at intervals starting at 5 seconds and doubling to 5 minutes until a manual start or stop. Stripping historical thought signatures omits earlier reasoning attached to signatures. Turning off `DISCOVER_HIDDEN_MODELS` removes hidden entries immediately. Turning it on takes effect at the next normal account catalog sync (startup, the 24-hour refresh, or Refresh all); only models available to the account are added, and official entries take precedence once listed.
 
 ### Port Configuration
 
 The console allows passwordless loopback access by default. For remote management:
 
-- Set `ADMIN_AUTH_ENABLED=true`, configure the administrator username and password, restart the process, and sign in on the separate `/login` page
+- Set `ADMIN_AUTH_ENABLED=true`, configure the administrator username and password, and sign in on the separate `/login` page (saving in Settings takes effect immediately and keeps the current browser signed in)
 - A session lasts 12 hours; with "Stay signed in for 30 days" checked it lasts 30 days and survives restarts
 - Sign-out is supported; administrators share the instance's account pool, configuration, and logs
 
 Public APIs use the separate `PROXY_API_KEY`.
 
-Use an HTTPS reverse proxy that preserves `Host` and sets `X-Forwarded-Proto: https`. Console login settings can also be saved from the settings page and take effect after restarting the process.
+Use an HTTPS reverse proxy that preserves `Host` and sets `X-Forwarded-Proto: https`. Console login settings saved from the Settings page take effect immediately (disabling login is only allowed from loopback).
 
 HTML previews in the API playground run on a separate origin served at `PREVIEW_LISTEN_ADDR`, and the page opens them at the current host name with that port:
 

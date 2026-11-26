@@ -23,7 +23,7 @@ vi.mock('@/console', () => ({
         },
       ],
     },
-    config: { value: { proxy_api_key: 'live-key' } },
+    config: { value: { proxy_api_key: 'not-active', active_proxy_api_key: 'live-key' } },
   }),
 }))
 

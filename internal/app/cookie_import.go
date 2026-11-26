@@ -157,11 +157,7 @@ func (admin *runtimeAdmin) verifyCookieState(ctx context.Context, state *aistudi
 	if verify == nil {
 		verify = chromeauth.VerifyAuthUser
 	}
-	timeout := admin.config.InitTimeout
-	if timeout <= 0 {
-		timeout = config.Default().InitTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, admin.initTimeout())
 	defer cancel()
 	result, err := verify(ctx, state, proxy, authUser)
 	if err == nil {

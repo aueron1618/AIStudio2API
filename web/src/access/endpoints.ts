@@ -29,7 +29,7 @@ export interface EndpointGroup {
 // openai、gemini 与 project 是 OpenAI API 参考、Gemini API 参考与本项目协议文档的地址
 const openai = 'https://developers.openai.com/api/reference/resources/'
 const gemini = 'https://ai.google.dev/api/'
-const project = 'https://github.com/Mag1cFall/AIStudio2API/blob/main/docs/protocol.md'
+const project = 'https://github.com/aueron1618/AIStudio2API/blob/main/docs/protocol.md'
 
 // text 是 Gemini 请求中一段用户文字
 const text = [{ role: 'user', parts: [{ text: 'Hello' }] }]

@@ -595,16 +595,30 @@ func (worker *Worker) Reload(ctx context.Context) (err error) {
 	if err == nil && options.Headless && !options.liveView {
 		err = worker.stopRendering(ctx)
 	}
-	if err != nil && busy {
-		return errors.Join(err, worker.closeTab(contextID))
+	if err == nil {
+		err = ctx.Err()
 	}
 	if err != nil {
-		closeOnFailure = true
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		closeOnFailure = !busy
-		return errors.Join(err, worker.closeTab(contextID))
+		if !busy {
+			closeOnFailure = true
+			return err
+		}
+		worker.mu.Lock()
+		if worker.selected == contextID {
+			worker.selected = ""
+		}
+		worker.mu.Unlock()
+		closeErr := worker.closeTab(contextID)
+		if closeErr == nil && options.Headless && !options.liveView {
+			worker.frameMu.Lock()
+			if worker.frameBoosts == 0 {
+				stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = worker.stopRendering(stopCtx)
+				cancel()
+			}
+			worker.frameMu.Unlock()
+		}
+		return errors.Join(err, closeErr)
 	}
 	return worker.switchTab(contextID, loaded)
 }

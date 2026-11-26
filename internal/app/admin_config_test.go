@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
@@ -118,7 +119,7 @@ func TestInitialRuntimeReuseAndReplacement(t *testing.T) {
 	}
 }
 
-// TestAdminConfig 验证凭据保存、密码保留与管理重启标记
+// TestAdminConfig 验证凭据保存、密码保留、热加载键不触发重启与仅必要键触发重启标记
 func TestAdminConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	cfg := config.Default()
@@ -128,11 +129,11 @@ func TestAdminConfig(t *testing.T) {
 	if err := cfg.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	pool := aistudio.NewAccountPool(nil, 1)
-	admin := &runtimeAdmin{configPath: path, requests: newTestRequestRegistry(t), pool: pool, service: &trackedService{pool: pool}}
-	value, err := admin.RuntimeConfig(ctx)
+	ctx := t.Context()
+	generation := configTestGeneration(t, ctx, path, cfg)
+	service := generation.service.(*configTestService)
+	manager := &runtimeManager{activeManagement: cfg, current: generation, requests: service.requests, logs: &logOutput{}}
+	value, err := manager.RuntimeConfig(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,37 +144,95 @@ func TestAdminConfig(t *testing.T) {
 	if strings.Contains(string(raw), "test-password") || !value.AdminPasswordSet || !value.BuildNativeNonstream {
 		t.Fatalf("config=%s", raw)
 	}
+	if value.AccountSwitchInterval != config.AccountSwitchIntervalOff || value.MaxQuotaSwitches != config.MaxQuotaSwitchesOff {
+		t.Fatalf("default switch policy = interval:%q quota:%q", value.AccountSwitchInterval, value.MaxQuotaSwitches)
+	}
 	value.Proxy = "http://127.0.0.1:1234"
 	value.AutoStart = true
-	if _, err := admin.UpdateRuntimeConfig(ctx, value); err != nil {
+	value.AccountSwitchInterval = "5"
+	value.MaxQuotaSwitches = "1"
+	if _, err := manager.UpdateRuntimeConfig(ctx, value); err != nil {
 		t.Fatal(err)
 	}
 	saved, err := config.Load(path)
 	if err != nil || saved.AdminPassword != cfg.AdminPassword {
 		t.Fatalf("password changed: %v", err)
 	}
-	if !saved.AutoStart {
-		t.Fatal("auto_start was not saved")
+	if !saved.AutoStart || saved.AccountSwitchInterval != "5" || saved.MaxQuotaSwitches != "1" {
+		t.Fatalf("saved fields mismatch: auto_start=%v interval=%q quota=%q", saved.AutoStart, saved.AccountSwitchInterval, saved.MaxQuotaSwitches)
 	}
-	manager := &runtimeManager{activeManagement: cfg}
+	service.state.Store(serviceRunning)
+	manager.requests.start(aistudio.GenerateRequest{ID: "req-active", Model: "gemini-flash-latest"}, func() {})
 	password := "new-test-password"
 	value.AdminPassword = &password
-	value, err = admin.UpdateRuntimeConfig(ctx, value)
+	value.APIKey = "new-hot-api-key"
+	value.BuildNativeNonstream = false
+	value.YouTubeLinks = false
+	value.StripThoughtSignatures = true
+	value.ContinuationRewrite = false
+	value.ContinuationPrompt = "custom prompt"
+	value.RequestTimeout = "90s"
+	value.InitTimeout = "45s"
+	value.FirstEventTimeout = "30"
+	value.FirstEventHedge = "10"
+	value.FirstEventHedgeModels = "gemini-2.5-pro"
+	value.UpstreamChannels = []string{"playground", "build"}
+	value.DiscoverHiddenModels = true
+	value, err = manager.UpdateRuntimeConfig(ctx, value)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if value.ManagementRestartRequired || value.ServiceRestartRequired || value.AdminPassword != nil || value.ActiveRequests != 1 {
+		t.Fatalf("hot reload fields should not require restart and should report active_requests=1: %+v", value)
+	}
+	// 仅修改监听地址或预览监听地址才触发管理进程重启
+	value.ListenAddr = "127.0.0.1:2999"
 	decorated := manager.decorateRuntimeConfig(value, cfg)
-	if !decorated.ManagementRestartRequired || decorated.AdminPassword != nil {
-		t.Fatalf("restart=%+v", decorated)
+	if !decorated.ManagementRestartRequired {
+		t.Fatalf("listen_addr change should require management restart: %+v", decorated)
+	}
+	value.ListenAddr = cfg.ListenAddr
+	value.PreviewListenAddr = "127.0.0.1:3050"
+	decorated = manager.decorateRuntimeConfig(value, cfg)
+	if !decorated.ManagementRestartRequired {
+		t.Fatalf("preview_listen_addr change should require management restart: %+v", decorated)
+	}
+	value.PreviewListenAddr = cfg.PreviewListenAddr
+	// 修改 WAA_BACKEND / AISTUDIO_AUTH_STATES 仅在生成服务运行时触发重启标记，已停止时不触发
+	value.WAABackend = config.WAABackendCamoufox
+	service.state.Store(serviceStopped)
+	if got := manager.decorateRuntimeConfig(value, cfg); got.ServiceRestartRequired {
+		t.Fatalf("stopped service should not require restart: %+v", got)
+	}
+	service.state.Store(serviceRunning)
+	if got := manager.decorateRuntimeConfig(value, cfg); !got.ServiceRestartRequired {
+		t.Fatalf("running service should require restart on WAA_BACKEND change: %+v", got)
+	}
+	value.WAABackend = cfg.WAABackend
+	value.AuthStates = "auth-other"
+	if got := manager.decorateRuntimeConfig(value, cfg); !got.ServiceRestartRequired {
+		t.Fatalf("running service should require restart on AISTUDIO_AUTH_STATES change: %+v", got)
+	}
+	value.AuthStates = cfg.AuthStates
+	// 非法换号间隔与额度换号上限返回 400
+	badInterval := value
+	badInterval.AccountSwitchInterval = "0"
+	if _, err := manager.UpdateRuntimeConfig(ctx, badInterval); err == nil {
+		t.Fatal("ACCOUNT_SWITCH_INTERVAL=0 should be rejected")
+	}
+	badQuota := value
+	badQuota.MaxQuotaSwitches = "-1"
+	if _, err := manager.UpdateRuntimeConfig(ctx, badQuota); err == nil {
+		t.Fatal("MAX_QUOTA_SWITCHES=-1 should be rejected")
 	}
 	value.AdminPassword = new(string)
-	_, err = admin.UpdateRuntimeConfig(ctx, value)
+	_, err = manager.UpdateRuntimeConfig(ctx, value)
 	var status interface{ HTTPStatus() int }
 	if !errors.As(err, &status) || status.HTTPStatus() != http.StatusBadRequest {
 		t.Fatalf("empty enabled password error = %v", err)
 	}
 	value.AdminAuthEnabled = false
-	if _, err := admin.UpdateRuntimeConfig(ctx, value); err != nil {
+	if _, err := manager.UpdateRuntimeConfig(ctx, value); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -184,16 +243,16 @@ func TestAutoContinuationConfigIsImmediateAndPreservesOmittedField(t *testing.T)
 	if err := cfg.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	pool := aistudio.NewAccountPool(nil, 1)
-	service := &trackedService{pool: pool}
-	admin := &runtimeAdmin{configPath: path, requests: newTestRequestRegistry(t), pool: pool, service: service}
-	value, err := admin.RuntimeConfig(t.Context())
+	generation := configTestGeneration(t, t.Context(), path, cfg)
+	service := generation.service.(*configTestService)
+	manager := &runtimeManager{activeManagement: cfg, current: generation, logs: &logOutput{}}
+	value, err := manager.RuntimeConfig(t.Context())
 	if err != nil || value.AutoContinuation == nil || !*value.AutoContinuation {
 		t.Fatalf("missing enabled default in management DTO: %+v, %v", value, err)
 	}
 	disabled := false
 	value.AutoContinuation = &disabled
-	updated, err := admin.UpdateRuntimeConfig(t.Context(), value)
+	updated, err := manager.UpdateRuntimeConfig(t.Context(), value)
 	if err != nil || updated.AutoContinuation == nil || *updated.AutoContinuation || !service.autoContinuationDisabled.Load() {
 		t.Fatalf("disable did not apply immediately: %+v, %v", updated, err)
 	}
@@ -201,7 +260,7 @@ func TestAutoContinuationConfigIsImmediateAndPreservesOmittedField(t *testing.T)
 		t.Fatal("auto continuation incorrectly requires a service restart")
 	}
 	updated.AutoContinuation = nil
-	if _, err := admin.UpdateRuntimeConfig(t.Context(), updated); err != nil {
+	if _, err := manager.UpdateRuntimeConfig(t.Context(), updated); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := config.Load(path)
@@ -210,7 +269,7 @@ func TestAutoContinuationConfigIsImmediateAndPreservesOmittedField(t *testing.T)
 	}
 	enabled := true
 	updated.AutoContinuation = &enabled
-	if _, err := admin.UpdateRuntimeConfig(t.Context(), updated); err != nil || service.autoContinuationDisabled.Load() {
+	if _, err := manager.UpdateRuntimeConfig(t.Context(), updated); err != nil || service.autoContinuationDisabled.Load() {
 		t.Fatalf("re-enabling failed: %v", err)
 	}
 }
@@ -278,21 +337,14 @@ func TestLocalRuntimeConfigEnvironmentLocksAndDTO(t *testing.T) {
 	}
 }
 
-func TestContinuationControlsHaveIndependentRestartBoundaries(t *testing.T) {
+func TestContinuationAndHedgeControlsDoNotRequireRestart(t *testing.T) {
 	cfg := config.Default()
 	value := runtimeConfigDTO(cfg)
 	value.AutoContinuation, value.AntiTruncation = new(bool), true
-	if !sameDataConfig(value, cfg, dataConfigOverrides{}) {
-		t.Fatal("live controls require a restart")
-	}
 	value.ContinuationRewrite = !cfg.ContinuationRewrite
-	if sameDataConfig(value, cfg, dataConfigOverrides{}) {
-		t.Fatal("input rewrite lost its independent restart boundary")
-	}
-	value = runtimeConfigDTO(cfg)
 	value.FirstEventHedgeModels = "different-model"
-	if sameDataConfig(value, cfg, dataConfigOverrides{}) {
-		t.Fatal("hedge model changes must be reflected in the restart marker")
+	if !sameDataConfig(value, cfg, dataConfigOverrides{}) {
+		t.Fatal("live continuation or hedge controls required a restart")
 	}
 }
 
@@ -330,6 +382,53 @@ func TestRequestPolicySaveAppliesWithoutRestart(t *testing.T) {
 	}
 }
 
+func TestRuntimeHotProxyAndTimeoutRespectLaunchOverride(t *testing.T) {
+	const initial = "http://127.0.0.1:9100"
+	const edited = "http://127.0.0.1:9101"
+	for name, override := range map[string]string{"saved": "", "cli": "http://127.0.0.1:9102"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, ".env")
+			cfg := config.Default()
+			cfg.AutoStart, cfg.Proxy, cfg.AuthStates = false, initial, filepath.Join(dir, "accounts")
+			if err := cfg.Save(path); err != nil {
+				t.Fatal(err)
+			}
+			overrides := dataConfigOverrides{}
+			want := edited
+			if override != "" {
+				overrides.proxy = &override
+				overrides.Apply(&cfg)
+				want = override
+			}
+			manager, err := newRuntimeManager(t.Context(), path, cfg, overrides)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager.logs = &logOutput{}
+			t.Cleanup(func() {
+				if err := manager.Close(); err != nil {
+					t.Error(err)
+				}
+				manager.requests.close()
+			})
+			value, err := manager.RuntimeConfig(t.Context())
+			if err != nil || value.Proxy != initial {
+				t.Fatalf("saved proxy=%q, err=%v", value.Proxy, err)
+			}
+			value.Proxy, value.InitTimeout, value.RequestTimeout = edited, "45s", "90s"
+			value, err = manager.UpdateRuntimeConfig(t.Context(), value)
+			if err != nil || value.Proxy != edited || value.ActiveProxy != want || len(value.ProxyPool) != 1 || value.ProxyPool[0].Proxy != want || manager.egressProxy() != want {
+				t.Fatalf("saved/active proxy mismatch: saved=%q active=%q pool=%v err=%v", value.Proxy, value.ActiveProxy, value.ProxyPool, err)
+			}
+			service := manager.current.service.(*trackedService)
+			if service.workers.currentInitTimeout() != 45*time.Second || service.requestTimeout() != 90*time.Second {
+				t.Fatal("saved deadlines did not reach the active worker and request managers")
+			}
+		})
+	}
+}
+
 func TestAccountTimezoneNormalization(t *testing.T) {
 	for _, test := range []struct {
 		input, want string
@@ -350,7 +449,7 @@ func TestAccountTimezoneNormalization(t *testing.T) {
 	}
 }
 
-func TestStripThoughtSignaturesConfigAndRestartBoundary(t *testing.T) {
+func TestStripThoughtSignaturesAppliesOnSave(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	cfg := config.Default()
 	if err := cfg.Save(path); err != nil {
@@ -370,8 +469,8 @@ func TestStripThoughtSignaturesConfigAndRestartBoundary(t *testing.T) {
 	}
 	value.StripThoughtSignatures = true
 	updated, err := manager.UpdateRuntimeConfig(t.Context(), value)
-	if err != nil || !updated.StripThoughtSignatures || !updated.ServiceRestartRequired || manager.current.config.StripThoughtSignatures {
-		t.Fatal("signature setting lost its save or restart boundary")
+	if err != nil || !updated.StripThoughtSignatures || updated.ServiceRestartRequired || !manager.current.config.StripThoughtSignatures {
+		t.Fatal("signature setting was not applied immediately")
 	}
 	saved, err := config.Load(path)
 	if err != nil || !saved.StripThoughtSignatures {

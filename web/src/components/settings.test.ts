@@ -1,7 +1,8 @@
 import { createSSRApp, defineComponent, h, nextTick, reactive, ref, type Component } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
-import { api } from '@/api'
+import { api, ApiError } from '@/api'
+import { useConsole } from '@/console'
 import { mountSetup } from '@/test-component'
 import type { Account, Model, PathListing, ServiceConfig } from '@/types'
 import { messages } from '@/locales/en'
@@ -24,8 +25,15 @@ vi.mock('@/desktop', () => ({
   desktopPlatform: '',
   sendDesktop: vi.fn(),
 }))
-vi.mock('@/api', () => ({
-  api: { firstEventLatency: vi.fn(async () => []), saveConfig: vi.fn(), paths: vi.fn() },
+vi.mock('@/api', async (original) => ({
+  ApiError: (await original<typeof import('@/api')>()).ApiError,
+  api: {
+    firstEventLatency: vi.fn(async () => []),
+    config: vi.fn(),
+    saveConfig: vi.fn(),
+    restartService: vi.fn(),
+    paths: vi.fn(),
+  },
 }))
 vi.mock('@/url', () => ({ useQueryParam: () => ref(route.section), useQueryText: () => ref('') }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ beforeEach: () => () => {} }) }))
@@ -58,10 +66,13 @@ beforeEach(() => {
     clearTimeout,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
   })
 })
 afterEach(() => {
   cleanups.splice(0).forEach((cleanup) => cleanup())
+  useConsole().status.value = null
+  useConsole().config.value = null
   vi.unstubAllGlobals()
 })
 
@@ -99,6 +110,7 @@ const config: ServiceConfig = {
   active_proxy_api_key: 'first-key,second-key',
   management_restart_required: false,
   service_restart_required: false,
+  active_requests: 0,
   proxy: '',
   active_proxy: '',
   proxy_pool: [],
@@ -110,6 +122,8 @@ const config: ServiceConfig = {
   warm_startup_concurrency: 1,
   per_account_concurrency: 1,
   max_account_switches: 3,
+  max_quota_switches: 'off',
+  account_switch_interval: 'off',
   routing_strategy: 'round-robin',
   account_order: '',
   upstream_channels: ['playground', 'build'],
@@ -313,6 +327,61 @@ describe('merged settings controls', () => {
     expect(bindings).not.toContain('second-key')
   })
 
+  it('unlocks only the env-injected local key, without disclosing saved or active secrets', async () => {
+    route.section = 'service'
+    const html = await render(SettingsPanel, {
+      config: {
+        ...config,
+        proxy_api_key: 'Q7z!,fixture-configured-key',
+        active_proxy_api_key: 'fixture-active-only',
+        api_key_accounts: 'Q7z!:account-a',
+        environment: ['PROXY_API_KEY', 'API_KEY_ACCOUNTS', 'LISTEN_ADDR'],
+      },
+      accounts: [{ id: 'account-a', label: 'Fixture account' }],
+      models: [],
+      loading: false,
+      error: '',
+    })
+    const locked = html.match(/<fieldset disabled[\s\S]*?<\/fieldset>/g) ?? []
+    expect(locked).toHaveLength(2)
+    expect(locked[0]).toContain('id="setting-listen"')
+    expect(locked[1]).toContain('aria-labelledby="setting-api-key-accounts-label"')
+    expect(html).toContain('id="setting-api-key"')
+    expect(html).not.toContain(
+      messages['settings.environmentLocked'].replace('{key}', 'PROXY_API_KEY'),
+    )
+    for (const secret of ['Q7z!', 'fixture-configured-key', 'fixture-active-only']) {
+      expect(html).not.toContain(secret)
+    }
+  })
+
+  it.each([
+    ['service', 'auto-start', 'launch'],
+    ['service', 'preview-listen', 'management'],
+    ['service', 'auth-path', 'service'],
+    ['service', 'api-key', 'immediate'],
+    ['runtime', 'waa-backend', 'service'],
+    ['runtime', 'channel-build', 'immediate'],
+    ['runtime', 'request-timeout', 'immediate'],
+    ['models', 'strip-thought-signatures', 'immediate'],
+    ['network', 'proxy', 'immediate'],
+    ['security', 'admin-auth', 'immediate'],
+    ['security', 'admin-password', 'immediate'],
+  ] as const)('labels %s/%s as %s', async (section, id, effect) => {
+    route.section = section
+    const html = await render(SettingsPanel, {
+      config,
+      accounts: [],
+      models: [],
+      loading: false,
+      error: '',
+    })
+    const label = `for="setting-${id}"`
+    expect(html).toContain(label)
+    const row = html.slice(html.indexOf(label)).split('</fieldset>')[0]!
+    expect(row).toContain(messages[`settings.effect.${effect}`])
+  })
+
   it('keeps environment locking and full-width controls until the local xl layout', async () => {
     const html = await render(SettingRow, {
       label: 'Fixture setting',
@@ -398,6 +467,181 @@ describe('merged configuration editors', () => {
     message: '',
     active_requests: 0,
   }))
+
+  function editor(overrides: Partial<ServiceConfig> = {}) {
+    const props = reactive({
+      config: { ...config, ...overrides },
+      accounts,
+      models: [],
+      loading: false,
+      error: '',
+      onSaved: (saved: ServiceConfig) => {
+        props.config = saved
+      },
+      onNotice: vi.fn(),
+    })
+    const instance = mountSetup<{
+      form: ServiceConfig
+      changedFields: Set<keyof ServiceConfig>
+      restartDialog: boolean
+      restartPending: boolean
+      restartImpact: string
+      setKeys: (keys: string) => void
+      setKeyAccounts: (key: string, ids: string[]) => void
+      saveConfig: () => Promise<void>
+      restartService: () => Promise<void>
+    }>(SettingsPanel, props)
+    cleanups.push(instance.unmount)
+    return { state: instance.state, props }
+  }
+
+  it('rotates and clears environment-provided keys and their editable bindings in one save', async () => {
+    const { state, props } = editor({ environment: ['PROXY_API_KEY'] })
+    vi.mocked(api.saveConfig).mockImplementation(async (value) => ({
+      ...value,
+      active_proxy_api_key: value.proxy_api_key,
+    }))
+    state.setKeys('second-key,replacement-key')
+    state.setKeyAccounts('replacement-key', ['account-c', 'account-b'])
+    await state.saveConfig()
+    expect(api.saveConfig).toHaveBeenCalledTimes(1)
+    expect(api.saveConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proxy_api_key: 'second-key,replacement-key',
+        api_key_accounts: 'replacement-key:account-c|account-b',
+      }),
+    )
+    expect(props.config.active_proxy_api_key).toBe('second-key,replacement-key')
+    state.setKeys('')
+    await state.saveConfig()
+    expect(api.saveConfig).toHaveBeenCalledTimes(2)
+    expect(api.saveConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({ proxy_api_key: '', api_key_accounts: '' }),
+    )
+    expect(window.dispatchEvent).not.toHaveBeenCalled()
+    expect(state.restartDialog).toBe(false)
+    expect(props.onNotice).toHaveBeenLastCalledWith(messages['settings.saved'], 'success')
+  })
+
+  it('preserves environment-locked bindings when the key list changes', async () => {
+    const bindings = 'first-key:account-a,next-key:account-b'
+    const { state } = editor({
+      api_key_accounts: bindings,
+      environment: ['API_KEY_ACCOUNTS', 'PROXY_API_KEY'],
+    })
+    vi.mocked(api.saveConfig).mockImplementation(async (value) => value)
+    state.setKeys('next-key')
+    state.setKeyAccounts('next-key', [])
+    expect([...state.changedFields]).toEqual(['proxy_api_key'])
+    await state.saveConfig()
+    expect(api.saveConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ proxy_api_key: 'next-key', api_key_accounts: bindings }),
+    )
+  })
+
+  it('does not rewrite dormant bindings or prompt for an existing restart on an unrelated hot save', async () => {
+    const bindings = 'dormant-key:account-b,first-key:account-a'
+    const { state } = editor({ api_key_accounts: bindings, service_restart_required: true })
+    vi.mocked(api.saveConfig).mockImplementation(async (value) => value)
+    await nextTick()
+    expect(state.changedFields.size).toBe(0)
+    state.form.max_quota_switches = '0'
+    state.form.account_switch_interval = '5'
+    await state.saveConfig()
+    expect(api.saveConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        api_key_accounts: bindings,
+        proxy_api_key: config.proxy_api_key,
+        max_quota_switches: '0',
+        account_switch_interval: '5',
+      }),
+    )
+    expect(state.restartDialog).toBe(false)
+    expect(state.restartPending).toBe(true)
+    expect(window.dispatchEvent).not.toHaveBeenCalled()
+  })
+
+  it('shows restart impact for a saved service change and restarts only on confirmation', async () => {
+    const { state, props } = editor()
+    vi.mocked(api.saveConfig).mockImplementation(async (value) => ({
+      ...value,
+      active_requests: 2,
+      service_restart_required: true,
+    }))
+    state.form.waa_backend = 'camoufox'
+    await state.saveConfig()
+    expect(state.restartDialog).toBe(true)
+    expect(state.restartPending).toBe(true)
+    expect(state.restartImpact).toBe(messages['settings.restartInterrupts'].replace('{count}', '2'))
+    expect(api.restartService).not.toHaveBeenCalled()
+    vi.mocked(api.restartService).mockResolvedValue({
+      state: 'RUNNING',
+      running: true,
+      ready: true,
+      version: 'fixture',
+      active_requests: 0,
+      accounts: { total: 0, ready: 0, busy: 0, cooldown: 0, auth_required: 0 },
+      camoufox: { ready: false, preparing: false },
+      chrome_import: false,
+      time: new Date().toISOString(),
+    })
+    await state.restartService()
+    expect(api.restartService).toHaveBeenCalledTimes(1)
+    expect(state.restartDialog).toBe(false)
+    expect(state.restartPending).toBe(false)
+    expect(props.onNotice).toHaveBeenLastCalledWith(
+      messages['settings.serviceRestarted'],
+      'success',
+    )
+  })
+
+  it('keeps edits after a conflict and refreshes the admin session only after a successful save', async () => {
+    const { state, props } = editor()
+    vi.mocked(api.saveConfig)
+      .mockRejectedValueOnce(new ApiError('fixture conflict', 409, 'conflict'))
+      .mockImplementationOnce(async (value) => ({ ...value, management_restart_required: true }))
+    state.form.listen_addr = ':3050'
+    state.form.admin_username = 'new-admin'
+    await state.saveConfig()
+    expect(props.onNotice).toHaveBeenLastCalledWith('ApiError: fixture conflict', 'error')
+    expect(props.config.admin_username).toBe(config.admin_username)
+    expect(state.changedFields.has('admin_username')).toBe(true)
+    expect(api.config).not.toHaveBeenCalled()
+    expect(window.dispatchEvent).not.toHaveBeenCalled()
+    await state.saveConfig()
+    expect(window.dispatchEvent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ type: 'admin-session-changed' }),
+    )
+    expect(props.onNotice).toHaveBeenLastCalledWith(messages['settings.savedManagement'], 'success')
+    expect(state.restartDialog).toBe(false)
+  })
+
+  it('reloads saved config and the session on a partial hot-apply failure without claiming success', async () => {
+    const { state, props } = editor()
+    const saved = {
+      ...config,
+      admin_username: 'new-admin',
+      proxy_api_key: 'new-key',
+      active_proxy_api_key: 'new-key',
+      api_key_accounts: '',
+    }
+    vi.mocked(api.config).mockResolvedValueOnce(saved)
+    vi.mocked(api.saveConfig).mockRejectedValueOnce(
+      new ApiError('fixture proxy unavailable', 500, 'config_saved_apply_failed'),
+    )
+    state.form.admin_username = saved.admin_username
+    state.setKeys(saved.proxy_api_key)
+    await state.saveConfig()
+    expect(api.config).toHaveBeenCalledTimes(1)
+    expect(useConsole().config.value).toEqual(saved)
+    expect(window.dispatchEvent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ type: 'admin-session-changed' }),
+    )
+    expect(props.onNotice).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('fixture proxy unavailable'),
+      'error',
+    )
+  })
 
   it('keeps a zero warm pool while enforcing a positive slider peak', () => {
     const instance = mountSetup<{

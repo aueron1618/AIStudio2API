@@ -1,9 +1,11 @@
 package aistudio
 
 import (
+	"crypto/sha256"
 	"io"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +54,18 @@ func TestTokenizerReloadPreservesCounts(t *testing.T) {
 	}
 	if ReleaseIdleTokenizer(time.Now().Add(time.Second)) {
 		t.Fatal("empty text loaded large model")
+	}
+}
+
+func TestChatHistoryRetainsOnlyTurnDigests(t *testing.T) {
+	turn := `[[[null,"` + strings.Repeat("x", 1<<20) + `"]],"user"]`
+	want := sha256.Sum256([]byte(turn))
+	request := []byte(`["models/test",[` + turn + `]]`)
+	var runtime goWAARuntime
+	runtime.chat = chatDigests(request)
+	clear(request)
+	if len(runtime.chat) != 1 || runtime.chat[0] != want {
+		t.Fatal("retained history must contain only one fixed-size digest per turn")
 	}
 }
 

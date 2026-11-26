@@ -30,8 +30,8 @@ type accountWorkerManager struct {
 	refresher      *authRuntimeRefresher
 	proxyFailed    func(proxy string, accountID string, err error)
 	camoufox       string
-	globalProxy    string
-	initTimeout    time.Duration
+	hotGlobalProxy atomic.Pointer[string]
+	initTimeout    atomic.Int64
 	warmTarget     atomic.Int64
 	maxActive      atomic.Int64
 	startup        startupLimiter
@@ -222,12 +222,13 @@ func newAccountWorkerManager(
 	lifecycle, cancel := context.WithCancel(context.Background())
 	manager := &accountWorkerManager{
 		pool: pool, accounts: make(map[string]*accountWorker, len(accounts)), requests: requests, camoufox: camoufoxPath,
-		globalProxy: globalProxy, initTimeout: initTimeout,
 		openings:  make(map[string]chan struct{}),
 		lifecycle: lifecycle, cancel: cancel, signal: make(chan struct{}), dispatch: newDispatchQueue(pool),
 		victims: make(map[string]struct{}), pageHeaders: make(map[string]http.Header),
 		newWorker: newWAAWorker,
 	}
+	manager.SetGlobalProxy(globalProxy)
+	manager.SetInitTimeout(initTimeout)
 	manager.setLimits(warmTarget, maxActive, warmConcurrency)
 	manager.background, manager.stopBackground = context.WithCancel(lifecycle)
 	for _, account := range accounts {
@@ -236,6 +237,42 @@ func newAccountWorkerManager(
 	go manager.forwardPoolChanges()
 	go manager.reapIdleWorkers()
 	return manager
+}
+
+// SetGlobalProxy 替换后续新建或重建 Worker 使用的默认代理
+func (manager *accountWorkerManager) SetGlobalProxy(proxy string) {
+	if manager == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(proxy)
+	manager.hotGlobalProxy.Store(&trimmed)
+}
+
+// currentGlobalProxy 返回当前默认代理
+func (manager *accountWorkerManager) currentGlobalProxy() string {
+	if manager == nil {
+		return ""
+	}
+	if proxy := manager.hotGlobalProxy.Load(); proxy != nil {
+		return *proxy
+	}
+	return ""
+}
+
+// SetInitTimeout 替换后续冷启动与重新载入页面使用的初始化超时
+func (manager *accountWorkerManager) SetInitTimeout(timeout time.Duration) {
+	if manager == nil {
+		return
+	}
+	manager.initTimeout.Store(int64(timeout))
+}
+
+// currentInitTimeout 返回当前初始化超时
+func (manager *accountWorkerManager) currentInitTimeout() time.Duration {
+	if manager == nil {
+		return 0
+	}
+	return time.Duration(manager.initTimeout.Load())
 }
 
 // SetCapacity 设置常驻 Worker 数、峰值 Worker 上限与 Camoufox 启动并发，随后关闭超出峰值上限的空闲 Worker
@@ -284,7 +321,7 @@ func (manager *accountWorkerManager) expandInBackground(accountID string, modelI
 
 // spareForCooling 在热 Worker 账户对模型进入请求不排队等待的长冷却后，峰值未满时在后台为一个对该模型未冷却、没有 Worker 的候选账户启动 Worker，冷却的 Worker 保留给其他模型与指定账户的请求
 func (manager *accountWorkerManager) spareForCooling(ctx context.Context, selection aistudio.AccountSelection, accountID string, until time.Time) {
-	if time.Until(until) <= cooldownQueueLimit {
+	if manager.warmLimit() == 0 || time.Until(until) <= cooldownQueueLimit {
 		return
 	}
 	warm := manager.WarmAccountIDs()
@@ -712,7 +749,7 @@ func (manager *accountWorkerManager) workerConfigFor(
 ) camoufoxnative.Options {
 	proxy := strings.TrimSpace(config.Proxy)
 	if proxy == "" {
-		proxy = account.PoolProxy(manager.globalProxy)
+		proxy = account.PoolProxy(manager.currentGlobalProxy())
 	}
 	return camoufoxnative.Options{
 		ExecutablePath:   manager.camoufox,
@@ -898,8 +935,8 @@ func (manager *accountWorkerManager) classifyBootstrapCandidates(
 	if !matched {
 		return aistudio.AccountCandidateGroups{}, aistudio.ErrNoEligibleAccount
 	}
-	combined.StandbyReady = manager.pool.PreferWarmPool(combined.StandbyReady)
-	combined.StandbyBusy = manager.pool.PreferWarmPool(combined.StandbyBusy)
+	combined.StandbyReady = manager.pool.PreferWarmPool(combined.StandbyReady, warm)
+	combined.StandbyBusy = manager.pool.PreferWarmPool(combined.StandbyBusy, warm)
 	return combined, nil
 }
 
@@ -1126,7 +1163,7 @@ func (manager *accountWorkerManager) reloadWorker(ctx context.Context, accountID
 		return nil, err
 	}
 	startedAt := time.Now()
-	reloadCtx, cancel := context.WithTimeout(ctx, manager.initTimeout)
+	reloadCtx, cancel := context.WithTimeout(ctx, manager.currentInitTimeout())
 	err := worker.Reload(reloadCtx)
 	if err == nil {
 		err = manager.rememberPageHeaders(reloadCtx, accountID, worker)
@@ -1351,7 +1388,7 @@ func (manager *accountWorkerManager) startReservedWorker(
 		manager.requests.logStage(label, "INFO", api.LogStage{Name: "WAA Worker 启动", Step: step, Steps: 7}, message, attrs...)
 	}
 	logStep(1, "初始化页面", "page_model", bootstrapModel)
-	initCtx, cancel := context.WithTimeout(ctx, manager.initTimeout)
+	initCtx, cancel := context.WithTimeout(ctx, manager.currentInitTimeout())
 	options.Model = bootstrapModel
 	options.StartupProgress = func(stage camoufoxnative.StartupStage) {
 		logStep(workerStartupProgress(stage))

@@ -120,9 +120,9 @@ func percentile95(waits []time.Duration) time.Duration {
 }
 
 // hedgeDelay 返回原请求等待首事件多久后发起备用请求，不发起时第二个返回值为 false
-func (service *trackedService) hedgeDelay(modelID, channel string) (time.Duration, bool) {
-	if !service.hedgeAuto {
-		return service.hedgeAfter, service.hedgeAfter > 0
+func (service *trackedService) hedgeDelay(policy firstEventPolicy, modelID, channel string) (time.Duration, bool) {
+	if !policy.hedgeAuto {
+		return policy.hedgeAfter, policy.hedgeAfter > 0
 	}
 	p95, samples := service.requests.firstEvents.p95(modelID, channel, time.Now())
 	return p95, samples >= firstEventMinSamples
@@ -131,15 +131,14 @@ func (service *trackedService) hedgeDelay(modelID, channel string) (time.Duratio
 // hedgeSelections 返回备用请求依次尝试的账户选择：引用已上传文件或指定账户的请求只用原账户；其余先用尚未尝试的其他账户，再用原账户
 func (service *trackedService) hedgeSelections(primary aistudio.AccountSelection, accountID string, fixed bool, attempted map[string]struct{}) []aistudio.AccountSelection {
 	same := primary
-	same.AllowedAccountIDs = nil
 	same.AccountID = accountID
 	if fixed {
 		return []aistudio.AccountSelection{same}
 	}
 	other := primary
-	other.AllowedAccountIDs = nil
+	other.AllowedAccountIDs = []string{}
 	for _, id := range service.pool.EnabledAccounts() {
-		if _, tried := attempted[id]; !tried {
+		if _, tried := attempted[id]; !tried && (primary.AllowedAccountIDs == nil || slices.Contains(primary.AllowedAccountIDs, id)) {
 			other.AllowedAccountIDs = append(other.AllowedAccountIDs, id)
 		}
 	}

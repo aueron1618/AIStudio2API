@@ -314,7 +314,7 @@ export function failureText(error: unknown, unreachable: string, failed = '{deta
 
 // apiKey 返回 Playground 请求使用的本服务 API key
 export function apiKey(): string {
-  return (useConsole().config.value?.proxy_api_key ?? '').split(',')[0]!.trim()
+  return (useConsole().config.value?.active_proxy_api_key ?? '').split(',')[0]!.trim()
 }
 
 // Keep the playground and its snippets on the model's permitted fixed URL channel.

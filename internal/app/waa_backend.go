@@ -13,7 +13,7 @@ import (
 const camoufoxWorkerPath = "camoufox"
 
 // prepareWAABackend 按 WAA 后端返回 Worker 选项中的 Camoufox 路径与账户登录驱动，Camoufox 后端在后台准备 Camoufox
-func prepareWAABackend(cfg config.Config, requests *requestRegistry, accounts []*aistudio.Account, proxy string) (string, aistudio.IsolatedLoginDriver) {
+func prepareWAABackend(cfg config.Config, requests *requestRegistry, accounts []*aistudio.Account, proxy func() string) (string, aistudio.IsolatedLoginDriver) {
 	removeStaleCamoufoxProfiles(requests)
 	login := &lazyLoginDriver{proxy: proxy}
 	if cfg.WAABackend == config.WAABackendSpiderMonkey {
@@ -26,7 +26,7 @@ func prepareWAABackend(cfg config.Config, requests *requestRegistry, accounts []
 		return "", login
 	}
 	requests.logStage("service", "INFO", api.LogStage{Name: "运行时装配", Step: 2, Steps: 3}, "使用 Camoufox WAA 后端", "accounts", len(accounts))
-	camoufoxnative.PrepareInBackground(proxy)
+	camoufoxnative.PrepareInBackground(proxy())
 	return camoufoxWorkerPath, login
 }
 
@@ -60,11 +60,15 @@ func newWAAWorker(ctx context.Context, accountID string, options camoufoxnative.
 
 // lazyLoginDriver 在显式登录或浏览器 Cookie 验证时共用进程内的 Camoufox 准备，不在 Go 后端启动时下载
 type lazyLoginDriver struct {
-	proxy string
+	proxy func() string
 }
 
 func (lazy *lazyLoginDriver) resolve(ctx context.Context) (*aistudio.NativeLoginDriver, error) {
-	path, err := camoufoxnative.Prepare(ctx, lazy.proxy)
+	proxy := ""
+	if lazy.proxy != nil {
+		proxy = lazy.proxy()
+	}
+	path, err := camoufoxnative.Prepare(ctx, proxy)
 	if err != nil {
 		return nil, err
 	}
@@ -90,12 +94,8 @@ func (lazy *lazyLoginDriver) ImportCookies(ctx context.Context, request aistudio
 }
 
 // Verify 等 Camoufox 就绪后打开账户验证页并自动再核对
-func (driver *lazyLoginDriver) Verify(ctx context.Context, request aistudio.AccountVerifyRequest) (bool, error) {
-	path, err := camoufoxnative.Prepare(ctx, driver.proxy)
-	if err != nil {
-		return true, err
-	}
-	login, err := aistudio.NewNativeLoginDriver(path)
+func (lazy *lazyLoginDriver) Verify(ctx context.Context, request aistudio.AccountVerifyRequest) (bool, error) {
+	login, err := lazy.resolve(ctx)
 	if err != nil {
 		return true, err
 	}

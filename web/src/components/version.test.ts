@@ -1,3 +1,5 @@
+import { createSSRApp, h } from 'vue'
+import { renderToString } from 'vue/server-renderer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import { api } from '@/api'
 import { mountSetup } from '@/test-component'
@@ -5,7 +7,6 @@ import type { UpdateProgress, UpdateStatus } from '@/types'
 import VersionPanel from './VersionPanel.vue'
 
 vi.mock('@/api', () => ({ api: { updateStatus: vi.fn(), applyUpdate: vi.fn() } }))
-vi.mock('@/markdown', () => ({ markdown: { render: (text: string) => text } }))
 vi.mock('@/i18n', () => ({
   useI18n: () => ({
     t: (key: string) => key,
@@ -21,6 +22,8 @@ interface VersionState {
   progress: UpdateProgress | null
   percent: number | null
   summary: string
+  checkMessage: string
+  retryText: string
   error: string
 }
 
@@ -34,10 +37,10 @@ const status: UpdateStatus = {
 }
 let unmount: (() => void) | undefined
 
-function mount() {
+function mount(overrides: Partial<UpdateStatus> = {}) {
   const restarting = vi.fn()
   const instance = mountSetup<VersionState>(VersionPanel, {
-    status,
+    status: { ...status, ...overrides },
     activeRequests: 0,
     restartStalled: false,
     onRestarting: restarting,
@@ -49,6 +52,7 @@ function mount() {
 beforeEach(() => {
   vi.resetAllMocks()
   vi.useFakeTimers()
+  vi.stubGlobal('window', { clearInterval, setInterval, clearTimeout, setTimeout })
   vi.stubGlobal('requestAnimationFrame', vi.fn().mockReturnValue(1))
   vi.stubGlobal('cancelAnimationFrame', vi.fn())
 })
@@ -60,6 +64,34 @@ afterEach(() => {
 })
 
 describe('update progress integration', () => {
+  it('renders normalized release notes as escaped text', async () => {
+    const app = createSSRApp({
+      render: () =>
+        h(VersionPanel, {
+          status: { ...status, notes: '<b>fixture</b>\n\nSecond paragraph' },
+          activeRequests: 0,
+          restartStalled: false,
+        }),
+    })
+    app.directive('tooltip', {})
+    const html = await renderToString(app)
+    expect(html).toMatch(/&lt;b&gt;fixture&lt;\/b&gt;<\/p><p[^>]*>Second paragraph<\/p>/)
+    expect(html).not.toContain('<b>fixture</b>')
+  })
+
+  it('shows the rate-limit summary and optional retry clock without fetching', async () => {
+    const { state } = mount({
+      error: 'fixture limit',
+      error_kind: 'rate_limited',
+      retry_at: new Date(Date.now() + 121_000).toISOString(),
+    })
+    expect(state.checkMessage).toBe('version.rateLimited')
+    expect(state.retryText).toBe('version.retryAt')
+    await vi.advanceTimersByTimeAsync(121_000)
+    expect(state.retryText).toBe('')
+    expect(api.updateStatus).not.toHaveBeenCalled()
+  })
+
   it('shows download, verification and installation progress, then stops polling on restart', async () => {
     let complete!: (value: UpdateStatus) => void
     vi.mocked(api.applyUpdate).mockReturnValue(
@@ -74,6 +106,7 @@ describe('update progress integration', () => {
       ['download', 'version.downloading', 25],
       ['verify', 'version.verifying', 100],
       ['install', 'version.installing', 100],
+      ['restart', 'version.restarting', 100],
     ] as const) {
       vi.mocked(api.updateStatus).mockResolvedValue({
         ...status,
@@ -89,7 +122,7 @@ describe('update progress integration', () => {
     expect(state.phase).toBe('restarting')
     expect(restarting).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(1000)
-    expect(api.updateStatus).toHaveBeenCalledTimes(3)
+    expect(api.updateStatus).toHaveBeenCalledTimes(4)
     expect(vi.getTimerCount()).toBe(0)
   })
 

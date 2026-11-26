@@ -42,6 +42,7 @@ func TestMain(m *testing.M) {
 func TestRemoveStaleProfilesEndsProfileProcesses(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("TMPDIR", root)
+	t.Setenv("TEMP", root)
 	t.Setenv("TMP", root)
 	profile, lock, err := createProfile()
 	if err != nil {

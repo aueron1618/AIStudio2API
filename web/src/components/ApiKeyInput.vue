@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, useTemplateRef } from 'vue'
-import { maskKey, splitKeys } from '@/apikey'
+import { keySuffix, maskKey, splitKeys } from '@/apikey'
 import { useI18n } from '@/i18n'
 import UiIcon from './UiIcon.vue'
 
@@ -131,7 +131,7 @@ function pasted(event: ClipboardEvent): void {
                   name="eye"
                   :size="13"
                   class="invisible absolute top-1/2 left-1/2 -translate-1/2 group-focus-within:visible group-hover:visible" /></span
-              >{{ key.slice(-4) }}</span
+              >{{ keySuffix(key) }}</span
             >
           </button>
           <button

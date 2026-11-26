@@ -48,7 +48,7 @@
 - **图片生成**: 支持 Nano Banana 图片生成
 - **视频生成**: 视频长任务与图片转视频由 Gemini Omni 生成；Gemini Omni 通过四套生成接口接收文本、图片与视频输入，输出文本与 MP4 视频
 - **Deep Research**: Pro 与 Ultra 账户可通过四套生成接口与 Interactions 的 `agent` 字段调用 Deep Research，输出研究过程、带引用的报告与图表
-- **Agent 与 Antigravity**: 实时目录中的 `interaction_task` Agent 经上游后台 Interaction 运行；试用页提供目录支持的工具与设置，Antigravity 的模型选择取自其目录配置，不把普通模型或 Build 路由强制改成 Agent
+- **Agent 与 Antigravity**: Playground 按所选账户的目录区分 Agent（`interaction_agent`）和使用 Interactions 的普通模型（`interaction_model`）；两者都可能走后台任务（`interaction_task`）。试用页提供 Agent 目录支持的工具与设置，Antigravity 的模型选项取自其目录。Build 仍使用独立路由
 - **决策模型**: `gemini-decision-1` 经 `/v1beta/decisions` 对同一份输入一次回答多个是非、单选与评分问题，返回校准后的概率与置信度；输入可以是文本、图片、音频、视频与 PDF，只计输入 token；这个模型在 AI Studio 官网中隐藏，官网选中后只显示示例应用，本服务可以直接使用
 - **YouTube 输入**: YouTube 视频 URL 作为外部视频附件读取；开启 `YOUTUBE_LINKS` 后，消息文本中的 YouTube 链接同样作为视频读取
 - **视频理解设置**: Gemini 与 Interactions 支持逐视频的起止时间、0–24 FPS 范围内的正数采样率和静态/Agentic 处理；Agentic 返回服务端处理步骤并支持历史续接
@@ -301,9 +301,16 @@ docker build --target no-browser -t aistudio2api:no-browser .
 3. 点击“停止服务”会取消正在进行的启动或活动请求并关闭 WAA Worker，管理页面与日志保持可用
 4. 再次点击“启动服务”即可恢复 API
 
-停止后再次启动会读取最新 `.env` 生成服务配置。账户选择策略、Worker 容量与换号上限保存后立即生效；模型映射、非流式保活、假流式、搜索型号、全模型搜索、思考防拦截、用户文字改写与媒体输出保存后用于新请求。抗截断与自动续写保留各自独立的热开关。管理页面地址和预览地址在管理进程重启后生效；设置页保存 `PROXY_API_KEY` 和 key 账户绑定后立即用于新请求，不需要重启管理进程或生成服务。其余配置按设置页的生效提示在 Stop/Start 后应用。
+在设置页保存后，各项配置的生效时机如下：
 
-有系统托盘时，桌面版关闭窗口后继续运行，从托盘菜单“退出”结束管理进程；Linux 没有托盘宿主时关闭窗口即退出。命令行版在启动窗口按 `Ctrl+C` 或关闭窗口会退出整个管理进程。关闭浏览器标签页不会停止管理进程。
+| 生效时机 | 配置 |
+| --- | --- |
+| 下一次请求，无需重启 | 绝大多数设置，包括 API 密钥及账户绑定、管理登录、通道、超时、首字对冲、请求改写与日志。变更默认代理或代理池时，受影响的 Worker 会等在途请求结束后再改绑。 |
+| 下次启动生成服务 | `WAA_BACKEND` 与 `AISTUDIO_AUTH_STATES`。服务正在运行时，设置页提供重启按钮；重启会中断活动请求。已停止时正常启动即可。 |
+| 重启管理进程 | `LISTEN_ADDR` 与 `PREVIEW_LISTEN_ADDR`。只重启生成服务不会改变监听地址。 |
+| 下次启动程序 | `AUTO_START`。保存不会启停当前服务。 |
+
+保存设置不会重新执行在途请求。`ANTI_TRUNCATION` 用于新请求；独立的 `AUTO_CONTINUATION` 开关可以阻止尚未发出的续写轮次，不中断当前轮。
 
 退出程序：
 
@@ -686,7 +693,9 @@ AIStudio2API/
 cp .env.example .env
 ```
 
-进程环境变量通常覆盖 `.env` 中的同名项，并在设置页中锁定；`PROXY_API_KEY` 始终可在设置页修改，保存新密钥后立即生效，`.env` 中自动写入的 `PROXY_API_KEY_WEB_OVERRIDE=true` 使它在重启后仍优先于进程环境。除该覆盖标记外，管理页面保存设置时 `.env` 只写入与默认值不同的项。普通配置的无效值按默认值运行，并在管理页面顶部与日志中列出；`API_KEY_ACCOUNTS` 格式无效或重复指定同一已配置 key 时拒绝加载和保存，不回退成允许全部账户。升级前备份配置：无注释且包含旧版全量键的 `.env` 可能在读取时自动精简，并非只在点击保存时改写。
+进程环境变量覆盖 `.env` 中的同名项，并在设置页中锁定。**唯一例外是 `PROXY_API_KEY`。** 在设置页显式更改或清空密钥，会在本地 `.env` 写入 `PROXY_API_KEY_WEB_OVERRIDE=true`。保存值（包括空值）在重启后仍优先于注入的密钥；移除标记并重启管理进程可恢复环境变量优先。仅保存其他设置不会启用此覆盖。清空最后一个密钥会关闭公开 API 的密钥校验；对外提供服务时应保留密钥。密钥列表与有效账户绑定同时生效，用于下一次鉴权。由环境变量提供的 `API_KEY_ACCOUNTS` 和管理员凭据仍然只读。
+
+除覆盖标记外，设置页只将与默认值不同的项写入 `.env`，环境变量锁定项保留原有文件值。普通配置的无效值按默认值运行，并在管理页面顶部与日志中列出；`API_KEY_ACCOUNTS` 格式无效或重复指定同一已配置 key 时拒绝加载和保存，不回退成允许全部账户。升级前备份配置：无注释且包含旧版全量键的 `.env` 可能在读取时自动精简，并非只在点击保存时改写。
 
 下表为未配置时的程序默认值；`.env.example` 显式选择仅 Playground，并关闭 Build 非流式优先、输入续写改写和分轮自动续写，可按需开启。
 
@@ -714,7 +723,9 @@ cp .env.example .env
 | `PER_ACCOUNT_CONCURRENCY` | `1` | 单账号同时执行的请求数 |
 | `ROUTING_STRATEGY` | `round-robin` | `round-robin` 轮询；`fill-first` 账号粘性优先 |
 | `ACCOUNT_ORDER` | 空 | `fill-first` 依次使用的账户，逗号分隔，未列出的账户排在后面并按 ID 排序；也可在设置页调整，保存后立即生效 |
-| `MAX_ACCOUNT_SWITCHES` | `3` | 上游返回 403、5xx 或首事件超时等非额度错误时一个请求最多换几次账户重试，`0` 为不换号；登录失效与额度用尽不计入，照常依次尝试其余账户；保存后立即生效 |
+| `MAX_ACCOUNT_SWITCHES` | `3` | 同一请求因 403、5xx 或首事件超时等非额度错误换号的次数上限，`0` 为不因这些错误换号；登录失效与额度用尽不计入 |
+| `ACCOUNT_SWITCH_INTERVAL` | `off` | 同一请求在上个账户失败后、尝试下一个账户前的最短等待时间：`off` 不等待，正整数为秒数。冷备 Worker 在启动前等待，就绪后不再等待；客户端断开即取消等待 |
+| `MAX_QUOTA_SWITCHES` | `off` | 同一请求因额度用尽（429）换号的独立上限。`off` 为可尝试全部其余合格账户，`0` 直接返回首次 429，正整数为最多换号次数，用尽后返回最后一次 429 |
 | `UPSTREAM_CHANNELS` | `playground,build` | 保留固定通道入口；`build` 为旧代理通道，上游已停用其生成，错误以上游为准 |
 | `MODEL_MAPPING` | 空 | 客户端模型名到目录模型的映射，每项写成 `别名:模型 ID`，逗号分隔多项 |
 | `MODEL_CHANNELS` | 空 | 限定模型只走一个通道，每项写成 `模型 ID:playground` 或 `模型 ID:build`；也可在“模型目录”的模型详情中选择，保存后立即生效 |
@@ -735,7 +746,7 @@ cp .env.example .env
 | `USER_MESSAGE_REWRITE` | `off` | 文本生成发送前将 user 文本中的中文改写为繁体中文或火星文；不改模型历史回答、思考块、媒体或函数参数/结果，并追加默认以简体中文回复的系统指令（用户明确要求其他语言时除外）；取值 `off`、`traditional`、`martian`，保存后对新请求立即生效 |
 | `FIRST_EVENT_HEDGE` | `off` | 原请求迟迟没有首字时用空闲账户（其他账户优先，没有时用原账户的空闲槽位）发起一个备用请求，先出首字的一方继续、另一方取消；`auto` 按各模型与通道近 24 小时首字等待的 p95，请求少于 20 次的模型与通道不发起；正整数为等待秒数，设置页选自定义时填入请求最多的模型的近期 p95 |
 | `FIRST_EVENT_HEDGE_MODELS` | `gemini-4-argon` | 发起备用请求的模型 ID，逗号分隔；仅在 `FIRST_EVENT_HEDGE` 非 `off` 时使用，备用请求同样计入账户额度 |
-| `FIRST_EVENT_TIMEOUT` | `off` | 单次生成尝试从取得账户到首个上游语义事件的上限，`off` 或正整数秒；到时取消并换号，计入 `MAX_ACCOUNT_SWITCHES`，不冷却账户；保存后 Stop/Start 生效 |
+| `FIRST_EVENT_TIMEOUT` | `off` | 单次生成尝试从取得账户到首个上游语义事件的上限，`off` 或正整数秒；到时取消并换号，计入 `MAX_ACCOUNT_SWITCHES`，不冷却账户；保存后用于新请求 |
 | `WAA_BACKEND` | `spidermonkey` | 默认在进程内执行 WAA，不启动浏览器；可选择 `camoufox`，旧配置 `go` 自动迁移 |
 | `MEDIA_OUTPUT` | `inline` | Chat Completions 与 Messages 正文中生成图片与音频的引用方式：`inline` 以 data URI 内联；`url` 按内容命名保存到 `runtime/media/`，以本服务的 `/media/<文件名>` URL 引用，该路径不校验 API key；目录总量超过 1 GiB 时从最久未使用的文件开始删除 |
 | `MEDIA_BASE_URL` | 空 | 媒体 URL 使用的服务地址，例如 `https://ai.example.com`；留空时使用每个请求访问的地址，经反向代理时跟随 `X-Forwarded-Proto` |
@@ -748,21 +759,21 @@ cp .env.example .env
 
 用量页分别展示 `requested_model`（客户端请求模型）和 `response_model`（实际响应模型），保留模型映射可追踪性。未授权请求不展示模型、账户、正文或原始路径；日志大详情仅在展开时渲染，正文需要显式加载，折叠后释放格式化视图。`REQUEST_BODY_LOG=false` 仍是默认值。
 
-`FIRST_EVENT_TIMEOUT` 收到首个语义事件即停止计时，响应头、网络字节与客户端心跳不等于首事件。没有可换账户或换号用尽时返回 504；不冷却账户、不改状态、不重建 Worker。它排除后台 Responses、后台 Interactions 与 `interaction_task` Agent，包含前台 `-build` 助手。与对冲同开时两方各自计时，建议阈值大于对冲等待时间；慢思考可能在首事件前等待几分钟。连续无数据的 `REQUEST_TIMEOUT` 更早到期时结束整个请求，不作为首事件换号。
+`FIRST_EVENT_TIMEOUT` 收到首个语义事件即停止计时，响应头、网络字节与客户端心跳不等于首事件。没有可换账户或换号用尽时返回 504；不冷却账户、不改状态、不重建 Worker。它排除后台 Responses、后台 Interactions 与 `interaction_agent` 目标；走 Interactions 的普通模型和前台 `-build` 助手不会因此被排除。与对冲同开时两方各自计时，建议阈值大于对冲等待时间；慢思考可能在首事件前等待几分钟。连续无数据的 `REQUEST_TIMEOUT` 更早到期时结束整个请求，不作为首事件换号。
 
-`AUTO_START` 因网络等非账户/配置原因启动失败时，按 5 秒起、翻倍至 5 分钟重试，手动启动或停止后结束重试。剥离历史思考签名时函数调用带 `skip_thought_signature_validator`，历史思考不随签名传给模型。隐藏模型在启动、每 24 小时及“刷新全部”同步时探测，经 `CountTokens` 确认可用才加入目录，官网列出后使用官方条目；关闭后在下一次启动移除。
+`AUTO_START` 因网络等非账户/配置原因启动失败时，按 5 秒起、翻倍至 5 分钟重试，手动启动或停止后结束重试。剥离历史思考签名时，历史思考不随签名传给模型。关闭 `DISCOVER_HIDDEN_MODELS` 后立即移除隐藏条目；开启后在下一次正常同步账户目录时生效（启动、每 24 小时及“刷新全部”）。仅加入该账户可用的模型，官网列出后以官方条目为准。
 
 ### 端口配置
 
 管理控制台默认通过本机回环地址免密访问。远程管理时：
 
-- 设置 `ADMIN_AUTH_ENABLED=true`、管理员账号和密码，重启程序后通过独立 `/login` 页面登录
+- 设置 `ADMIN_AUTH_ENABLED=true`、管理员账号和密码后通过独立 `/login` 页面登录（在设置页保存后立即生效，并为当前浏览器自动保持登录）
 - 登录会话有效期为 12 小时；勾选“30 天内保持登录”时为 30 天，程序重启后仍有效
 - 支持退出登录，管理员共享同一个账户池、配置与日志
 
 公开 API 使用独立的 `PROXY_API_KEY`。
 
-反向代理使用 HTTPS，并保留原始 `Host`、设置 `X-Forwarded-Proto: https`。管理页“服务配置”可调整登录开关及凭据，保存后重启程序生效。
+反向代理使用 HTTPS，并保留原始 `Host`、设置 `X-Forwarded-Proto: https`。管理页“服务配置”可调整登录开关及凭据，保存后立即生效（关闭登录仅限本机访问操作）。
 
 API 试用页的 HTML 预览运行在 `PREVIEW_LISTEN_ADDR` 提供的独立来源，页面以当前访问的主机名加该端口打开预览：
 

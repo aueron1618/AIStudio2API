@@ -274,6 +274,7 @@ export const api = {
     ).task,
   startService: () => requestJSON<ServiceStatus>('/api/control/start', { method: 'POST' }),
   stopService: () => requestJSON<ServiceStatus>('/api/control/stop', { method: 'POST' }),
+  restartService: () => requestJSON<ServiceStatus>('/api/control/restart', { method: 'POST' }),
   downloadCamoufox: () => requestJSON<ServiceStatus>('/api/camoufox/download', { method: 'POST' }),
   clearLogs: () => requestCommand('/api/logs', { method: 'DELETE' }),
   firstEventLatency: async () =>
@@ -281,7 +282,7 @@ export const api = {
   saveConfig: (config: ServiceConfig) =>
     requestJSON<ServiceConfig>('/api/config', {
       method: 'PUT',
-      body: jsonBody(config),
+      body: jsonBody({ ...config, active_proxy_api_key: undefined }),
     }),
   clearCooldown: (accountID: string, scope: string) =>
     requestCommand(

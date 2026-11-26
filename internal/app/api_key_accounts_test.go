@@ -21,7 +21,7 @@ func TestAPIKeyAccountsDropsRemovedKeyBinding(t *testing.T) {
 		t.Fatalf("key 列表不变时 %v", same)
 	}
 	rotated := apiKeyAccounts("key-new,key-b", "key-a:a@example.com,key-new:b@example.com")
-	if len(rotated) != 1 || !slices.Equal(rotated["key-new"], []string{"b@example.com"}) {
+	if _, kept := rotated["key-a"]; kept || len(rotated) != 1 || !slices.Equal(rotated["key-new"], []string{"b@example.com"}) {
 		t.Fatalf("换 key 后 %v", rotated)
 	}
 }
@@ -30,7 +30,13 @@ func TestAPIKeyAccountsLiveSaveUpdatesAuthentication(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	cfg := config.Default()
 	cfg.ProxyAPIKey, cfg.APIKeyAccounts = "key-a,key-b", "key-a:a@example.com"
+	t.Setenv("PROXY_API_KEY", cfg.ProxyAPIKey)
+	t.Setenv("REQUEST_TIMEOUT", "90s")
 	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
 		t.Fatal(err)
 	}
 	manager := &runtimeManager{
@@ -53,9 +59,13 @@ func TestAPIKeyAccountsLiveSaveUpdatesAuthentication(t *testing.T) {
 	check("key-new", "", http.StatusUnauthorized)
 	value := runtimeConfigDTO(cfg)
 	value.APIKeyAccounts = "key-a:b@example.com"
+	value.RequestTimeout = "2m"
 	updated, err := manager.UpdateRuntimeConfig(t.Context(), value)
 	if err != nil || updated.ServiceRestartRequired || updated.ManagementRestartRequired {
 		t.Fatalf("binding update must be immediate: %+v, %v", updated, err)
+	}
+	if updated.RequestTimeout != "1m30s" || !slices.Contains(updated.Environment, "REQUEST_TIMEOUT") || slices.Contains(updated.Environment, "PROXY_API_KEY") {
+		t.Fatal("only PROXY_API_KEY should be editable over an injected environment value")
 	}
 	service := manager.current.service.(*configTestService)
 	if !slices.Equal(service.bindings["key-a"], []string{"b@example.com"}) {
@@ -94,6 +104,10 @@ func TestAPIKeyAccountsLiveSaveUpdatesAuthentication(t *testing.T) {
 	}
 	check("", "", http.StatusNotFound)
 	check("", "https://example.com", http.StatusUnauthorized)
+	t.Setenv("PROXY_API_KEY", "changed-after-save")
+	if reloaded, err := config.Load(path); err != nil || reloaded.ProxyAPIKey != "" || reloaded.RequestTimeout != 90*time.Second {
+		t.Fatal("clearing the injected key did not persist independently of other environment settings")
+	}
 }
 
 func TestLiveConfigSaveSurvivesConcurrentStartup(t *testing.T) {
@@ -139,6 +153,7 @@ func TestLiveConfigSaveSurvivesConcurrentStartup(t *testing.T) {
 	value.RoutingStrategy, value.ModelChannels = "fill-first", "gemini-test:build"
 	value.AccountOrder, value.ModelAccounts = "changed@example.com,new@example.com", "gemini-test:changed@example.com"
 	value.RequestTimeout, value.ContinuationRewrite = "15m", false
+	value.AuthStates = "next-auth"
 	updated, err := manager.UpdateRuntimeConfig(ctx, value)
 	if err != nil {
 		t.Fatal(err)
@@ -162,8 +177,8 @@ func TestLiveConfigSaveSurvivesConcurrentStartup(t *testing.T) {
 		next.config.AccountOrder != value.AccountOrder || next.config.ModelAccounts != value.ModelAccounts {
 		t.Fatalf("startup replaced live routing: %+v", next.config)
 	}
-	if next.config.RequestTimeout != cfg.RequestTimeout || next.config.ContinuationRewrite != cfg.ContinuationRewrite {
-		t.Fatal("restart-bound settings were reported as applied to an older runtime")
+	if next.config.RequestTimeout != 15*time.Minute || next.config.ContinuationRewrite || next.config.AuthStates != cfg.AuthStates {
+		t.Fatal("startup must apply newly saved request settings but retain the account directory it actually opened")
 	}
 	loaded, err := config.Load(path)
 	if err != nil || loaded.APIKeyAccounts != updated.APIKeyAccounts || loaded.RequestTimeout != 15*time.Minute || loaded.ContinuationRewrite {
@@ -172,5 +187,15 @@ func TestLiveConfigSaveSurvivesConcurrentStartup(t *testing.T) {
 	active, err := manager.RuntimeConfig(ctx)
 	if err != nil || active.ManagementRestartRequired || !active.ServiceRestartRequired || active.ActiveAPIKey != value.APIKey {
 		t.Fatalf("pending changes lost their restart boundary: %+v, %v", active, err)
+	}
+	manager.factory = func(_ context.Context, lifecycle context.Context, cfg config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
+		return configTestGeneration(t, lifecycle, path, cfg), nil
+	}
+	if status, err := manager.RestartService(ctx); err != nil || !status.Running {
+		t.Fatalf("generation restart failed: %+v, %v", status, err)
+	}
+	active, err = manager.RuntimeConfig(ctx)
+	if err != nil || active.ServiceRestartRequired || manager.current.config.AuthStates != value.AuthStates || active.ActiveAPIKey != value.APIKey {
+		t.Fatal("generation restart did not apply the saved account directory and preserve the live key")
 	}
 }

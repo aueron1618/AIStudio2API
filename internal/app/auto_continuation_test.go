@@ -26,7 +26,7 @@ func TestAutoContinuationDisableSurvivesConcurrentStartup(t *testing.T) {
 	release := make(chan struct{})
 	next := configTestGeneration(t, ctx, path, cfg)
 	manager.factory = func(launch, _ context.Context, snapshot config.Config, _ *requestRegistry) (*runtimeGeneration, error) {
-		next.service.SetAutoContinuation(snapshot.AutoContinuation)
+		next.service.ApplyHotConfig(snapshot)
 		close(building)
 		select {
 		case <-release:

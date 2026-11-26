@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
+	"github.com/Mag1cFall/AIStudio2API/internal/requestdb"
 )
 
 type retryTestService struct {
@@ -317,6 +319,150 @@ func TestGenerateWithRetryQuotaFallbackKeepsChannel(t *testing.T) {
 			})
 		}
 	}
+}
+
+func runRetryTest(t *testing.T, service *trackedService, request aistudio.GenerateRequest, acquire func(context.Context, aistudio.AccountSelection, bool, *int, *time.Duration) (*aistudio.AccountLease, error)) []aistudio.Event {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(aistudio.ContextWithChannel(t.Context(), aistudio.ChannelPlayground), 5*time.Second)
+	defer cancel()
+	if acquire == nil {
+		acquire = func(ctx context.Context, sel aistudio.AccountSelection, _ bool, _ *int, _ *time.Duration) (*aistudio.AccountLease, error) {
+			return service.pool.AcquireFor(ctx, sel)
+		}
+	}
+	service.requests.start(request, cancel)
+	events := make(chan aistudio.Event)
+	go service.generateWithRetry(ctx, ctx, cancel, time.Now(), request, "", acquire, events)
+	var got []aistudio.Event
+	for event := range events {
+		got = append(got, event)
+	}
+	return got
+}
+
+func TestGenerateWithRetryQuotaCapAndInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cap  int
+		want int
+	}{{"no switches", 0, 1}, {"one switch", 1, 2}} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				quota := &aistudio.RPCError{StatusCode: http.StatusTooManyRequests, Code: 8, RetryDelay: time.Minute}
+				var times []time.Time
+				var accounts []string
+				const interval = 2 * time.Second
+				service := retryTestRuntime(t, func(_ context.Context, req aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
+					times = append(times, time.Now())
+					accounts = append(accounts, req.AccountID)
+					return nil, quota
+				})
+				service.SetSwitchPolicy(interval, tc.cap, true)
+				service.pool.SetUpstreamChannels([]aistudio.Channel{aistudio.ChannelPlayground})
+				events := runRetryTest(t, service, aistudio.GenerateRequest{ID: tc.name, Model: "shared"}, nil)
+				if len(events) != 1 || events[0].Kind != aistudio.EventError || !errors.Is(events[0].Err, quota) || len(accounts) != tc.want {
+					t.Fatalf("events=%v accounts=%v, want original quota error after %d attempts", events, accounts, tc.want)
+				}
+				if len(times) == 2 && (accounts[0] == accounts[1] || times[1].Sub(times[0]) != interval) {
+					t.Fatalf("unexpected switch timing: accounts=%v times=%v", accounts, times)
+				}
+				assertRetryLeasesReleased(t, service)
+			})
+		})
+	}
+}
+
+func TestColdStartupAndGenerationShareQuotaCap(t *testing.T) {
+	manager, probe := newWorkerBudgetTest(t, 0, 1, 1, 1)
+	quota := &aistudio.RPCError{StatusCode: http.StatusTooManyRequests, Code: 8, RetryDelay: time.Hour}
+	starts := 0
+	probe.init = func(context.Context, string) error {
+		starts++
+		if starts == 1 {
+			return quota
+		}
+		return nil
+	}
+	calls := 0
+	service := &trackedService{pool: manager.pool, requests: manager.requests, workers: manager, service: retryTestService{
+		generate: func(context.Context, aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
+			calls++
+			return nil, quota
+		},
+	}}
+	service.SetSwitchPolicy(0, 1, true)
+	events := runRetryTest(t, service, aistudio.GenerateRequest{ID: "cold-then-quota", Model: "shared"}, service.acquireWarmLease)
+	if len(events) != 1 || !errors.Is(events[0].Err, quota) || starts != 2 || calls != 1 {
+		t.Fatalf("request got separate startup and generation budgets: starts=%d calls=%d events=%v", starts, calls, events)
+	}
+	assertRetryLeasesReleased(t, service)
+}
+
+func TestRuntimeHotChannelsAndRequestFlags(t *testing.T) {
+	service := retryTestRuntime(t, nil)
+	const id = "a@example.test"
+	if err := service.pool.SetCatalog(id, aistudio.BenefitTierFree, []aistudio.Model{{ID: "shared"}, {ID: "hidden", Hidden: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.pool.SetBuildCatalog(id, []aistudio.Model{{ID: "only-build", Methods: []string{"embedContent"}}}); err != nil {
+		t.Fatal(err)
+	}
+	service.pooled = aistudio.NewPooledService(service.pool, aistudio.NewClient(aistudio.ClientOptions{}))
+	service.catalog = service.pooled
+	cfg := config.Default()
+	cfg.UpstreamChannels, cfg.DiscoverHiddenModels = []string{"playground"}, false
+	cfg.AutoContinuation, cfg.BuildNativeNonstream = false, false
+	cfg.FirstEventHedge, cfg.FirstEventHedgeModels, cfg.FirstEventTimeout = "2", "shared", "10"
+	service.ApplyHotConfig(cfg)
+	service.ApplyChannelsAndHidden(cfg)
+	policy := service.currentFirstEventPolicy()
+	has := func(id string) bool {
+		return slices.ContainsFunc(service.modelSnapshot(), func(model aistudio.Model) bool { return model.ID == id })
+	}
+	if !has("shared") || has("hidden") || has("only-build") || service.pool.BuildEnabled() || !service.autoContinuationDisabled.Load() || service.buildNativeNonstream.Load() ||
+		policy.hedgeAfter != 2*time.Second || policy.firstEventTimeout != 10*time.Second || !slices.Equal(policy.hedgeModels, []string{"shared"}) {
+		t.Fatalf("incorrect initial projection: %+v, %+v", service.modelSnapshot(), policy)
+	}
+	cfg.UpstreamChannels, cfg.DiscoverHiddenModels = []string{"playground", "build"}, true
+	cfg.AutoContinuation, cfg.BuildNativeNonstream = true, true
+	cfg.FirstEventHedge, cfg.FirstEventTimeout = "off", "off"
+	service.ApplyHotConfig(cfg)
+	service.ApplyChannelsAndHidden(cfg)
+	if !service.isDiscoverHiddenModels() || !service.pool.BuildEnabled() || !has("only-build") || has("hidden") || service.autoContinuationDisabled.Load() || !service.buildNativeNonstream.Load() ||
+		service.currentFirstEventPolicy().firstEventTimeout != 0 || service.currentFirstEventPolicy().hedgeAfter != 0 || policy.firstEventTimeout != 10*time.Second {
+		t.Fatalf("hot save failed to project cached models and new request flags: %+v", service.modelSnapshot())
+	}
+}
+
+func TestRuntimeSeedsAccountUsageWithoutWarming(t *testing.T) {
+	workers, probe := newWorkerBudgetTest(t, 0, 1, 1, 1)
+	workers.pool.SetRoutingStrategy("round-robin")
+	ids := workers.pool.EnabledAccounts()
+	path := filepath.Join(t.TempDir(), "requests.db")
+	ledger, err := requestdb.Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	ledger.Record(requestdb.Row{ID: "local", Time: now, Model: "shared", Account: ids[0], Channel: "playground", Status: http.StatusOK})
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err = requestdb.Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	manager := &runtimeManager{ledger: ledger, requests: workers.requests}
+	service := &trackedService{pool: workers.pool, workers: workers}
+	manager.seedAccountUsage(t.Context(), &runtimeGeneration{service: service})
+	if _, used := workers.pool.Activity(ids[0]); !used.Equal(now) {
+		t.Fatalf("expected persisted last use %s, got %s", now, used)
+	}
+	if order := workers.pool.PreferWarmPool(ids, nil); order[len(order)-1] != ids[0] {
+		t.Fatalf("usage seed did not reach warm ordering: %v", order)
+	}
+	assertWorkerBudget(t, workers, probe, 0)
 }
 
 func TestForwardTerminalErrorFinishesRequestBeforeDrain(t *testing.T) {

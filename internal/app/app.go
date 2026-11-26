@@ -148,6 +148,7 @@ func runService(ctx context.Context, cancel func(), cfg config.Config, options c
 	}
 	ledger.SetBodyCapture(cfg.RequestBodyLog)
 	manager.ledger = ledger
+	manager.seedAccountUsage(ctx, manager.current)
 	prompts, err := promptdb.Open(filepath.Join("runtime", "prompts.db"))
 	if err != nil {
 		return false, errors.Join(fmt.Errorf("打开对话库: %w", err), manager.Close(), ledger.Close())

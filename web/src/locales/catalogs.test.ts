@@ -32,6 +32,10 @@ describe('merged translation catalogs', () => {
       'settings.antiTruncationHelp',
       'settings.autoContinuationHelp',
       'settings.apiKeyAccountsHelp',
+      'settings.keyAccountsAll',
+      'settings.restartInterrupts',
+      'settings.restartService',
+      'version.verifying',
       'settings.accountOrderHelp',
       'settings.pathPickerTitle',
       'settings.workerCapacityHelp',
@@ -73,6 +77,21 @@ describe('merged translation catalogs', () => {
     expect(catalog.messages['settings.workerCapacityHelp']).toContain('0/1/1/1')
     expect(catalog.messages['settings.warmWorkerLimitHelp']).toContain('30')
     expect(catalog.messages['settings.buildLegacyNotice']).toContain('/build/v1')
+    expect(catalog.messages['settings.apiKeyHelp']).toContain('PROXY_API_KEY')
+    expect(catalog.messages['accounts.exitsShared']).toContain('{count}')
+    expect(catalog.messages['error.config_saved_apply_failed']).toContain('{detail}')
+    expect(catalog.messages['settings.restartInterrupts']).toContain('{count}')
+    expect(catalog.messages['settings.pendingManagement']).not.toMatch(/API|PROXY_API_KEY/i)
+    expect(catalog.messages).not.toHaveProperty(['settings.replyTool'])
+    expect(catalog.messages).not.toHaveProperty(['settings.keyAccountsSome'])
+    for (const key of [
+      'accounts.readBrowser',
+      'accounts.readBrowserHelp',
+      'accounts.browserHint',
+      'accounts.browserEmpty',
+    ]) {
+      expect(catalog.messages[key]).not.toMatch(/Firefox|BiDi/i)
+    }
   })
 
   it.each(Object.entries(server))(

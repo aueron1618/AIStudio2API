@@ -58,3 +58,54 @@ func TestPageCatalogRequiresAllColdStartResponses(t *testing.T) {
 		})
 	}
 }
+
+type emptyCatalogFetcher func()
+
+func (fetch emptyCatalogFetcher) FetchStatic(context.Context, string, string) ([]byte, error) {
+	fetch()
+	return []byte(`path:"prompts/new_chat",load("empty")`), nil
+}
+
+func TestClearHiddenModelsInvalidatesPendingRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		reenable bool
+	}{{"disable", false}, {"disable then reenable", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := &Account{ID: "fixture", State: AccountReady, Config: AccountConfig{Enabled: true}}
+			pool := NewAccountPool([]*Account{account}, 1)
+			pool.SetUpstreamChannels([]Channel{ChannelPlayground})
+			var service *PooledService
+			fetches := 0
+			client := NewClient(ClientOptions{
+				Pages: pageCatalogTestProvider(func(context.Context, string, bool) (camoufoxnative.PageCatalog, error) {
+					return camoufoxnative.PageCatalog{Logging: []byte("[]"), Tier: []byte("[1]"), Models: []byte(pageFixtureModels), Bundle: "fixture"}, nil
+				}),
+				Static: emptyCatalogFetcher(func() {
+					fetches++
+					if fetches == 1 {
+						service.SetRequestOptions(RequestOptions{})
+						service.ClearHiddenModels()
+						if tc.reenable {
+							service.SetRequestOptions(RequestOptions{DiscoverHiddenModels: true})
+						}
+					}
+				}),
+			})
+			service = NewPooledService(pool, client)
+			service.SetRequestOptions(RequestOptions{DiscoverHiddenModels: true})
+			lease, err := pool.AcquireAccount(t.Context(), account.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Release()
+			models, err := service.modelsForLease(t.Context(), lease, false)
+			if err != nil || fetches != 2 || len(models) != 1 || models[0].ID != "fixture" {
+				t.Fatalf("listed catalog changed: models=%v fetches=%d err=%v", models, fetches, err)
+			}
+			if account.hiddenDiscovered || account.hiddenModels != nil {
+				t.Fatal("a refresh started before the clear restored its discovery state")
+			}
+		})
+	}
+}

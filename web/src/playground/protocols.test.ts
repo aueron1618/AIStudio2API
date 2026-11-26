@@ -33,7 +33,9 @@ vi.mock('@/console', () => ({
         { id: 'build-only', name: 'Build', methods: ['generateContent'], channels: ['build'] },
       ],
     },
-    config: { value: { proxy_api_key: 'first-key,second-key' } },
+    config: {
+      value: { proxy_api_key: 'not-active', active_proxy_api_key: 'first-key,second-key' },
+    },
   }),
 }))
 

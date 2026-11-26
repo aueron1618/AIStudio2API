@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,9 +22,9 @@ type managedService interface {
 	aistudio.Service
 	State() string
 	ApplyCapacity(warmTarget int, maxActive int, startupConcurrency int, perAccountConcurrency int)
-	SetAutoContinuation(bool)
 	SetAPIKeyAccounts(map[string][]string)
-	SetRequestPolicy(mapping []config.ModelAlias, maxAccountSwitches int)
+	ApplyHotConfig(config.Config)
+	ApplyChannelsAndHidden(config.Config)
 }
 
 // generationAdmin 表示进程级管理器转交给当前生成服务的管理操作
@@ -53,8 +52,10 @@ type generationAdmin interface {
 	StartService(context.Context) (api.AdminStatus, error)
 	StopService(context.Context) (api.AdminStatus, error)
 	RuntimeConfig(context.Context) (api.RuntimeConfig, error)
-	UpdateRuntimeConfig(context.Context, api.RuntimeConfig) (api.RuntimeConfig, error)
+	saveRuntimeConfig(api.RuntimeConfig) (config.Config, error)
 	ApplyAccountSelection(config.Config)
+	ApplyProxy(string) error
+	ProxyState() (string, []api.AdminProxy)
 	Cooldowns(context.Context) ([]api.AdminCooldown, error)
 	ClearCooldown(ctx context.Context, accountID string, scope string) error
 	Requests(context.Context) ([]api.AdminRequest, error)
@@ -166,7 +167,7 @@ func newRuntimeManager(
 	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts))
 	manager.settings.Store(requestSettingsOf(cfg))
 	manager.current = generation
-	manager.wireAccounts(generation)
+	manager.wireGeneration(generation)
 	if cfg.AutoStart {
 		manager.initial = generation
 	}
@@ -256,7 +257,8 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 			manager.finishStart(launchCancel)
 			return api.AdminStatus{}, err
 		}
-		manager.wireAccounts(next)
+		manager.wireGeneration(next)
+		manager.seedAccountUsage(launchCtx, next)
 	}
 	if launchCtx.Err() != nil {
 		release()
@@ -269,6 +271,10 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 
 	manager.configMu.Lock()
 	saved, err := config.Load(manager.configPath)
+	if err == nil {
+		manager.overrides.Apply(&saved)
+		err = next.applyLiveConfig(saved)
+	}
 	if err != nil {
 		manager.configMu.Unlock()
 		release()
@@ -289,9 +295,7 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 		}
 		return manager.Status(ctx)
 	}
-	// Re-read the saved policy under configMu, including an auto-continuation disable during startup.
-	next.applyLiveConfig(runtimeConfigDTO(saved))
-	manager.settings.Store(requestSettingsOf(next.config))
+	manager.publishLiveConfigLocked(next, saved)
 	current = manager.current
 	manager.current = next
 	manager.mu.Unlock()
@@ -370,6 +374,14 @@ func (manager *runtimeManager) StopService(ctx context.Context) (api.AdminStatus
 	current := manager.current
 	manager.mu.Unlock()
 	return current.admin.StopService(ctx)
+}
+
+// RestartService 停止当前生成服务并以最新配置重新启动
+func (manager *runtimeManager) RestartService(ctx context.Context) (api.AdminStatus, error) {
+	if _, err := manager.StopService(ctx); err != nil {
+		return api.AdminStatus{}, err
+	}
+	return manager.StartService(ctx)
 }
 
 // DownloadCamoufox 在 Camoufox 未就绪且没有进行中的下载时经出口代理在后台开始下载
@@ -622,9 +634,7 @@ func (manager *runtimeManager) Transcribe(ctx context.Context, request aistudio.
 
 // egressProxy 返回管理进程访问外网的代理：PROXY 的第一个代理，未设置时为系统代理
 func (manager *runtimeManager) egressProxy() string {
-	manager.mu.RLock()
-	proxies := config.ProxyList(manager.current.config.Proxy)
-	manager.mu.RUnlock()
+	proxies := config.ProxyList(manager.currentConfig().Proxy)
 	if len(proxies) > 0 {
 		return proxies[0]
 	}
@@ -679,9 +689,10 @@ func (manager *runtimeManager) currentAdmin() generationAdmin {
 	return manager.current.admin
 }
 
-// wireAccounts 让生成服务的浏览器登录与导入在准备完成后经 accountAdmin 提交到提交时的当前生成服务
-func (manager *runtimeManager) wireAccounts(generation *runtimeGeneration) {
+// wireGeneration keeps configuration writes and account commits attached to this manager across restarts.
+func (manager *runtimeManager) wireGeneration(generation *runtimeGeneration) {
 	if admin, ok := generation.admin.(*runtimeAdmin); ok {
+		admin.configPath = manager.configPath
 		admin.accountCommit = func() (*runtimeAdmin, func()) {
 			target, done := manager.accountAdmin()
 			return target.(*runtimeAdmin), done
@@ -820,15 +831,13 @@ func (manager *runtimeManager) RuntimeConfig(ctx context.Context) (api.RuntimeCo
 	return value, err
 }
 
-// apiKeys 在配置保存锁内读取同一版本的密钥和账户绑定
+// apiKeys 读取同一版本的密钥和账户绑定。
 func (manager *runtimeManager) apiKeys() (string, map[string][]string) {
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	cfg := manager.current.config
+	cfg := manager.currentConfig()
 	return cfg.ProxyAPIKey, apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts)
 }
 
-// UpdateRuntimeConfig 保存生成服务配置，账户选择策略、容量设置与只决定新请求行为的设置立即生效
+// UpdateRuntimeConfig 保存生成服务配置，除必须重建生成服务或重启程序的极少数项外，其余设置均对下一次请求立即生效
 func (manager *runtimeManager) UpdateRuntimeConfig(ctx context.Context, value api.RuntimeConfig) (api.RuntimeConfig, error) {
 	manager.configMu.Lock()
 	defer manager.configMu.Unlock()
@@ -840,44 +849,46 @@ func (manager *runtimeManager) UpdateRuntimeConfig(ctx context.Context, value ap
 	}
 	current, done := manager.generation()
 	defer done()
-	updated, err := current.admin.UpdateRuntimeConfig(ctx, value)
+	saved, err := current.admin.saveRuntimeConfig(value)
 	if err != nil {
-		return updated, err
+		return api.RuntimeConfig{}, err
 	}
+	updated := runtimeConfigDTO(saved)
+	updated.ConfigSaved = true
+	manager.overrides.Apply(&saved)
+	proxyErr := current.applyLiveConfig(saved)
 	manager.mu.Lock()
-	current.applyLiveConfig(updated)
-	manager.settings.Store(requestSettingsOf(current.config))
+	manager.publishLiveConfigLocked(current, saved)
 	activeConfig := current.config
 	manager.mu.Unlock()
+	updated.ActiveProxy, updated.ProxyPool = current.admin.ProxyState()
 	updated = manager.decorateRuntimeConfig(updated, activeConfig)
-	manager.ledger.SetBodyCapture(updated.RequestBodyLog)
-	return updated, manager.logs.set(updated.LogFile, updated.LogMaxTotalMB)
+	if manager.requests != nil {
+		if models, err := current.admin.CatalogModels(ctx); err == nil {
+			manager.requests.publish(api.AdminEvent{Type: "models", Data: map[string]any{"models": models}})
+		}
+	}
+	manager.ledger.SetBodyCapture(saved.RequestBodyLog)
+	return updated, errors.Join(proxyErr, manager.logs.set(saved.LogFile, saved.LogMaxTotalMB))
 }
 
-// applyLiveConfig updates only immediate settings, not the restart-bound snapshot.
-func (generation *runtimeGeneration) applyLiveConfig(value api.RuntimeConfig) {
-	cfg := &generation.config
-	cfg.ProxyAPIKey, cfg.APIKeyAccounts = value.APIKey, value.APIKeyAccounts
-	cfg.RoutingStrategy, cfg.ModelChannels = value.RoutingStrategy, value.ModelChannels
-	cfg.AccountOrder, cfg.ModelAccounts = value.AccountOrder, value.ModelAccounts
-	cfg.WarmWorkerLimit, cfg.MaxActiveWorkers = value.WarmWorkerLimit, value.MaxActiveWorkers
-	cfg.WarmStartupConcurrency, cfg.PerAccountConcurrency = value.WarmStartupConcurrency, value.PerAccountConcurrency
-	cfg.AntiTruncation = value.AntiTruncation
-	if value.AutoContinuation != nil {
-		cfg.AutoContinuation = *value.AutoContinuation
-	}
-	cfg.RequestBodyLog, cfg.LogFile, cfg.LogMaxTotalMB = value.RequestBodyLog, value.LogFile, value.LogMaxTotalMB
-	cfg.NonstreamKeepalive, cfg.FakeStream = value.NonstreamKeepalive, value.FakeStream
-	cfg.SearchModelAliases, cfg.GoogleSearch = value.SearchModelAliases, value.GoogleSearch
-	cfg.MediaOutput, cfg.MediaBaseURL = value.MediaOutput, value.MediaBaseURL
-	cfg.ModelMapping, cfg.MaxAccountSwitches = value.ModelMapping, value.MaxAccountSwitches
-	cfg.UserMessageRewrite, cfg.ThinkingGuard = value.UserMessageRewrite, value.ThinkingGuard
-	generation.admin.ApplyAccountSelection(*cfg)
-	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts))
+func (generation *runtimeGeneration) applyLiveConfig(cfg config.Config) error {
+	generation.admin.ApplyAccountSelection(cfg)
 	generation.service.ApplyCapacity(cfg.WarmWorkerLimit, cfg.MaxActiveWorkers, cfg.WarmStartupConcurrency, cfg.PerAccountConcurrency)
-	generation.service.SetAutoContinuation(cfg.AutoContinuation)
-	mapping, _ := config.ParseModelMapping(cfg.ModelMapping)
-	generation.service.SetRequestPolicy(mapping, cfg.MaxAccountSwitches)
+	generation.service.ApplyHotConfig(cfg)
+	generation.service.ApplyChannelsAndHidden(cfg)
+	return generation.admin.ApplyProxy(cfg.Proxy)
+}
+
+// Keep the actual launch-only values until the corresponding listener or generation is rebuilt.
+// The authentication key and its account scope are published together under manager.mu.
+func (manager *runtimeManager) publishLiveConfigLocked(generation *runtimeGeneration, cfg config.Config) {
+	cfg.ListenAddr, cfg.PreviewListenAddr = generation.config.ListenAddr, generation.config.PreviewListenAddr
+	cfg.AuthStates, cfg.WAABackend = generation.config.AuthStates, generation.config.WAABackend
+	cfg.AutoStart = generation.config.AutoStart
+	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts))
+	generation.config = cfg
+	manager.settings.Store(requestSettingsOf(cfg))
 }
 
 // Cooldowns 返回当前生成服务冷却状态
@@ -932,47 +943,33 @@ func (manager *runtimeManager) RecordAccessLog(entry api.AccessLog) {
 
 // decorateRuntimeConfig 标记配置所属的进程级与生成服务生效时机
 func (manager *runtimeManager) decorateRuntimeConfig(value api.RuntimeConfig, active config.Config) api.RuntimeConfig {
+	serviceRunning := false
+	manager.mu.RLock()
+	if manager.current != nil && manager.current.service != nil {
+		serviceRunning = manager.current.service.State() != "STOPPED"
+	}
+	manager.mu.RUnlock()
 	value.ActiveListenAddr = manager.activeManagement.ListenAddr
 	value.ReservedListenAddr = manager.reservedListenAddr
 	value.ActiveAPIKey = active.ProxyAPIKey
 	value.ActivePreviewListenAddr = manager.previewAddress
-	value.ManagementRestartRequired = value.ListenAddr != value.ActiveListenAddr && value.ListenAddr != value.ReservedListenAddr ||
+	if manager.requests != nil {
+		value.ActiveRequests = manager.requests.count()
+	}
+	value.ManagementRestartRequired = (value.ListenAddr != value.ActiveListenAddr && value.ListenAddr != value.ReservedListenAddr) ||
 		value.PreviewListenAddr != manager.activeManagement.PreviewListenAddr
-	value.ManagementRestartRequired = value.ManagementRestartRequired ||
-		value.AdminAuthEnabled != manager.activeManagement.AdminAuthEnabled ||
-		value.AdminUsername != manager.activeManagement.AdminUsername ||
-		value.SavedAdminPassword != manager.activeManagement.AdminPassword
-	value.ServiceRestartRequired = !sameDataConfig(value, active, manager.overrides)
+	value.ServiceRestartRequired = serviceRunning && !sameDataConfig(value, active, manager.overrides)
 	return value
 }
 
-// sameDataConfig 比较已保存配置与当前生成服务配置
+// sameDataConfig 比较必须重建生成服务才能生效的配置项（账户目录与 WAA 后端）
 func sameDataConfig(value api.RuntimeConfig, active config.Config, overrides dataConfigOverrides) bool {
-	initTimeout, _ := time.ParseDuration(value.InitTimeout)
-	requestTimeout, _ := time.ParseDuration(value.RequestTimeout)
 	saved := config.Config{
-		AuthStates: value.AuthStates, Proxy: value.Proxy,
-		InitTimeout: initTimeout, RequestTimeout: requestTimeout, StripThoughtSignatures: value.StripThoughtSignatures,
-		UpstreamChannels:      value.UpstreamChannels,
-		WAABackend:            value.WAABackend,
-		BuildNativeNonstream:  value.BuildNativeNonstream,
-		YouTubeLinks:          value.YouTubeLinks,
-		DiscoverHiddenModels:  value.DiscoverHiddenModels,
-		FirstEventHedge:       value.FirstEventHedge,
-		FirstEventHedgeModels: value.FirstEventHedgeModels,
-		FirstEventTimeout:     value.FirstEventTimeout,
-		ContinuationRewrite:   value.ContinuationRewrite,
-		ContinuationPrompt:    value.ContinuationPrompt,
+		AuthStates: value.AuthStates,
+		WAABackend: value.WAABackend,
 	}
 	overrides.Apply(&saved)
-	return saved.AuthStates == active.AuthStates && saved.Proxy == active.Proxy &&
-		saved.InitTimeout == active.InitTimeout && saved.RequestTimeout == active.RequestTimeout &&
-		slices.Equal(saved.UpstreamChannels, active.UpstreamChannels) &&
-		saved.WAABackend == active.WAABackend &&
-		saved.BuildNativeNonstream == active.BuildNativeNonstream &&
-		saved.YouTubeLinks == active.YouTubeLinks && saved.StripThoughtSignatures == active.StripThoughtSignatures && saved.FirstEventHedge == active.FirstEventHedge && saved.FirstEventHedgeModels == active.FirstEventHedgeModels && saved.FirstEventTimeout == active.FirstEventTimeout &&
-		saved.DiscoverHiddenModels == active.DiscoverHiddenModels &&
-		saved.ContinuationRewrite == active.ContinuationRewrite && saved.ContinuationPrompt == active.ContinuationPrompt
+	return saved.AuthStates == active.AuthStates && saved.WAABackend == active.WAABackend
 }
 
 var _ aistudio.Service = (*runtimeManager)(nil)

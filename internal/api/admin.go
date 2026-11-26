@@ -36,6 +36,7 @@ type AdminService interface {
 	RefreshAccount(context.Context, string) (AdminAccountRefresh, error)
 	StartService(context.Context) (AdminStatus, error)
 	StopService(context.Context) (AdminStatus, error)
+	RestartService(context.Context) (AdminStatus, error)
 	DownloadCamoufox(context.Context) (AdminStatus, error)
 	ClearLogs(context.Context) error
 	RuntimeConfig(context.Context) (RuntimeConfig, error)
@@ -369,6 +370,7 @@ type RuntimeConfig struct {
 	AdminPassword             *string              `json:"admin_password,omitempty"`
 	AdminPasswordSet          bool                 `json:"admin_password_set"`
 	SavedAdminPassword        string               `json:"-"`
+	ConfigSaved               bool                 `json:"-"` // Persistence succeeded even if a subsequent hot update failed.
 	BuildNativeNonstream      bool                 `json:"build_native_nonstream"`
 	NonstreamKeepalive        bool                 `json:"nonstream_keepalive"`
 	FakeStream                bool                 `json:"fake_stream"`
@@ -398,6 +400,7 @@ type RuntimeConfig struct {
 	ActiveAPIKey              string               `json:"active_proxy_api_key"`
 	ManagementRestartRequired bool                 `json:"management_restart_required"`
 	ServiceRestartRequired    bool                 `json:"service_restart_required"`
+	ActiveRequests            int                  `json:"active_requests"`
 	Proxy                     string               `json:"proxy"`
 	ActiveProxy               string               `json:"active_proxy"`
 	ProxyPool                 []AdminProxy         `json:"proxy_pool"`
@@ -410,6 +413,8 @@ type RuntimeConfig struct {
 	RoutingStrategy           string               `json:"routing_strategy"`
 	AccountOrder              string               `json:"account_order"`
 	MaxAccountSwitches        int                  `json:"max_account_switches"`
+	AccountSwitchInterval     string               `json:"account_switch_interval"`
+	MaxQuotaSwitches          string               `json:"max_quota_switches"`
 	UpstreamChannels          []string             `json:"upstream_channels"`
 	ModelMapping              string               `json:"model_mapping"`
 	ModelChannels             string               `json:"model_channels"`
@@ -480,6 +485,7 @@ func (s *server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/accounts/refresh", s.handleRefreshAccounts)
 	mux.HandleFunc("POST /api/control/start", s.handleStartService)
 	mux.HandleFunc("POST /api/control/stop", s.handleStopService)
+	mux.HandleFunc("POST /api/control/restart", s.handleRestartService)
 	mux.HandleFunc("POST /api/camoufox/download", s.handleDownloadCamoufox)
 	mux.HandleFunc("DELETE /api/logs", s.handleClearLogs)
 	mux.HandleFunc("GET /api/config", s.handleRuntimeConfig)
@@ -703,6 +709,15 @@ func (s *server) handleStopService(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
+func (s *server) handleRestartService(w http.ResponseWriter, r *http.Request) {
+	status, err := s.config.Admin.RestartService(r.Context())
+	if err != nil {
+		writeAdminUpstreamError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
 func (s *server) handleClearLogs(w http.ResponseWriter, r *http.Request) {
 	if err := s.config.Admin.ClearLogs(r.Context()); err != nil {
 		writeAdminUpstreamError(w, err)
@@ -717,6 +732,7 @@ func (s *server) handleRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 		writeAdminUpstreamError(w, err)
 		return
 	}
+	config.AdminPassword = nil
 	writeJSON(w, http.StatusOK, config)
 }
 
@@ -731,11 +747,23 @@ func (s *server) handleUpdateRuntimeConfig(w http.ResponseWriter, r *http.Reques
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	updated, err := s.config.Admin.UpdateRuntimeConfig(r.Context(), config)
-	if err != nil {
-		writeAdminUpstreamError(w, err)
+	if err := s.adminAuth.ValidateConfigUpdate(r, config.AdminAuthEnabled); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_config", err.Error())
 		return
 	}
+	updated, err := s.config.Admin.UpdateRuntimeConfig(r.Context(), config)
+	if err == nil || updated.ConfigSaved {
+		s.adminAuth.ApplyConfig(updated.AdminAuthEnabled, updated.AdminUsername, updated.SavedAdminPassword, w, r)
+	}
+	if err != nil {
+		if updated.ConfigSaved {
+			writeAdminError(w, http.StatusInternalServerError, "config_saved_apply_failed", err.Error())
+		} else {
+			writeAdminUpstreamError(w, err)
+		}
+		return
+	}
+	updated.AdminPassword = nil
 	writeJSON(w, http.StatusOK, updated)
 }
 

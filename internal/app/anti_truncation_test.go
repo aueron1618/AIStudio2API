@@ -38,7 +38,7 @@ func TestAntiTruncationRuntimeConfig(t *testing.T) {
 	admin := &runtimeAdmin{configPath: path, requests: newTestRequestRegistry(t), pool: pool, service: &trackedService{pool: pool}}
 	for _, enabled := range []bool{true, false} {
 		value.AntiTruncation = enabled
-		updated, err := admin.UpdateRuntimeConfig(t.Context(), value)
+		updated, err := admin.saveRuntimeConfig(value)
 		if err != nil || updated.AntiTruncation != enabled {
 			t.Fatalf("admin setting enabled=%t: %+v, %v", enabled, updated, err)
 		}

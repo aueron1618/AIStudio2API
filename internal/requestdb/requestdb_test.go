@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"path/filepath"
 	"slices"
@@ -80,6 +81,59 @@ func TestLedgerUsageAndBodies(t *testing.T) {
 	body, err := store.RequestBody(context.Background(), fmt.Sprintf("body-%d", bodyRetention+1))
 	if err != nil || body.Request != "in" || body.Response != "out" {
 		t.Fatalf("body=%+v err=%v", body, err)
+	}
+}
+
+func TestAccountUsageSeedFromReopenedLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "requests.db")
+	logger := func(level, message string, attrs ...any) { t.Errorf("%s %s %v", level, message, attrs) }
+	store, err := Open(path, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	start := now.Add(-30 * time.Hour).Truncate(time.Hour).Add(17 * time.Minute)
+	for _, row := range []Row{
+		{ID: "old", Account: "a", Model: "models/m", Channel: "build", Time: start.Add(-time.Millisecond)},
+		{ID: "boundary", Account: "a", Model: "models/m", Channel: "build", Time: start},
+		{ID: "latest", Account: "a", Model: "models/m", Channel: "build", Time: now, State: "completed"},
+		{ID: "latest", Account: "a", Model: "models/m", Channel: "build", Time: now, State: "completed"},
+		{ID: "other-channel", Account: "a", Model: "m", Channel: "playground", Time: start.Add(time.Hour)},
+		{ID: "other-account", Account: "b", Model: "n", Channel: "build", Time: start.Add(2 * time.Hour), State: "failed"},
+		{ID: "unassigned", Model: "n", Channel: "build", Time: now},
+	} {
+		store.Record(row)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seed, err := store.AccountUsageSeed(t.Context(), start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []AccountUsageEntry{
+		{Account: "a", Model: "m", Channel: "build", LastUsed: now},
+		{Account: "a", Model: "m", Channel: "playground", LastUsed: start.Add(time.Hour)},
+		{Account: "b", Model: "n", Channel: "build", LastUsed: start.Add(2 * time.Hour)},
+	}
+	if !seed.QuotaDayStart.Equal(start) || !maps.Equal(seed.QuotaDayRequests, map[string]int64{"a": 3, "b": 1}) || len(seed.Entries) != len(want) {
+		t.Fatalf("unexpected seed: %+v", seed)
+	}
+	for _, entry := range want {
+		if !slices.Contains(seed.Entries, entry) {
+			t.Errorf("missing entry %+v in %+v", entry, seed.Entries)
+		}
+	}
+	for _, noQuota := range []time.Time{{}, now.Add(time.Hour)} {
+		seed, err := store.AccountUsageSeed(t.Context(), noQuota)
+		if err != nil || len(seed.QuotaDayRequests) != 0 || len(seed.Entries) != len(want) {
+			t.Errorf("without a current quota range: %+v, %v", seed, err)
+		}
 	}
 }
 

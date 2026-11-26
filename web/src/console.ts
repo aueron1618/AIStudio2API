@@ -1,5 +1,5 @@
 import { computed, reactive, ref, shallowRef, watch } from 'vue'
-import { api, openAdminEvents } from '@/api'
+import { api, ApiError, openAdminEvents } from '@/api'
 import { syncServerClock } from '@/elapsed'
 import { useI18n } from '@/i18n'
 import type {
@@ -164,14 +164,34 @@ async function loadRequests(): Promise<void> {
 }
 
 async function loadConfig(): Promise<void> {
+  const generation = consoleGeneration
   loading.config = config.value === null
   errors.config = ''
   try {
-    config.value = await api.config()
+    const value = await api.config()
+    if (generation === consoleGeneration) config.value = value
   } catch (error) {
-    errors.config = errorText(error)
+    if (generation === consoleGeneration) errors.config = errorText(error)
   } finally {
-    loading.config = false
+    if (generation === consoleGeneration) loading.config = false
+  }
+}
+
+// A persisted change can rotate credentials even if applying a different setting fails.
+async function persistConfig(value: ServiceConfig): Promise<ServiceConfig> {
+  const generation = consoleGeneration
+  try {
+    return await api.saveConfig(value)
+  } catch (error) {
+    if (
+      generation === consoleGeneration &&
+      error instanceof ApiError &&
+      error.code === 'config_saved_apply_failed'
+    ) {
+      window.dispatchEvent(new Event('admin-session-changed'))
+      await loadConfig()
+    }
+    throw error
   }
 }
 
@@ -463,12 +483,17 @@ async function startConsole(): Promise<void> {
   )
 }
 
-// stopConsole 关闭事件订阅并提交等待中的删除
+// stopConsole 关闭事件订阅、清空服务状态与账户任务以停止状态轮询，并提交等待中的删除
 function stopConsole(): void {
   consoleGeneration++
   consoleActive.value = false
   eventConnection?.close()
   eventConnection = undefined
+  status.value = null
+  loading.status = true
+  accountTasks.value = []
+  config.value = null
+  loading.config = true
   window.clearTimeout(logFlushTimer)
   window.clearTimeout(noticeTimer)
   notice.message = ''
@@ -499,6 +524,7 @@ export function useConsole() {
     showNotice,
     closeNotice,
     loadAccountData,
+    persistConfig,
     loadAccountTasks,
     rememberAccountTask,
     loadRequestData,

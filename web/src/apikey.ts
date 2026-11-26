@@ -6,7 +6,11 @@ export function splitKeys(value: string): string[] {
     .filter(Boolean)
 }
 
-// maskKey 以圆点加末 4 位显示 API key，同一列表中的各个 key 由末 4 位区分
+// A short key must not become visible in full, even in a tooltip or accessible name.
+export function keySuffix(key: string): string {
+  return key.length > 4 ? key.slice(-4) : ''
+}
+
 export function maskKey(key: string): string {
-  return `••••${key.slice(-4)}`
+  return `••••${keySuffix(key)}`
 }

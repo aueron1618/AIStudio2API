@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
@@ -23,6 +24,15 @@ type anthropicSearchResult struct {
 	PageAge          *string `json:"page_age"`
 }
 
+type anthropicCipherContextKey struct{}
+
+func anthropicRequestCipher(ctx context.Context) cipher.AEAD {
+	if aead, ok := ctx.Value(anthropicCipherContextKey{}).(cipher.AEAD); ok {
+		return aead
+	}
+	return anthropicSearchCipher("")
+}
+
 // anthropicSearchCipher 将来源上下文绑定到当前服务凭证
 func anthropicSearchCipher(apiKey string) cipher.AEAD {
 	key := sha256.Sum256([]byte("aistudio-anthropic-search\x00" + apiKey))
@@ -32,7 +42,7 @@ func anthropicSearchCipher(apiKey string) cipher.AEAD {
 }
 
 // anthropicSearchBlocks 将上游搜索调用步骤与 grounding 中的查询和来源投影为服务端工具块，返回各查询按首次出现顺序对应的一组 server_tool_use 与 web_search_tool_result
-func anthropicSearchBlocks(events []aistudio.Event, apiKey string) ([]string, map[string][]anthropicContentBlock) {
+func anthropicSearchBlocks(events []aistudio.Event, aead cipher.AEAD) ([]string, map[string][]anthropicContentBlock) {
 	queries := make([]string, 0)
 	sources := make([]aistudio.GroundingChunk, 0)
 	seenQueries := make(map[string]bool)
@@ -63,7 +73,6 @@ func anthropicSearchBlocks(events []aistudio.Event, apiKey string) ([]string, ma
 	if len(queries) == 0 {
 		return nil, nil
 	}
-	aead := anthropicSearchCipher(apiKey)
 	results := make([]anthropicSearchResult, 0, len(sources))
 	for _, source := range sources {
 		payload, _ := json.Marshal(source)
@@ -97,7 +106,6 @@ type anthropicSearchHead struct {
 
 // decodeAnthropicSearchHistory 将搜索历史改写为文本块，查询与其结果合并到同一块
 func (s *server) decodeAnthropicSearchHistory(request *anthropicRequest) error {
-	aead := anthropicSearchCipher(s.config.APIKey)
 	for index := range request.Messages {
 		message := &request.Messages[index]
 		if !bytes.HasPrefix(bytes.TrimSpace(message.Content), []byte("[")) {
@@ -133,7 +141,7 @@ func (s *server) decodeAnthropicSearchHistory(request *anthropicRequest) error {
 				calls[block.ID] = len(converted)
 				converted = append(converted, anthropicContentBlock{Type: "text", Text: "Web search: " + input.Query})
 			case "web_search_tool_result":
-				text, err := anthropicSearchResultText(aead, block.Content)
+				text, err := anthropicSearchResultText(request.searchCipher, block.Content)
 				if err != nil {
 					return err
 				}
@@ -202,7 +210,7 @@ type anthropicCitationGroup struct {
 }
 
 // anthropicCitationGroups 把 grounding 中带区间的来源按区间合并并按起点排序，cited_text 为该区间的回答正文，encrypted_index 为加密的来源
-func anthropicCitationGroups(events []aistudio.Event, apiKey string) []anthropicCitationGroup {
+func anthropicCitationGroups(events []aistudio.Event, aead cipher.AEAD) []anthropicCitationGroup {
 	var text strings.Builder
 	var citations []aistudio.Citation
 	for _, event := range events {
@@ -214,7 +222,6 @@ func anthropicCitationGroups(events []aistudio.Event, apiKey string) []anthropic
 		}
 	}
 	answer := text.String()
-	aead := anthropicSearchCipher(apiKey)
 	groups := make([]anthropicCitationGroup, 0)
 	for _, citation := range citations {
 		if citation.End <= citation.Start || citation.End > len(answer) {

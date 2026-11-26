@@ -136,7 +136,9 @@ INFO   service  生成服务已停止 duration=3.204s
 ERROR  service  生成服务停止失败 duration=10.006s error=<JOINED_ERROR>
 ```
 
-`服务配置已保存` 表示 `.env` 已写入。管理登录与监听配置通过进程重启应用；API key 列表、容量、路由、账户绑定和 anti/auto 等热配置保存后立即应用。模型映射、非流式保活、假流式、搜索型号、全模型搜索、独立思考引导、用户文字改写与媒体输出作用于新请求；其他生成服务配置通过 Stop/Start 应用。Web 修改 key 时写入的 `PROXY_API_KEY_WEB_OVERRIDE=true` 保证保存的 key 在重启后仍优先于进程环境，以设置页的生效提示为准。
+`服务配置已保存` 表示 `.env` 已写入，不表示服务已重启。管理登录、日志和路由等大多数设置保存后立即生效，新请求使用新配置。只有 `WAA_BACKEND` 和 `AISTUDIO_AUTH_STATES` 在生成服务运行时需要重启生成服务；`LISTEN_ADDR`、`PREVIEW_LISTEN_ADDR` 需要重启管理进程；`AUTO_START` 用于下次程序启动。可在 `GET /api/config` 查看两个重启标记及活动请求数。
+
+API key 与账户绑定同时更新，抗截断与自动续写则是独立开关。只有在 Web 显式修改或清空 `PROXY_API_KEY` 时才会启用本地 `PROXY_API_KEY_WEB_OVERRIDE=true`，重启后仍使用保存值。其他由环境变量提供的字段（包括 `API_KEY_ACCOUNTS`）仍受保护。
 
 ### Worker 生命周期
 

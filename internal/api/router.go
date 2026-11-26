@@ -60,6 +60,7 @@ type ResponseModes struct {
 type server struct {
 	service           aistudio.Service
 	config            Config
+	adminAuth         *adminAuth
 	responseStates    *responseStateStore
 	uploads           *geminiUploads
 	caches            *geminiCaches
@@ -173,7 +174,8 @@ func NewHandler(service aistudio.Service, config Config) http.Handler {
 	root.Handle("/upload/v1/", channelMiddleware(aistudio.ChannelPlayground,
 		requestLoggingMiddleware(config.Admin, corsMiddleware(s.geminiUploadHandler(publicHandler)))))
 	root.Handle("/upload/", requestLoggingMiddleware(config.Admin, corsMiddleware(s.geminiUploadHandler(publicHandler))))
-	root.Handle("/api/", newAdminAuth(config).handler(control))
+	s.adminAuth = newAdminAuth(config)
+	root.Handle("/api/", s.adminAuth.handler(control))
 	if config.MediaDir != "" {
 		root.Handle("GET /media/{file}", corsMiddleware(http.HandlerFunc(s.handleMedia)))
 	}

@@ -482,7 +482,13 @@ field 1 是 `request_key`，field 2 是 `botguard_response`。正确 proof、损
 | 84 | `transcription_smart` | 85 | `speech_metadata` |
 | 46 | `speech_translation` | 48 | `code_assistant` |
 
-每个主能力码都保留为 `capability_code_<N>`，同时为上表中的已知码增加语义键；次能力码保留为 `secondary_capability_code_<N>`；field 82 中默认开启的码保留为 `default_capability_code_<N>`；有 field 79 的模型带 `interactions_api`，其中经后台任务生成的模型另带 `interaction_task`。
+每个主能力码都保留为 `capability_code_<N>`，同时为上表中的已知码增加语义键；次能力码保留为 `secondary_capability_code_<N>`，field 82 中默认开启的码保留为 `default_capability_code_<N>`。Playground 按所选账户的 field 79 路由，同名模型在不同账户上可能不同；Build 的固定入口不参与这项判断。
+
+| field 79 | 目录标记 | Playground 生成方法 |
+| --- | --- | --- |
+| kind `1`（Agent）或 `2`（普通模型），非后台 | `interactions_api`、`interaction_agent` 或 `interaction_model`、`interaction_stream` | `CreateInteractionStream` |
+| 同上，后台 | `interactions_api`、`interaction_agent` 或 `interaction_model`、`interaction_task` | `CreateInteraction` 创建任务，`GetInteractionStream` 读取结果 |
+| 缺失或未知 kind | 不使用 Interaction 路由 | `GenerateContent` |
 
 图片与视频选项使用枚举码：
 
@@ -1391,7 +1397,7 @@ Content 只写一项：field 1 文本 `[["<TEXT>"]]`，field 2 至 5 依次为�
 
 ### Omni Interaction
 
-模型目录 field 79 类型为 `2` 且不是后台任务的模型（`gemini-omni-1.1-flash`、`gemini-omni-flash-preview`）不接受 `GenerateContent`，四套公开生成接口对这类模型改用 `CreateInteractionStream`，账户选择、Worker 与 WAA 与 GenerateContent 相同，WAA proof 位于 field 5，binding 为发送的文本与内联图片的 Base64 按内容顺序以空格连接：
+非后台的 Interaction 使用 `CreateInteractionStream`。以下以 `gemini-omni-1.1-flash`、`gemini-omni-flash-preview` 等视频模型为例；其他模型与 Agent 也可以使用这个 RPC，目标和参数按所选账户的目录区分，不能仅凭模型名或是否使用流式传输判断。
 
 ```json
 [1, 1, null, <INTERACTION>, "<WAA_PROOF>", 1]
@@ -1406,14 +1412,14 @@ Content 只写一项：field 1 文本 `[["<TEXT>"]]`，field 2 至 5 依次为�
 
 thinking level 取值 MINIMAL=1、LOW=2、MEDIUM=3、HIGH=4，由 `reasoning_effort` 或思考预算按模型支持的等级换算，默认使用目录默认等级；目录没有思考档位能力的模型省略该项。
 
-Interaction 请求的内容转换：
+Omni 视频模型的内容转换：
 
 - 接受 user、assistant 与 tool 消息，tool 消息按 user 处理，相邻同角色消息合并为一个 step
 - 历史函数调用、函数结果与代码执行改写为 Gemini API JSON 文本，assistant 消息中的附件移到下一个 user step
 - 内联图片以 Base64 直接发送；其他内联附件先上传到所选账户的 Drive，再以 file ID 引用，文件 ID 不参与 binding
 - 音频附件由上游以 code 3 `Audio input modality is not enabled for this model` 拒绝，映射为 HTTP 400
 
-发送的生成参数：stop sequences 与 GenerateContent 相同在本地匹配；函数声明、Google 工具、temperature、topP、topK 与 seed 不发送。
+stop sequences 与 GenerateContent 相同在本地匹配。视频模型不发送工具声明；普通 Interaction 模型则可使用目录支持的工具和生成参数，见[后台 Interaction 任务](#后台-interaction-任务)的模型目标字段。目标的编码与是否为后台任务无关。
 
 视频设置的来源：
 
@@ -1428,7 +1434,7 @@ Interaction 请求的内容转换：
 
 响应为 `[[<EVENT>...], <STATUS>?]`。
 
-事件索引 10 的 content delta 中 field 1 为正文、field 2 至 5 为图片、音频、文档与视频 `[<MIME 枚举>,"<BASE64>"]`、field 6 为思考摘要，分别映射为 text、媒体与 reasoning 事件；索引 19 的最终 interaction 状态 `3` 产生 usage（输入、输出、思考、总 token 位于 usage 索引 0、4、8、9）与 `stop` 终态，状态 `4`、`5` 返回错误。
+事件索引 10 的 content delta 中 field 1 为正文、field 2 至 5 为图片、音频、文档与视频 `[<MIME 枚举>,"<BASE64>"]`、field 6 为思考摘要，分别映射为 text、媒体与 reasoning 事件。索引 19 的终态与后台 Interaction 共用解码：`2`、`3` 为 `stop`，`6` 为 `max_tokens`，`4`、`5` 返回错误；存在 usage 时，输入、输出、思考、总 token 位于索引 0、4、8、9。
 
 事件列表后的 google.rpc 状态按 code 映射 HTTP 状态，额度 code 8 为 429；首个正文事件之前的错误进入换号与冷却，之后的错误以流内 error 结束。
 
@@ -1443,46 +1449,54 @@ Interaction 请求的内容转换：
 
 ### 后台 Interaction 任务
 
-模型目录 field 79 为后台任务的模型（`deep-research-preview-04-2026`、`deep-research-max-preview-04-2026`、`antigravity-preview-09-2026`）经两个 RPC 生成：`CreateInteraction` 创建任务，`GetInteractionStream` 按 interaction ID 读取任务的增量与终态。
+模型目录 field 79 的 kind 为 `1`（agent，如 `deep-research-preview-04-2026`、`deep-research-max-preview-04-2026`、`antigravity-preview-09-2026`）或 `2`（模型，如被迁移账户的 `gemini-4-*`）且 background 为真时，经两个 RPC 生成：`CreateInteraction` 创建任务，`GetInteractionStream` 按 interaction ID 读取任务的增量与终态。
 
-两个 RPC 的 WAA proof 都位于 field 5，`CreateInteraction` 的 binding 为发送的全部文本以空格连接，`GetInteractionStream` 的 binding 为 interaction ID：
+创建与读取使用同一账户，两个 RPC 的请求结构为：
 
 ```json
 [null, 1, 1, <INTERACTION>, "<WAA_PROOF>", 1]
-["<INTERACTION_ID>", 1, null, null, "<WAA_PROOF>", 1, "models/<AGENT>"]
+["<INTERACTION_ID>", 1, null, null, "<WAA_PROOF>", 1, "models/<MODEL_OR_AGENT>"]
 ```
 
 | interaction 索引 | 内容 |
 | ---: | --- |
 | 6 | system instruction |
 | 7 | 工具列表，见下文 |
+| 13 | `responseModalities`（模型目标且请求设置时） |
+| 15 | `responseMimeType`（模型目标且请求设置时） |
 | 16 | 续接的上一轮 interaction ID |
-| 18 | agent 目标，见下文 |
-| 22 | 远程环境：field 1 源 `[[<类型>,"<源>","<目标>","<内容>","<编码>"]...]`（类型 gcs `2`、inline `3`、repository `4`），field 2 出站白名单 `[[["<域名>",[["<头>","<值>"]...],"<凭据>"]...]]`（有凭据时只发凭据），field 3 禁止出站 `1`，field 4 要更新的已有环境 ID；Antigravity 未设置环境时为 `[null,null,1]` |
-| 23 | 只引用已有环境、不带源与网络设置时的环境 ID |
-| 26 | 与 Omni Interaction 相同的 step 列表，见下文 |
+| 17 | 模型目标（kind `2`）：`["models/<MODEL_ID>", <GENERATION_CONFIG>]`，保留 `models/` 前缀；配置按模型能力码发送 temperature（idx 0，码 `62`）、topP（idx 1，码 `23`）、seed（idx 2）、thinkingLevel（idx 5，MINIMAL=`1`、LOW=`2`、MEDIUM=`3`、HIGH=`4`、EXTRA_HIGH=`5`）、thinkingSummaries（idx 6=`1`）、maxOutputTokens（idx 7）、imageConfig（idx 12），仅视频输出聊天模型（`secondary_capability_code_14 && chat_model`）发送 videoTask（idx 24）与 interaction field 54 |
+| 18 | agent 目标（kind `1`），见下文 |
+| 22 | 远程环境（agent）：field 1 源 `[[<类型>,"<源>","<目标>","<内容>","<编码>"]...]`（类型 gcs `2`、inline `3`、repository `4`），field 2 出站白名单 `[[["<域名>",[["<头>","<值>"]...],"<凭据>"]...]]`（有凭据时只发凭据），field 3 禁止出站 `1`，field 4 要更新的已有环境 ID；Antigravity 未设置环境时为 `[null,null,1]` |
+| 23 | 只引用已有环境、不带源与网络设置时的环境 ID（agent） |
+| 26 | step 列表，见下文 |
 
-agent 目标的 field 1 为 agent 名称。Deep Research 为 `["<AGENT>", null, [<思考摘要>, <可视化>, <协作规划>]]`：思考摘要 `1` 为 auto、`2` 为 none，可视化 `2` 为 auto、`1` 为 off，协作规划开启时为 `true`、关闭时省略，默认 `[1,2]`。
+模型目标（kind `2`）不带 `previous_interaction_id` 时保留 user 和 model 多轮历史；支持原生函数的模型还保留调用与结果（field 4 `tool_call`、field 5 `tool_result`）。轮次缓存可延续先前返回的思考签名，不要求混合账户池中的所有账户都已迁移到 Interactions。普通模型仍适用前台请求的首字超时及备用请求策略。
+
+agent 目标（kind `1`）的 field 1 为 agent 名称（不含 `models/` 前缀）。Deep Research 为 `["<AGENT>", null, [<思考摘要>, <可视化>, <协作规划>]]`：思考摘要 `1` 为 auto、`2` 为 none，可视化 `2` 为 auto、`1` 为 off，协作规划开启时为 `true`、关闭时省略，默认 `[1,2]`。
 
 field 79 InteractionConfig 的 field 6 给出默认模型的 agent（Antigravity）为 `["<AGENT>"]`，指定模型或 token 上限时 field 12 为 `["<MODEL>",null,null,null,null,null,<MAX_TOTAL_TOKENS>]`。公开 Interactions 的 `agent_config` 按官方取值写入这些位置。
 
 工具列表依次为代码执行 `[null,[]]`、函数声明 `[["<NAME>","<DESCRIPTION>",<PARAMETERS>]]`（参数为 `google.protobuf.Value`）、Google 搜索 `[null,null,null,null,null,[]]` 与 URL 上下文 `[null,null,[]]`：
 
-- Interactions 请求带 `tools` 时只用列出的工具，空列表时省略索引 7
-- 其他请求与不带 `tools` 的 Interactions 请求，在模型目录 field 82 默认开启的代码执行（9）、Google 搜索（12）与 URL 上下文（13）之上加入请求的工具；Deep Research 默认为搜索与 URL 上下文，Antigravity 另有代码执行
+- 非视频模型目标只在请求声明工具且 `tool_choice` 不为 `none` 时发送对应工具；视频模型不发送工具声明
+- agent 目标：Interactions 请求带 `tools` 时只用列出的工具，空列表时省略索引 7；其余请求在目录 field 82 默认开启的代码执行（9）、Google 搜索（12）与 URL 上下文（13）之上加入请求的工具；Deep Research 默认为搜索与 URL 上下文，Antigravity 另有代码执行
 - 没有任何工具时省略索引 7
 - MCP 服务器、File Search、Computer Use 与其他 Google 工具在发送前返回 `400 INVALID_ARGUMENT`
 
-step 列表只包含用户内容：历史中的模型轮、服务端工具步骤、代码执行与函数调用不发送，其中的附件也不上传，相邻的用户内容合并为一个 step。公开 Interactions 以 `previous_interaction_id` 续接同一 agent 的后台任务时，索引 16 为该任务的 interaction ID，step 列表只有本次输入，请求固定使用创建该任务的账户。
+agent 目标的 step 列表只包含用户内容：历史中的模型轮、服务端工具步骤、代码执行与函数调用不发送，其中的附件也不上传，相邻的用户内容合并为一个 step。公开 Interactions 以 `previous_interaction_id` 续接同一 agent 的后台任务时，索引 16 为该任务的 interaction ID，step 列表只有本次输入，请求固定使用创建该任务的账户。
 
-`CreateInteraction` 响应索引 0 为 interaction ID。`GetInteractionStream` 的事件格式与 Omni Interaction 相同，content delta 另有两项：
+`CreateInteraction` 响应索引 0 为 interaction ID。`GetInteractionStream` 除事件索引 10 的 content delta 文本（field 1）、媒体（field 2–5）、思考摘要（field 6）与引用（field 10）外，同时解码以下事件与终态：
 
-| content delta | 内容 | 映射 |
+| 事件 / 字段 | 内容 | 映射 |
 | --- | --- | --- |
-| field 2 | 图片 `[1,"<BASE64 PNG>"]` | `image/png` 媒体 |
-| field 10 | 引用 `[[[<START>,<END>,null,["<URL>"]]...]]`，起止为正文中引用标记的字符位置 | citation 事件 |
+| event 索引 9（`step_start`）与 11（`step_end`） | 步骤类型（user/model/thought/tool_call/tool_result）与工具元信息 | 跟踪步骤状态并在 `step_end` 提交函数调用或服务端工具调用 |
+| content delta field 7 | 思考签名 `["<BASE64>"]` | `EventThoughtSignature`（紧随函数调用时附带在调用上） |
+| content delta field 11–14 | 函数参数 JSON 增量、代码执行/搜索/URL 上下文/MCP 服务端工具调用与结果 | `EventToolCall`、`EventExecutableCode`、`EventCodeExecutionResult`、`EventServerToolCall`、`EventServerToolResponse`、`EventGrounding` |
+| 最终 interaction 状态 `2` / `3` | `requires_action` / `completed` | 输出用量（若有）与 `stop` 终态 |
+| 最终 interaction 状态 `6` | `incomplete`（输出长度截断） | 输出用量（若有）与 `max_tokens` 终态 |
+| 最终 interaction 状态 `4` / `5` | `failed`（读取 field 28 错误列表）/ `cancelled` | 502 `RPCError` |
 
-- 最终 interaction 不含 usage，状态 `3` 产生 `stop` 终态
 - 调用方在终态前断开时，服务以 `["interactions/<INTERACTION_ID>"]` 发送 `CancelInteraction` 停止上游任务；取消在后台以同一账户发送，调用方释放账户租约后取得请求槽位，期限 1 分钟
 
 ### Build 代理
@@ -1719,7 +1733,7 @@ GET/DELETE /v1beta/files/{file}
 | --- | --- |
 | 管理登录 | `GET /api/auth/session`、`POST /api/auth/login`、`POST /api/auth/logout` |
 | 状态与模型 | `GET /api/status`、`GET /api/models` |
-| 生成服务 | `POST /api/control/start`、`POST /api/control/stop` |
+| 生成服务 | `POST /api/control/start`、`POST /api/control/stop`、`POST /api/control/restart` |
 | 账户 | `GET /api/accounts`、`GET /api/accounts/exits`、`POST /api/accounts`、`GET/POST /api/accounts/import/chrome`、`GET /api/accounts/import/browsers`、`POST /api/accounts/import/cookies/discover`、`POST /api/accounts/import/cookies`、`PUT /api/accounts/{id}`、`PUT /api/accounts/{id}/state`、`DELETE /api/accounts/{id}` |
 | 账户任务 | `GET /api/accounts/tasks`、`DELETE /api/accounts/tasks/{id}` |
 | 账户认证与刷新 | `POST /api/accounts/{id}/login`、`POST /api/accounts/{id}/refresh`、`POST /api/accounts/refresh`、`GET /api/login-view/{view}`（WebSocket） |
@@ -1758,7 +1772,7 @@ GET/DELETE /v1beta/files/{file}
 | `POST /api/accounts/{id}/refresh` | 200 | `AccountRefresh` |
 | `POST /api/accounts/refresh` | 202 | `{"task":AccountTask}` |
 | `DELETE /api/accounts/{id}` | 204 | 空 body |
-| `POST /api/control/start`、`stop` | 200 | `AdminStatus` |
+| `POST /api/control/start`、`stop`、`restart` | 200 | `AdminStatus` |
 | `GET /api/config`、`PUT /api/config` | 200 | `RuntimeConfig` |
 | `GET /api/first-event-latency` | 200 | `{"latencies":[FirstEventLatency,...]}` |
 | `GET /api/cooldowns` | 200 | `{"cooldowns":[AdminCooldown,...]}` |
@@ -1809,7 +1823,7 @@ GET/DELETE /v1beta/files/{file}
 - `POST /api/camoufox/download` 在后台重新开始下载 Camoufox，并返回当前 `AdminStatus`
 - `GET /api/paths?path=<路径>` 列出服务所在机器上该路径（不存在时取最近的已存在上级目录）中名称不以点开头的目录与 `storage-state.json` 文件，目录在前、按名称排序；省略 `path` 时从工作目录开始，`path=roots` 或上级目录都不存在时返回文件系统根（Windows 为存在的盘符，其余系统为 `/`），此时 `path` 为空；`parent` 为上级目录，已在根时为 `roots`
 - `POST /api/paths/pick?path=<路径>` 在桌面版以系统对话框选择账户目录，对话框从该路径或其最近的已存在上级目录打开，返回选中的路径，用户取消时 `path` 为空串；对话框只选择目录；命令行版返回 404，管理页在浏览器中使用页内选择器
-- `GET /api/update` 返回当前版本与 GitHub 最新发行版本，`refresh=1` 时重新读取；`mode` 为 `managed`（由 `managed_by` 管理）、`development`（非正式版本号）、`container`（容器内运行）或 `binary`（原地替换可执行文件）
+- `GET /api/update` 返回当前版本与 `aueron1618/AIStudio2API` 的最新正式版本，`refresh=1` 时重新检查；发行说明为纯文本。检查受到 GitHub 限流时 `error_kind` 为 `rate_limited`，`retry_at` 给出 UTC 恢复或重查时刻。`mode` 为 `managed`（由 `managed_by` 管理）、`development`（非正式版本号）、`container`（容器内运行）或 `binary`（原地替换可执行文件）
 - `POST /api/update` 开始在线更新并返回 202；`progress.stage` 依次为 `download`、`verify`、`install`、`restart`；由外部管理、当前运行方式不支持在线更新、更新正在进行或已是最新版本时返回 409
 - `POST /api/accounts` 与 `POST /api/accounts/{id}/login` 的 body 可带 `view`，即管理页面为本次登录生成的登录窗口 ID；`POST /api/accounts/{id}/login` 也接受空 body。服务器没有图形界面，或请求来自非回环地址、带 `Forwarded` 或 `X-Forwarded-For` 时，登录画面经同一 ID 的 `GET /api/login-view/{view}` 传递，任务的 `view` 为该 ID；登录窗口断开后以同一 ID 重新连接，继续显示当前画面
 - `GET /api/login-view/{view}` 的 WebSocket 消息，坐标与宽高为页面 CSS 像素，`key` 为 `KeyboardEvent.key`：
@@ -1830,7 +1844,7 @@ GET/DELETE /v1beta/files/{file}
 | `Prompt` | `PromptSummary` 的字段与 `data` |
 | `SystemInstructionPreset` | `id`、`title`、`text` |
 | `PathListing` | `path`、`parent`、`entries`（每项 `name`、`path`、`dir`） |
-| `UpdateStatus` | `current`、可选 `latest`、`available`、`mode`、可选 `managed_by`、`notes`、`url`、`published_at`、`checked_at`、`error`、`updating`、可选 `progress`（`stage`、`downloaded`、`total`）、`log_dir`（服务日志目录的绝对路径） |
+| `UpdateStatus` | `current`、可选 `latest`、`available`、`mode`、可选 `managed_by`、`notes`、`url`、`published_at`、`checked_at`、`error`、可选 `error_kind`、`retry_at`、`updating`、可选 `progress`（`stage`、`downloaded`、`total`）、`log_dir`（服务日志目录的绝对路径） |
 | `AccountExit` | `proxy`（账户出口代理，空为直连）、可选 `ip`、`country`、`timezone`、`locale`、`error`（查询失败的原因） |
 | `AccountCreateInput` | `proxy`、`locale`、`timezone` |
 | `AccountInput` | `label`、`enabled`、`proxy`、`locale`、`timezone` |
@@ -1962,41 +1976,46 @@ Cookie 导入请求示例（凭据为占位值，`method` 位于每项）：
 
 | 字段 | 读写与生效时机 |
 | --- | --- |
-| `auth_states`、`proxy`、`init_timeout`、`request_timeout` | 保存值；下一次启动生成服务时使用 |
-| `waa_backend` | 保存值；下一次启动生成服务时使用，默认 `spidermonkey`，可选 `camoufox`；两者都固定使用临时页面 |
+| `auth_states`、`waa_backend` | 保存值；下次启动生成服务时读取。如果服务已在运行，只有更改这两项才需要重启生成服务。WAA 默认 `spidermonkey`，可选 `camoufox`，均使用临时页面 |
+| `proxy`、`init_timeout`、`request_timeout` | 保存值；用于后续请求与新启动的 Worker。更改默认代理或代理池时，受影响账户的 Worker 等在途请求结束后改绑 |
 | `warm_worker_limit`、`max_active_workers`、`warm_startup_concurrency`、`per_account_concurrency` | 保存值；立即应用，默认 `0/1/1/1`，启动并发对两种后端都生效 |
-| `max_account_switches` | 保存值；默认 `3`，非负整数，保存后立即应用；登录失效与额度错误不计入换号上限 |
+| `max_account_switches` | 保存值；非额度失败的换号上限，非负整数，默认 `3`；登录失效与额度用尽不计入 |
+| `account_switch_interval` | 保存值；换号最短等待秒数，字符串 `off`（默认）或正整数字符串。冷备 Worker 在启动前等待，客户端断开即取消 |
+| `max_quota_switches` | 保存值；单请求因额度用尽（429）换号的上限，字符串 `off`（默认不限）、`0`（不换）或正整数字符串；用尽后返回最后一次 429 |
 | `routing_strategy`、`account_order`、`model_channels`、`model_accounts` | 保存值；立即应用路由策略、账户顺序、模型通道与账户约束，固定 URL 优先 |
-| `upstream_channels` | 保存值；下一次启动生成服务时使用的通道范围 |
-| `build_native_nonstream` | 保存值；下一次启动生成服务时决定非流式请求是否优先选择 Build |
-| `discover_hidden_models` | 保存值；默认 `false`，下一次启动生成服务时应用隐藏模型发现设置，并刷新与该设置不一致的目录缓存 |
+| `upstream_channels`、`build_native_nonstream` | 保存值；用于新请求的可用通道及自动路由非流式偏好；不改变 `/v1`、`/build/v1` 的固定通道 |
+| `discover_hidden_models` | 保存值；默认 `false`。关闭即移除隐藏条目；开启后由正常账户目录刷新应用，无需重启 |
 | `model_mapping`、`search_model_aliases`、`google_search`、`media_output`、`media_base_url` | 保存值；保存后作用于新请求，进行中的请求沿用开始时的值 |
 | `nonstream_keepalive`、`fake_stream` | 保存值；保存后决定新的非流式请求是否保活、新的流式请求是否按非流式生成 |
 | `thinking_guard`、`user_message_rewrite` | 独立保存值；默认 `false` / `off`，保存后用于新请求，不改变非文本内容；思考引导上限 `low` / 1024，文字改写只作用于 user 文本 |
-| `youtube_links` | 保存值；下一次启动生成服务时决定是否把用户消息文本中的 YouTube 链接作为视频外部媒体发送 |
-| `strip_thought_signatures` | 保存值；下一次启动生成服务时决定是否剥离历史思考签名 |
+| `youtube_links`、`strip_thought_signatures`、`continuation_rewrite`、`continuation_prompt` | 保存值；后续请求使用新的链接识别、历史签名处理与末尾 assistant 轮改写配置 |
 | `anti_truncation` | 保存值；默认 `false`，保存后立即影响公开模型变体与后续生成/计数请求 |
 | `auto_continuation` | 保存值；默认 `true`，保存后立即决定是否允许后续自动续写轮；旧客户端省略此字段时保留当前值 |
-| `api_key_accounts` | 保存值；`key:账户\|账户`，逗号分隔；未列出的 key 可用全部账户，合法绑定保存后立即生效；格式错误或同一已配置 key 的重复绑定拒绝加载/保存 |
-| `first_event_hedge` | 保存值；默认 `off`，接受 `off`、`auto` 或正整数秒，下一次启动生成服务时决定原请求等待首字多久后发起备用请求 |
-| `first_event_hedge_models` | 保存值；默认 `gemini-4-argon`，下一次启动生成服务时使用的备用请求模型范围，仍遵守 Worker 与账户并发预算 |
-| `first_event_timeout` | 保存值；默认 `off` 或正整数秒，从取得账户起等待首个语义事件的单次尝试上限；下一次启动生成服务时使用，与无数据超时独立 |
-| `auto_start` | 保存值；下一管理进程就绪后是否自动启动生成服务 |
-| `hide_dock_icon` | 保存值；macOS 桌面版是否只在菜单栏显示图标 |
+| `proxy_api_key`、`api_key_accounts` | 保存值；认证 key 列表与有效绑定原子更新。绑定以逗号分隔，每项为 `key:账户\|账户`；未绑定的 key 可用全部账户，格式错误或同一已配置 key 的重复绑定拒绝加载及保存 |
+| `first_event_hedge`、`first_event_hedge_models` | 保存值；新请求使用的首字备用请求等待时间（默认 `off`，可选 `auto`、正整数秒）与模型范围（默认 `gemini-4-argon`），仍遵守 Worker 与账户并发预算 |
+| `first_event_timeout` | 保存值；新请求从取得账户起等待首个语义事件的单次尝试上限，默认 `off` 或设为正整数秒，与连续无数据超时独立 |
+| `auto_start` | 保存值；下次启动程序时是否自动启动生成服务（不触发重启标记） |
+| `hide_dock_icon` | 保存值；macOS 桌面版是否只在菜单栏显示图标，保存后立即生效 |
 | `request_body_log` | 保存值；保存后立即决定是否保存请求与响应正文 |
-| `admin_auth_enabled`、`admin_username` | 保存值；下一管理进程使用 |
-| `admin_password` | 只写；省略时保留现值，下一管理进程使用 |
+| `log_file`、`log_max_total_mb` | 保存值；立即应用日志文件开关与总量上限 |
+| `admin_auth_enabled`、`admin_username` | 保存值；保存后立即生效。只有本机回环访问可以关闭管理登录 |
+| `admin_password` | 只写；省略时保留现值。启用登录或更改凭据时撤销旧会话，为当前浏览器签发新会话 Cookie |
 | `admin_password_set` | response-only；是否已保存管理密码 |
-| `listen_addr` | 保存值；下一管理进程使用 |
-| `proxy_api_key` | 保存后立即更新公开 API 鉴权，不需要重启 |
-| `active_listen_addr`、`active_proxy_api_key` | response-only；当前生效的监听地址与 API key |
-| `management_restart_required` | response-only；保存的监听地址、预览地址或管理凭据与当前管理进程不同，不包含 API key 变更 |
-| `service_restart_required` | response-only；保存的生成服务配置与当前生成服务实例不同 |
-| `environment`、`invalid` | response-only；环境变量锁定项与普通无效配置提示；API key 始终可修改，其他锁定项不可从设置页覆盖 |
+| `listen_addr`、`preview_listen_addr` | 保存值；重启管理进程后生效 |
+| `active_listen_addr`、`active_preview_listen_addr` | response-only；当前管理进程实际使用的监听地址与预览来源地址 |
+| `reserved_listen_addr` | response-only；被 Windows 保留而改用其他端口的管理监听地址，未改用时为空 |
+| `active_proxy_api_key` | response-only；当前用于公开 API 鉴权的密钥，仅由管理接口返回 |
+| `active_proxy`、`proxy_pool` | response-only；当前生成服务实际使用的出口（含 `proxy` 留空时的系统代理）与代理池健康状态 |
+| `active_requests` | response-only；当前生成服务进行中的请求数 |
+| `management_restart_required` | response-only；仅在保存的 `listen_addr` 或 `preview_listen_addr` 配置改变时为真。自动改用其他可用端口本身不会触发 |
+| `service_restart_required` | response-only；生成服务运行中，且保存的 `auth_states` 或 `waa_backend` 与当前生成服务实例不同 |
+| `environment`、`invalid` | response-only；进程环境变量管理的项与普通无效配置提示。除 `PROXY_API_KEY` 外，不可通过设置页或 `PUT` 覆盖环境变量 |
 
-`PUT /api/config` 原子保存配置。监听地址和管理凭据在管理进程重启后生效；API key 认证列表、Worker 容量、路由策略、账户顺序、模型通道、模型及 API key 账户绑定和抗截断/自动续写开关保存后立即作用于当前生成服务；账户路径、代理、timeout、上游通道范围、WAA 后端与其他标明需重启的选项在 Stop/Start 创建的新实例中生效。密钥轮换后旧 key 不再接受新请求，已通过鉴权的请求保留原账户权限范围。普通无效配置回退默认值并显示提示，但无效 API key 账户绑定不回退成全账户。启动读取最新配置；加载、校验、创建失败或启用前取消时保留原实例，切换到新实例后由它完成启动或进入 `STOPPED`。
+`PUT /api/config` 保存整份可编辑配置，不是局部 `PATCH`；客户端应先读取当前配置再修改。保存校验通过后，大多数设置用于下一次请求，不会自动重启。需要重建运行中的生成服务时，可先查看 `active_requests`，再调用 `POST /api/control/restart`；该操作先停再启，会中断活动请求，不改变管理监听器。服务已停止时直接 `POST /api/control/start` 即可读取保存值。启动时加载、校验、实例创建失败或启用前取消会保留原实例；切换后由新实例完成启动或进入 `STOPPED`。
 
-Web 修改 `PROXY_API_KEY` 会在 `.env` 自动写入 `PROXY_API_KEY_WEB_OVERRIDE=true`，重启后仍优先使用文件中保存的 key（含显式清空）；移除此标记并重启可恢复进程环境优先。`APIKeys` 回调为请求读取一致的认证快照，已准入请求的账户上限与后续当前绑定取交集，不因配置收紧或 key 轮换扩大权限。
+若文件已保存，但随后应用代理或日志等热配置失败，返回 HTTP 500 `config_saved_apply_failed`，并保留具体错误说明。这不表示保存已回滚；管理凭据的变更仍生效，客户端应重新读取管理会话和配置。校验失败不会写入配置或轮换会话。
+
+在 Web 显式修改或清空 `PROXY_API_KEY` 会在本地 `.env` 写入 `PROXY_API_KEY_WEB_OVERRIDE=true`；重启后仍优先使用保存值（包括空值），移除标记并重启可恢复进程环境优先。仅保存其他字段不会启用覆盖，环境变量提供的 `API_KEY_ACCOUNTS` 仍受保护。`APIKeys` 回调在每次鉴权时读取一致的密钥与账户绑定快照；轮换或删除的旧 key 不再接受新请求，已准入请求的账户上限与后续绑定取交集，不会扩大权限。
 
 `GET /api/events` 建立连接时发送 `status`、`models`、`accounts`、最近 200 条 `log`、`cooldowns` 和按开始时间排序的活动 `request`，同时从独立任务订阅发送当前 `account_tasks` 列表。任务快照可能与其他初始事件交错，客户端不应依赖全局固定顺序。事件的 `data` 形状：
 
@@ -2243,7 +2262,7 @@ Gemini `GET /v1beta/models` 返回 `{"models":[...]}`，单模型路由直接返
 
 管理模型中的 `description`、token limits、capabilities、capability options、access modes 与 false `paid` 使用 `omitempty`；OpenAI 和 Gemini 响应始终包含身份、methods 与 token limits，并在 map/slice 非空或 `paid=true` 时增加对应扩展字段。
 
-管理目录合并全部账户的上游实时模型集合，顺序沿用各账户 `ListModels` 的上游顺序：只出现在后一个账户目录中的模型排在它在该目录中的前一个模型之后，没有前一个已知模型时排在该目录首个已知模型之前，该目录没有已知模型时排在末尾；在此顺序上依次排列有可用通道的普通模型、经后台任务生成的 agent（`interaction_task`，如 Antigravity 与 Deep Research，不论有无可用通道）与没有可用通道的普通模型。
+管理目录合并全部账户的上游实时模型集合，顺序沿用各账户 `ListModels` 的上游顺序：只出现在后一个账户目录中的模型排在它在该目录中的前一个模型之后，没有前一个已知模型时排在该目录首个已知模型之前，该目录没有已知模型时排在末尾；在此顺序上依次排列有可用通道的普通模型、agent（`interaction_agent`，如 Antigravity 与 Deep Research，不论有无可用通道）与没有可用通道的普通模型。
 
 公开目录保留当前公开协议承载其调用方法、且已启用通道可以提供的模型；启用 Build 通道时同时包含 Build 独有的可生成模型，`channels` 列出可调用该模型的通道，见 [Build 通道](build.md)。启用账户的权益都不满足 AccessModes 的模型同样列出，不含 `channels`。短期冷却和忙碌状态由请求调度处理。
 

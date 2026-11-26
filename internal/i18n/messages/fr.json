@@ -1833,5 +1833,22 @@
   "解析页面附件上传: %w": "Analyse de l’envoi des pièces jointes de la page : {0}",
   "记录页面附件上传: %w": "Enregistrement de l’envoi des pièces jointes de la page : {0}",
   "读取官网思考档位: %w": "Lecture du niveau de réflexion du site officiel : {0}",
-  "读取官网页面模型: %w": "Lecture du modèle de la page du site officiel : {0}"
+  "读取官网页面模型: %w": "Lecture du modèle de la page du site officiel : {0}",
+  "ACCOUNT_SWITCH_INTERVAL 必须是 off 或正整数秒": "ACCOUNT_SWITCH_INTERVAL doit être off ou un entier positif en secondes",
+  "Build 模型目录同步失败": "Échec de la synchronisation du catalogue de modèles Build",
+  "GitHub 访问频率受限（HTTP %d）": "Limite de fréquence GitHub dépassée (HTTP {0})",
+  "MAX_QUOTA_SWITCHES 必须是 off、0 或正整数": "MAX_QUOTA_SWITCHES doit être off, 0 ou un entier positif",
+  "只能在本机访问时关闭管理登录": "La connexion à la console ne peut être désactivée que depuis cet ordinateur",
+  "最新发行版本跳转缺少版本号": "La redirection de la dernière version ne contient pas de numéro de version",
+  "等待换号间隔": "Attente de l’intervalle de changement de compte",
+  "读取校验摘要: %w": "Lecture de la somme de contrôle : {0}",
+  "读取账户历史使用记录失败": "Échec de la lecture de l’historique d’utilisation des comptes",
+  "模型 %s 需要 %s，本次请求可用的账户 %s 都不具备": "Le modèle {0} nécessite {1}, que ne possèdent pas les comptes disponibles pour cette requête ({2})",
+  "模型 %s 需要以下任一权益，本次请求可用的账户 %s 都不具备：%s": "Le modèle {0} nécessite l'un de ces droits, que ne possèdent pas les comptes disponibles pour cette requête ({1}) : {2}",
+  "Interaction 模型的 contents[%d] 不接受服务端工具步骤 %s": "Le modèle Interaction contents[{0}] n'accepte pas l'étape d'outil côté serveur {1}",
+  "最新发行版本跳转不是本仓库的正式发行版本": "La redirection vers la dernière version ne pointe pas vers une version stable de ce dépôt",
+  "读取发行包 %s: %w": "Lecture du paquet de distribution {0} : {1}",
+  "发行包元数据过大": "Les métadonnées du paquet de distribution sont trop volumineuses",
+  "发行包元数据与已确认的正式发行版本不一致": "Les métadonnées du paquet ne correspondent pas à la version stable confirmée",
+  "发行版本 %s 的 %s 记录不唯一或下载地址无效": "La version {0} contient des entrées en double ou une URL de téléchargement non valide pour {1}"
 }

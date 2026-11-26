@@ -87,8 +87,8 @@ func (frontend frontendModels) template(catalog modelCatalog, modelID string) (m
 	return modelEntry{}, false
 }
 
-// DiscoverHiddenModels 从账户页面载入的官网前端主程序与对话页分块找出 ListModels 没有列出的推荐模型，经 CountTokens 确认可用后加入账户目录，返回隐藏模型 ID 到依据模型 ID 的映射
-func (c *Client) DiscoverHiddenModels(ctx context.Context, accountID string) (map[string]string, error) {
+// discoverHiddenModels returns candidate entries without publishing them to the live catalog.
+func (c *Client) discoverHiddenModels(ctx context.Context, accountID string) (map[string]string, error) {
 	c.catalogMu.RLock()
 	catalog := c.catalogs[accountID]
 	c.catalogMu.RUnlock()
@@ -119,9 +119,6 @@ func (c *Client) DiscoverHiddenModels(ctx context.Context, accountID string) (ma
 		}
 		hidden[modelID] = template.model.ID
 	}
-	c.catalogMu.Lock()
-	c.catalogs[accountID] = c.catalogs[accountID].withHidden(hidden)
-	c.catalogMu.Unlock()
 	return hidden, nil
 }
 
@@ -178,4 +175,61 @@ func (catalog modelCatalog) withHidden(hidden map[string]string) modelCatalog {
 	}
 	catalog.models, catalog.entries = models, entries
 	return catalog
+}
+
+// withoutHidden 返回去掉官网隐藏模型后的目录副本
+func (catalog modelCatalog) withoutHidden() modelCatalog {
+	if !slices.ContainsFunc(catalog.models, func(model Model) bool { return model.Hidden }) {
+		return catalog
+	}
+	models := make([]Model, 0, len(catalog.models))
+	entries := make(map[string]modelEntry, len(catalog.entries))
+	for _, model := range catalog.models {
+		if model.Hidden {
+			continue
+		}
+		models = append(models, model)
+		if entry, ok := catalog.entries[model.ID]; ok {
+			entries[model.ID] = entry
+		}
+	}
+	catalog.models, catalog.entries = models, entries
+	return catalog
+}
+
+// ClearHiddenModels 从账户当前内存目录中移除官网隐藏模型
+func (c *Client) ClearHiddenModels(accountID string) {
+	c.catalogMu.Lock()
+	if catalog, ok := c.catalogs[accountID]; ok {
+		c.catalogs[accountID] = catalog.withoutHidden()
+	}
+	c.catalogMu.Unlock()
+}
+
+// ClearHiddenModels 从全部账户的内存目录与隐藏模型记录中移除官网隐藏模型，返回发生变化的账户 ID
+func (p *AccountPool) ClearHiddenModels() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var changed []string
+	for _, account := range p.accounts {
+		hasHidden := len(account.hiddenModels) > 0 || account.hiddenDiscovered ||
+			slices.ContainsFunc(account.Models, func(model Model) bool { return model.Hidden })
+		if !hasHidden {
+			continue
+		}
+		filtered := make([]Model, 0, len(account.Models))
+		for _, model := range account.Models {
+			if !model.Hidden {
+				filtered = append(filtered, model)
+			}
+		}
+		account.Models = filtered
+		account.hiddenModels = nil
+		account.hiddenDiscovered = false
+		changed = append(changed, account.ID)
+	}
+	if len(changed) > 0 {
+		p.notifyLocked()
+	}
+	return changed
 }

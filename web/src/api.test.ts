@@ -15,6 +15,30 @@ const task: AccountTask = {
 }
 
 describe('management API contracts', () => {
+  it('sends edited keys and bindings together without echoing the active authentication key', async () => {
+    const fetch = vi.fn().mockResolvedValue(Response.json({}))
+    vi.stubGlobal('fetch', fetch)
+    await api.saveConfig({
+      active_proxy_api_key: 'fixture-active-only',
+      proxy_api_key: '',
+      api_key_accounts: '',
+    } as ServiceConfig)
+    const [path, init] = fetch.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/config')
+    expect(init.method).toBe('PUT')
+    expect(JSON.parse(await (init.body as Blob).text())).toEqual({
+      proxy_api_key: '',
+      api_key_accounts: '',
+    })
+  })
+
+  it('restarts through the explicit management control POST', async () => {
+    const fetch = vi.fn().mockResolvedValue(Response.json({ state: 'RUNNING' }))
+    vi.stubGlobal('fetch', fetch)
+    await expect(api.restartService()).resolves.toEqual({ state: 'RUNNING' })
+    expect(fetch).toHaveBeenCalledWith('/api/control/restart', { method: 'POST' })
+  })
+
   it.each([
     [false, false],
     [false, true],

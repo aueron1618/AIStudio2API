@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"crypto/cipher"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -36,6 +37,7 @@ type anthropicRequest struct {
 	OutputFormat      *anthropicOutputFormat      `json:"output_format"`
 	MCPServers        []anthropicMCPServer        `json:"mcp_servers"`
 	ContextManagement *anthropicContextManagement `json:"context_management"`
+	searchCipher      cipher.AEAD
 }
 
 // anthropicMCPServer 是 mcp_servers 中由服务端连接的 MCP 服务器
@@ -119,6 +121,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	messageID := newID("msg")
+	request.searchCipher = anthropicRequestCipher(r.Context())
 	request.Messages = anthropicCompactedMessages(request.Messages)
 	contextResult, err := s.applyAnthropicContextEdits(&request)
 	if err == nil {
@@ -189,7 +192,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writer := &anthropicStreamWriter{
 			send: sseSender(stream), id: messageID, model: request.Model,
 			inputTokens: <-estimate, startUsage: startUsage,
-			searchKey: s.config.APIKey, omitted: request.thinkingOmitted(),
+			searchCipher: request.searchCipher, omitted: request.thinkingOmitted(),
 			media: media, context: contextResult, search: declaredSearch,
 		}
 		if err := writer.start(); err != nil {
@@ -209,7 +212,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writeAnthropicRequestError(w, err)
 		return
 	}
-	response := buildAnthropicResponse(messageID, request.Model, result, s.config.APIKey, request.thinkingOmitted(), media)
+	response := buildAnthropicResponse(messageID, request.Model, result, request.searchCipher, request.thinkingOmitted(), media)
 	contextResult.response(response, result.usage)
 	writeJSON(w, http.StatusOK, officialOrder("anthropic", response))
 }
@@ -218,7 +221,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 func (s *server) writeAnthropicCompactionPause(w http.ResponseWriter, request anthropicRequest, id string, contextResult anthropicContextResult) {
 	result := generationResult{finishReason: "compaction", usage: &aistudio.Usage{}}
 	if !request.Stream {
-		response := buildAnthropicResponse(id, request.Model, result, s.config.APIKey, false, mediaOutput{})
+		response := buildAnthropicResponse(id, request.Model, result, request.searchCipher, false, mediaOutput{})
 		contextResult.response(response, result.usage)
 		writeJSON(w, http.StatusOK, officialOrder("anthropic", response))
 		return
@@ -257,7 +260,7 @@ func (s *server) writeAnthropicPrefill(w http.ResponseWriter, r *http.Request, r
 	}
 	result := generationResult{finishReason: "max_tokens", usage: generated.usage}
 	if !request.Stream {
-		response := buildAnthropicResponse(id, request.Model, result, s.config.APIKey, false, mediaOutput{})
+		response := buildAnthropicResponse(id, request.Model, result, request.searchCipher, false, mediaOutput{})
 		contextResult.response(response, result.usage)
 		writeJSON(w, http.StatusOK, officialOrder("anthropic", response))
 		return
@@ -286,6 +289,7 @@ func (s *server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Reque
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
+	request.searchCipher = anthropicRequestCipher(r.Context())
 	request.Messages = anthropicCompactedMessages(request.Messages)
 	original := request
 	contextResult, err := s.applyAnthropicContextEdits(&request)
@@ -1093,9 +1097,9 @@ func anthropicServiceTier(usage *aistudio.Usage) string {
 }
 
 // buildAnthropicResponse 构造非流式 Message，内容块由流式状态机生成，omitted 时思考块不带正文
-func buildAnthropicResponse(id string, model string, result generationResult, searchKey string, omitted bool, media mediaOutput) map[string]any {
+func buildAnthropicResponse(id string, model string, result generationResult, searchCipher cipher.AEAD, omitted bool, media mediaOutput) map[string]any {
 	stopReason, stopSequence := anthropicStop(result.finishReason, len(result.toolCalls) > 0, result.stopSequence)
-	blocks, searchCount, fetchCount := anthropicBlocks(result, omitted, media, searchKey)
+	blocks, searchCount, fetchCount := anthropicBlocks(result, omitted, media, searchCipher)
 	response := map[string]any{
 		"id":            id,
 		"type":          "message",
@@ -1127,9 +1131,9 @@ func buildAnthropicResponse(id string, model string, result generationResult, se
 }
 
 // anthropicBlocks 用流式状态机生成非流式 Message 的内容块，返回内容块、搜索次数与网址读取次数
-func anthropicBlocks(result generationResult, omitted bool, media mediaOutput, searchKey string) ([]map[string]any, int, int) {
+func anthropicBlocks(result generationResult, omitted bool, media mediaOutput, searchCipher cipher.AEAD) ([]map[string]any, int, int) {
 	collected := anthropicBlockCollector{blocks: []map[string]any{}, inputs: map[int]string{}}
-	writer := &anthropicStreamWriter{send: collected.collect, searchKey: searchKey, omitted: omitted, media: media, search: true}
+	writer := &anthropicStreamWriter{send: collected.collect, searchCipher: searchCipher, omitted: omitted, media: media, search: true}
 	for _, event := range result.events {
 		_ = writer.live(event)
 	}
@@ -1315,7 +1319,7 @@ type anthropicStreamWriter struct {
 	blockIndex        int
 	currentBlock      string
 	thinkingSignature string
-	searchKey         string
+	searchCipher      cipher.AEAD
 	omitted           bool
 	media             mediaOutput
 	codeIDs           codeExecutionIDs
@@ -1650,9 +1654,9 @@ func (writer *anthropicStreamWriter) closeBlock() error {
 
 // finishContent 写出推迟的事件，各查询的搜索工具块写在其搜索调用步骤之后，没有调用步骤的查询写在最前，被来源支撑的正文写成带 citations 的 text 块，再追加其余来源并关闭当前块，返回搜索次数
 func (writer *anthropicStreamWriter) finishContent(result *generationResult) (int, error) {
-	queries, searches := anthropicSearchBlocks(result.events, writer.searchKey)
+	queries, searches := anthropicSearchBlocks(result.events, writer.searchCipher)
 	if len(queries) > 0 {
-		writer.citations = anthropicCitationGroups(result.events, writer.searchKey)
+		writer.citations = anthropicCitationGroups(result.events, writer.searchCipher)
 		result.citations = nil
 	}
 	writeSearch := func(query string) error {

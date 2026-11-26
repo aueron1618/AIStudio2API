@@ -511,10 +511,24 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func isLoopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || !net.ParseIP(host).IsLoopback() || !loopbackHost(r.Host) {
+		return false
+	}
+	// A local reverse proxy can rewrite Host and be the direct TCP peer.
+	for header := range r.Header {
+		name := strings.ToLower(header)
+		if name == "forwarded" || name == "via" || name == "x-real-ip" || strings.HasPrefix(name, "x-forwarded-") {
+			return false
+		}
+	}
+	return true
+}
+
 func loopbackMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil || !net.ParseIP(host).IsLoopback() || !loopbackHost(r.Host) {
+		if !isLoopbackRequest(r) {
 			writeAdminError(w, http.StatusForbidden, "control_plane_forbidden", "Control plane is only available from loopback")
 			return
 		}
@@ -538,7 +552,7 @@ func loopbackHost(host string) bool {
 
 // browserOriginMiddleware 在未配置 API key 时拒绝外部网页与 null 来源的浏览器请求
 func browserOriginMiddleware(requiredKey string, next http.Handler) http.Handler {
-	if strings.TrimSpace(requiredKey) != "" {
+	if len(apiKeys(requiredKey)) != 0 {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -679,6 +693,10 @@ func apiKeyContextMiddleware(configuredKeys string, accounts map[string][]string
 		for _, candidate := range apiKeyCandidates(r) {
 			if candidate != "" && slices.Contains(keys, candidate) {
 				ctx := aistudio.ContextWithAPIKey(r.Context(), candidate)
+				if r.URL.Path == "/v1/messages" || r.URL.Path == "/v1/messages/count_tokens" {
+					// Bind search history to the admission snapshot without propagating the full key list.
+					ctx = context.WithValue(ctx, anthropicCipherContextKey{}, anthropicSearchCipher(configuredKeys))
+				}
 				if scope, bound := accounts[candidate]; bound {
 					ctx = aistudio.ContextWithAccountScope(ctx, scope)
 				}

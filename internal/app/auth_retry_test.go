@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +18,23 @@ type accountLoginFunc func(context.Context, aistudio.IsolatedLoginRequest) (aist
 
 func (login accountLoginFunc) Login(ctx context.Context, request aistudio.IsolatedLoginRequest) (aistudio.IsolatedLoginResult, error) {
 	return login(ctx, request)
+}
+
+func TestAuthRetryUsesCurrentSharedProxy(t *testing.T) {
+	var shared atomic.Pointer[string]
+	const initial = "http://localhost:1"
+	refresher := &authRuntimeRefresher{}
+	workers := &accountWorkerManager{}
+	service := &trackedService{sharedGlobalProxy: &shared, workers: workers, refresher: refresher}
+	account := &aistudio.Account{Config: accountTestConfig("fixture")}
+	for _, proxy := range []string{initial, "http://localhost:2", ""} {
+		if err := service.setSharedGlobalProxy(proxy); err != nil {
+			t.Fatal(err)
+		}
+		if got := account.EffectiveProxy(refresher.currentGlobalProxy()); got != proxy || workers.currentGlobalProxy() != proxy || service.currentCamoufoxProxy() != proxy {
+			t.Fatalf("runtime, workers and auth refresh must agree on effective proxy %q; auth got %q", proxy, got)
+		}
+	}
 }
 
 func TestCookieAuthUserUpdatePreservesConcurrentEnabledChange(t *testing.T) {

@@ -44,7 +44,10 @@ type runtimeAdmin struct {
 	configPath         string
 	config             config.Config
 	proxies            *aistudio.ProxyPool
+	proxyMu            sync.RWMutex
 	globalProxy        string
+	probeMu            sync.Mutex
+	probeCancel        context.CancelFunc
 
 	transitionMu sync.Mutex
 	// transitions 是各账户进行中的后台收尾：启停收尾与添加、导入、登录后的目录同步
@@ -539,11 +542,7 @@ func (admin *runtimeAdmin) checkAccountAccess(ctx context.Context, email string,
 			return err
 		}
 	}
-	timeout := admin.config.InitTimeout
-	if timeout <= 0 {
-		timeout = config.Default().InitTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, admin.initTimeout())
 	defer cancel()
 	err := check(ctx, state, proxy, authUser)
 	if denial := aistudio.RestrictionDenial(err); denial != nil {
@@ -1347,7 +1346,7 @@ func (admin *runtimeAdmin) VerifyAccount(ctx context.Context, accountID string, 
 		Directory:    directory,
 		StorageState: state,
 		AuthUser:     account.Config.AuthUser,
-		Proxy:        account.EffectiveProxy(admin.globalProxy),
+		Proxy:        account.EffectiveProxy(admin.currentGlobalProxy()),
 		Locale:       account.Config.Locale,
 		Timezone:     account.Config.Timezone,
 		View:         view,
@@ -1759,6 +1758,65 @@ func (admin *runtimeAdmin) proxyPoolStatus() []api.AdminProxy {
 	return pool
 }
 
+func (admin *runtimeAdmin) setProxyState(globalProxy, activeProxy string) {
+	admin.proxyMu.Lock()
+	admin.globalProxy = strings.TrimSpace(globalProxy)
+	admin.config.Proxy = strings.TrimSpace(activeProxy)
+	admin.proxyMu.Unlock()
+}
+
+func (admin *runtimeAdmin) currentGlobalProxy() string {
+	admin.proxyMu.RLock()
+	defer admin.proxyMu.RUnlock()
+	return admin.globalProxy
+}
+
+func (admin *runtimeAdmin) initTimeout() time.Duration {
+	if timeout := admin.workers.currentInitTimeout(); timeout > 0 {
+		return timeout
+	}
+	if admin.config.InitTimeout > 0 {
+		return admin.config.InitTimeout
+	}
+	return config.Default().InitTimeout
+}
+
+func (admin *runtimeAdmin) currentActiveProxy() string {
+	admin.proxyMu.RLock()
+	defer admin.proxyMu.RUnlock()
+	return admin.config.Proxy
+}
+
+// ProxyState 返回当前生效的代理展示串与代理池健康状态
+func (admin *runtimeAdmin) ProxyState() (string, []api.AdminProxy) {
+	return admin.currentActiveProxy(), admin.proxyPoolStatus()
+}
+
+// ApplyProxy 热更新全局默认代理与代理池：更新传输、续签与 Worker 配置，并通过后台排空换绑重建受影响账户的 Worker，不中断进行中的请求
+func (admin *runtimeAdmin) ApplyProxy(rawProxy string) error {
+	if admin.proxies == nil || admin.service == nil {
+		return nil
+	}
+	proxyList, globalProxy, activeProxy, _ := resolveProxyConfig(rawProxy)
+	prevGlobal := admin.currentGlobalProxy()
+	prevActive := admin.currentActiveProxy()
+	if activeProxy == prevActive && globalProxy == prevGlobal {
+		return nil
+	}
+	if err := admin.service.setSharedGlobalProxy(globalProxy); err != nil {
+		return err
+	}
+	admin.setProxyState(globalProxy, activeProxy)
+	changed, err := admin.proxies.SetProxies(prevGlobal, proxyList)
+	admin.syncProxyProbe(len(proxyList), true)
+	if len(changed) > 0 {
+		admin.rebindAccounts(changed)
+	} else {
+		admin.publishRuntimeSnapshot(admin.lifecycle)
+	}
+	return err
+}
+
 func (admin *runtimeAdmin) effectiveProxy(accountProxy string) string {
 	if proxy := strings.TrimSpace(accountProxy); proxy != "" {
 		return proxy
@@ -1766,12 +1824,12 @@ func (admin *runtimeAdmin) effectiveProxy(accountProxy string) string {
 	if proxy := admin.proxies.Next(); proxy != "" {
 		return proxy
 	}
-	return admin.globalProxy
+	return admin.currentGlobalProxy()
 }
 
 func (admin *runtimeAdmin) loginRequest(account *aistudio.Account, directory string) aistudio.IsolatedLoginRequest {
 	return aistudio.IsolatedLoginRequest{
-		Directory: directory, Proxy: account.EffectiveProxy(admin.globalProxy),
+		Directory: directory, Proxy: account.EffectiveProxy(admin.currentGlobalProxy()),
 		Locale: account.Config.Locale, Timezone: account.Config.Timezone,
 	}
 }
@@ -1832,15 +1890,15 @@ func (admin *runtimeAdmin) RuntimeConfig(context.Context) (api.RuntimeConfig, er
 		return api.RuntimeConfig{}, err
 	}
 	value := runtimeConfigDTO(cfg)
-	value.ActiveProxy = admin.config.Proxy
+	value.ActiveProxy = admin.currentActiveProxy()
 	value.ProxyPool = admin.proxyPoolStatus()
 	return value, nil
 }
 
-func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.RuntimeConfig) (api.RuntimeConfig, error) {
+func (admin *runtimeAdmin) saveRuntimeConfig(value api.RuntimeConfig) (config.Config, error) {
 	saved, err := config.Load(admin.configPath)
 	if err != nil {
-		return api.RuntimeConfig{}, err
+		return config.Config{}, err
 	}
 	password := saved.AdminPassword
 	if value.AdminPassword != nil {
@@ -1852,11 +1910,19 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 	}
 	initTimeout, err := time.ParseDuration(value.InitTimeout)
 	if err != nil {
-		return api.RuntimeConfig{}, invalidConfigError(fmt.Errorf("INIT_TIMEOUT 无效: %w", err))
+		return config.Config{}, invalidConfigError(fmt.Errorf("INIT_TIMEOUT 无效: %w", err))
 	}
 	requestTimeout, err := time.ParseDuration(value.RequestTimeout)
 	if err != nil {
-		return api.RuntimeConfig{}, invalidConfigError(fmt.Errorf("REQUEST_TIMEOUT 无效: %w", err))
+		return config.Config{}, invalidConfigError(fmt.Errorf("REQUEST_TIMEOUT 无效: %w", err))
+	}
+	switchInterval := strings.ToLower(strings.TrimSpace(value.AccountSwitchInterval))
+	if switchInterval == "" {
+		switchInterval = config.AccountSwitchIntervalOff
+	}
+	maxQuotaSwitches := strings.ToLower(strings.TrimSpace(value.MaxQuotaSwitches))
+	if maxQuotaSwitches == "" {
+		maxQuotaSwitches = config.MaxQuotaSwitchesOff
 	}
 	cfg := config.Config{
 		AutoStart:      value.AutoStart,
@@ -1879,6 +1945,8 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 		RoutingStrategy:        value.RoutingStrategy,
 		AccountOrder:           strings.TrimSpace(value.AccountOrder),
 		MaxAccountSwitches:     value.MaxAccountSwitches,
+		AccountSwitchInterval:  switchInterval,
+		MaxQuotaSwitches:       maxQuotaSwitches,
 		UpstreamChannels:       value.UpstreamChannels,
 		ModelMapping:           strings.TrimSpace(value.ModelMapping),
 		ModelChannels:          strings.TrimSpace(value.ModelChannels),
@@ -1889,20 +1957,13 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 		MediaBaseURL:           strings.TrimSpace(value.MediaBaseURL),
 	}.KeepEnvironment(saved)
 	if err := cfg.Validate(); err != nil {
-		return api.RuntimeConfig{}, invalidConfigError(err)
+		return config.Config{}, invalidConfigError(err)
 	}
 	if err := cfg.Save(admin.configPath); err != nil {
-		return api.RuntimeConfig{}, err
+		return config.Config{}, err
 	}
-	admin.ApplyAccountSelection(cfg)
-	admin.service.SetAutoContinuation(cfg.AutoContinuation)
 	admin.requests.log("service", "INFO", "服务配置已保存")
-	models, _ := admin.CatalogModels(context.Background())
-	admin.requests.publish(api.AdminEvent{Type: "models", Data: map[string]any{"models": models}})
-	value = runtimeConfigDTO(cfg)
-	value.ActiveProxy = admin.config.Proxy
-	value.ProxyPool = admin.proxyPoolStatus()
-	return value, nil
+	return cfg, nil
 }
 
 // ApplyAccountSelection 让 cfg 中的账户选择策略、账户顺序与模型限定的通道和账户作用于之后的选号
@@ -2238,6 +2299,8 @@ func runtimeConfigDTO(cfg config.Config) api.RuntimeConfig {
 		RoutingStrategy:        cfg.RoutingStrategy,
 		AccountOrder:           cfg.AccountOrder,
 		MaxAccountSwitches:     cfg.MaxAccountSwitches,
+		AccountSwitchInterval:  cfg.AccountSwitchInterval,
+		MaxQuotaSwitches:       cfg.MaxQuotaSwitches,
 		UpstreamChannels:       cfg.UpstreamChannels,
 		ModelMapping:           cfg.ModelMapping,
 		ModelChannels:          cfg.ModelChannels,

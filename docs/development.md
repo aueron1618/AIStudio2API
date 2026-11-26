@@ -445,7 +445,9 @@ Camoufox 运行中与服务的 WebDriver BiDi 连接断开时，服务最多等 
 
 ## 3. 配置、账户和持久状态
 
-程序从当前目录读取可选的 `.env`，进程环境变量通常覆盖同名配置并在设置页锁定；`PROXY_API_KEY` 例外，始终可在 Web 修改，保存后立即更新认证。修改密钥时同时持久化 `PROXY_API_KEY_WEB_OVERRIDE=true`，此后加载优先使用文件中的密钥，包括显式清空，重启不会被进程环境中的旧 key 覆盖；移除此标记并重启可恢复环境变量优先。除该标记外，管理端保存设置只写入与默认值不同的项；普通无效配置按默认值运行，管理页面顶部与服务日志列出问题。`API_KEY_ACCOUNTS` 是安全边界：格式错误或同一已配置 key 的重复绑定拒绝加载与保存，错误不暴露 key 原文，不回退为空绑定。`config.Load` 可在读取时精简无注释且包含旧全量键的文件，升级前备份；迁移测试只使用临时副本，不把读取正式配置当作无副作用的验证。
+程序从当前目录读取可选的 `.env`。进程环境变量覆盖同名配置，设置页不可改写。唯一例外是 `PROXY_API_KEY`：在 Web 显式修改或清空密钥时，程序在本地 `.env` 写入 `PROXY_API_KEY_WEB_OVERRIDE=true`，重启后仍使用保存值；移除标记并重启可恢复环境变量优先。只保存其他设置不会启用此覆盖。密钥列表与有效账户绑定原子更新；环境变量提供的 `API_KEY_ACCOUNTS` 本身仍只读。绑定格式错误或同一已配置 key 的重复绑定拒绝加载与保存，错误不暴露 key 原文，不回退为允许所有账户。
+
+普通无效配置按默认值运行，管理页面顶部与服务日志列出问题。管理端通常只保存非默认值，环境变量锁定项保留原有文件值。`config.Load` 可在读取时精简无注释且包含旧全量键的文件，升级前备份；迁移测试只使用临时副本，不把读取正式配置当作无副作用的验证。
 
 下表列出程序默认值；`.env.example` 显式选择仅 Playground，并关闭 Build 非流式优先、输入续写改写和分轮自动续写。
 
@@ -474,6 +476,8 @@ Camoufox 运行中与服务的 WebDriver BiDi 连接断开时，服务最多等 
 | `ROUTING_STRATEGY` | 账户轮询 `round-robin` 或粘性优先 `fill-first` | `round-robin` |
 | `ACCOUNT_ORDER` | 逗号分隔的账户 ID，`fill-first` 依次使用并按此顺序预热，未列出的账户排在后面并按 ID 排序；保存后立即生效 | 空 |
 | `MAX_ACCOUNT_SWITCHES` | 一个请求因上游 403、404、5xx、连接断开、首字超时等非额度失败换号的次数上限，`0` 为不换号；登录失效与额度失败不计入；保存后立即生效 | `3` |
+| `ACCOUNT_SWITCH_INTERVAL` | 同一请求从上个账户失败到尝试下个账户的最短间隔，`off` 不等待，正整数为秒数；切往冷备 Worker 时只在启动前等待，客户端断开即取消 | `off` |
+| `MAX_QUOTA_SWITCHES` | 同一请求因额度用尽（429）换号的独立上限：`off` 不限，`0` 不换，正整数为允许的换号次数；用尽后返回最后一次 429 | `off` |
 | `UPSTREAM_CHANNELS` | 保留 Playground 与 Build 固定入口；旧 Build 代理的生成已被上游停用，返回其原始错误 | `playground,build` |
 | `MODEL_MAPPING` | 逗号分隔，每项以最后一个 `:` 分成别名与模型 ID；保存后用于新请求与模型列表 | 空 |
 | `MODEL_CHANNELS` | 逗号分隔，每项以最后一个 `:` 分成模型 ID 与通道 `playground` 或 `build`；保存后立即生效 | 空 |
@@ -482,19 +486,19 @@ Camoufox 运行中与服务的 WebDriver BiDi 连接断开时，服务最多等 
 | `NONSTREAM_KEEPALIVE` | 非流式请求等待结果期间每 10 秒写出一个换行 | `true` |
 | `FAKE_STREAM` | 流式请求按非流式取得完整结果后再以流式输出 | `false` |
 | `YOUTUBE_LINKS` | 用户消息文本中的 YouTube 链接作为视频外部媒体发送 | `false` |
-| `STRIP_THOUGHT_SIGNATURES` | 发往上游前去掉对话历史中的思考签名，函数调用带 `skip_thought_signature_validator`；保存后停止再启动生成服务生效 | `false` |
+| `STRIP_THOUGHT_SIGNATURES` | 发往上游前去掉对话历史中的思考签名；保存后用于新请求 | `false` |
 | `SEARCH_MODEL_ALIASES` | 为支持搜索的模型提供 `-search` 型号，使用该型号时启用 Google 搜索；保存后用于新请求与模型列表 | `true` |
-| `DISCOVER_HIDDEN_MODELS` | 同步账户模型目录时读取账户页面载入的官网前端主程序，找出推荐模型页指向、`ListModels` 没有列出的模型，经上游 `CountTokens` 确认可用后加入该账户目录，条目复制自同类已列出的推荐模型、ID 与名称为模型 ID 并带 `hidden: true`；被 `ListModels` 列出后使用官方条目；保存后停止再启动生成服务生效 | `false` |
+| `DISCOVER_HIDDEN_MODELS` | 开启后，正常同步时将已确认该账户可用的隐藏模型标为 `hidden: true`，官网列出后使用官方条目；关闭时立即移除隐藏条目，无需重启 | `false` |
 | `GOOGLE_SEARCH` | 为 OpenAI、Anthropic、Gemini 与 Interactions 的生成请求启用 Google 搜索，包含普通型号与携带函数工具的请求；保存后用于新请求 | `false` |
 | `ANTI_TRUNCATION` | 公开 `抗截断-` 模型变体开关；目录、生成与计数请求在管理页保存后立即使用新值，与自动续写独立 | `false` |
-| `CONTINUATION_REWRITE` | 以 assistant 轮结尾的请求在不支持原生续写的模型上改写为续写请求，规则见 [协议规范](protocol.md)；保存后停止再启动生成服务生效 | `true` |
+| `CONTINUATION_REWRITE` | 以 assistant 轮结尾的请求在不支持原生续写的模型上改写为续写请求，规则见 [协议规范](protocol.md)；保存后用于新请求 | `true` |
 | `AUTO_CONTINUATION` | Playground 分轮自动续写；关闭时不再发下一轮，管理页保存立即生效，包括尚未触发下一轮的在途请求；与输入前缀改写独立 | `true` |
-| `CONTINUATION_PROMPT` | 改写时与末尾 assistant 正文一起写入系统指令的续写提示词；键存在且为空时末尾 assistant 正文作为最后一轮 user；保存后停止再启动生成服务生效 | 内置英文续写句 |
+| `CONTINUATION_PROMPT` | 改写时与末尾 assistant 正文一起写入系统指令的续写提示词；键存在且为空时末尾 assistant 正文作为最后一轮 user；保存后用于新请求 | 内置英文续写句 |
 | `THINKING_GUARD` | 独立思考引导，仅作用于支持思考的文本生成，强度至多 `low`、预算至多 1024 token，不抬高更低设置，非文本请求不变；保存后用于新请求 | `false` |
 | `USER_MESSAGE_REWRITE` | 仅改写 user 消息文本中的中文，不改 tools、assistant 或非文本内容；`off`、`traditional`、`martian`，并追加默认简体中文回复指令；保存后用于新请求 | `off` |
 | `FIRST_EVENT_HEDGE` | 首字超时备用请求：`off`、`auto`（各模型与通道近 24 小时原请求首字等待的 p95）或正整数秒 | `off` |
 | `FIRST_EVENT_HEDGE_MODELS` | 发起备用请求的模型 ID，逗号分隔；仍受空闲 Worker 和单账户并发预算约束 | `gemini-4-argon` |
-| `FIRST_EVENT_TIMEOUT` | `off` 或正整数秒；每次尝试从取得账户起到首个语义事件独立计时，到时取消并换号，计入换号上限、不冷却账户，无可换账户时返回 504；不适用于后台请求或 Agent 后台任务 | `off` |
+| `FIRST_EVENT_TIMEOUT` | `off` 或正整数秒；每次尝试从取得账户起到首个语义事件独立计时，到时取消并换号，计入换号上限、不冷却账户，无可换账户时返回 504；不适用于后台请求或 Agent 目标 | `off` |
 | `WAA_BACKEND` | WAA 后端 `camoufox` 或 `spidermonkey`，旧配置 `go` 自动迁移 | `spidermonkey` |
 | `MEDIA_OUTPUT` | Chat Completions 与 Messages 正文中生成媒体的引用方式 `inline` 或 `url` | `inline` |
 | `MEDIA_BASE_URL` | 媒体 URL 的服务地址，`http` 或 `https`；留空时取请求的协议与 Host | 空 |
@@ -505,22 +509,22 @@ Camoufox 运行中与服务的 WebDriver BiDi 连接断开时，服务最多等 
 
 | 字段 | 语义 |
 | --- | --- |
-| `auth_states`、`proxy`、`init_timeout`、`request_timeout` | 下一次启动生成服务时使用的保存值 |
+| `auth_states`、`waa_backend` | 下次启动生成服务时读取；仅在服务运行中且配置不同时需要重启生成服务 |
+| `proxy` | 保存后更新默认代理与代理池；受影响的 Worker 等在途请求完成后再换绑 |
+| `init_timeout`、`request_timeout` | 新启动的 Worker 和新请求使用保存后的超时值，不重置正在进行的计时 |
 | `warm_worker_limit`、`max_active_workers`、`warm_startup_concurrency`、`per_account_concurrency` | 保存后立即作用于当前生成服务的容量参数 |
-| `max_account_switches` | 保存后立即作用于换号判断的非额度错误换号上限 |
-| `waa_backend`、`build_native_nonstream` | 下一次启动生成服务时使用的 WAA 与自动路由非流式配置 |
+| `max_account_switches`、`account_switch_interval`、`max_quota_switches` | 换号判断使用保存后的非额度错误换号上限、最短间隔与额度换号上限 |
 | `routing_strategy`、`account_order`、`model_channels`、`model_accounts` | 保存后立即应用的路由策略、账户顺序、模型通道与账户约束；固定 URL 仍优先 |
-| `upstream_channels` | 下一次启动生成服务时使用的通道启用范围 |
+| `upstream_channels`、`build_native_nonstream` | 新请求使用保存后的通道启用范围及自动路由非流式偏好，固定 URL 不跨通道回退 |
 | `nonstream_keepalive`、`fake_stream` | 保存后立即作用于新请求的非流式保活与假流式设置 |
-| `youtube_links` | 下一次启动生成服务时使用的 YouTube 链接识别设置 |
-| `strip_thought_signatures` | 下一次启动生成服务时使用的历史思考签名剥离设置 |
+| `youtube_links`、`strip_thought_signatures` | 新请求使用保存后的 YouTube 链接识别与历史思考签名剥离设置 |
 | `search_model_aliases` | 保存后立即作用于新请求与模型列表的搜索后缀型号开关 |
-| `discover_hidden_models` | 下一次启动生成服务时使用的官网隐藏模型探测开关 |
+| `discover_hidden_models` | 关闭时立即移除隐藏条目；开启后由正常目录刷新应用，不因保存额外扫描 |
 | `google_search` | 保存后立即作用于新请求的全模型 Google 搜索开关 |
-| `continuation_rewrite`、`continuation_prompt` | 下一次启动生成服务时使用的末尾 assistant 轮改写开关与续写提示词 |
+| `continuation_rewrite`、`continuation_prompt` | 新请求使用保存后的末尾 assistant 轮改写开关与提示词 |
 | `anti_truncation`、`auto_continuation` | 两个独立热开关；保存后立即生效，旧客户端省略 `auto_continuation` 时保留当前值 |
 | `proxy_api_key`、`api_key_accounts` | 保存后同时热更新的认证 key 列表与账户绑定；`APIKeys` 回调为每个请求读取一致快照，已准入请求保留原账户上限 |
-| `first_event_hedge`、`first_event_hedge_models`、`first_event_timeout` | 下一次启动生成服务时使用的首字超时备用请求与单次首字超时设置 |
+| `first_event_hedge`、`first_event_hedge_models`、`first_event_timeout` | 保存后用于新请求的首字备用请求策略、模型范围与单次首字超时 |
 | `media_output`、`media_base_url` | 保存后立即作用于新请求的媒体引用方式与媒体服务地址 |
 | `model_mapping` | 保存后立即作用于新请求与模型列表的模型别名映射 |
 | `thinking_guard`、`user_message_rewrite` | 独立选项，保存后作用于新请求；默认 `false` / `off`，不影响非文本内容 |
@@ -528,23 +532,23 @@ Camoufox 运行中与服务的 WebDriver BiDi 连接断开时，服务最多等 
 | `hide_dock_icon` | macOS 桌面版是否隐藏 Dock 图标，保存后立即生效 |
 | `request_body_log` | 保存后立即决定是否保存请求与响应正文 |
 | `log_file`、`log_max_total_mb` | 保存后立即开关日志文件并按新的总量上限轮转 |
-| `admin_auth_enabled`、`admin_username`、`admin_password` | 保存的管理登录配置；省略密码保留现值，密码只接受写入 |
+| `admin_auth_enabled`、`admin_username`、`admin_password` | 管理登录保存后立即生效；密码只写，省略则保留现值。启用登录或更改凭据会撤销旧会话并为当前浏览器签发新会话；只有本机回环访问可关闭登录 |
 | `admin_password_set` | 是否已配置管理密码 |
-| `listen_addr` | 保存的监听地址，管理进程重启后生效 |
+| `listen_addr`、`preview_listen_addr` | 保存的管理监听地址与预览来源地址，管理进程重启后生效 |
 | `active_listen_addr`、`active_proxy_api_key` | 当前生效的监听地址和 API 密钥 |
-| `preview_listen_addr` | 保存的 API 试用页预览来源监听地址，管理进程重启后生效 |
 | `active_preview_listen_addr` | 当前管理进程实际使用的预览来源地址 |
 | `reserved_listen_addr` | 被 Windows 保留而改用 `active_listen_addr` 的监听地址，没有改用时为空 |
 | `active_proxy` | 当前生成服务使用的出口，代理池为逗号分隔的全部代理，`proxy` 为空时为系统代理，没有系统代理时为空 |
 | `proxy_pool` | 当前生成服务的代理池：每个代理的地址、是否可用、绑定账户数、最近检测时间与最近错误 |
-| `management_restart_required` | 保存的监听地址、预览地址或管理登录配置与当前管理进程不同；API key 修改不要求重启 |
-| `service_restart_required` | 保存的生成服务配置与当前生成服务实例不同 |
-| `environment` | 取自进程环境变量、覆盖 `.env` 的配置键 |
+| `active_requests` | 当前生成服务进行中的请求数 |
+| `management_restart_required` | 仅在保存的管理或预览监听配置改变时为真；自动改用其他可用端口本身不触发此标记 |
+| `service_restart_required` | 生成服务运行中，且保存的 `waa_backend` 或 `auth_states` 与当前生成服务实例不同 |
+| `environment` | 由进程环境变量管理的配置键；`PROXY_API_KEY` 是唯一可在 Web 显式覆盖的例外 |
 | `invalid` | 取值无效而按默认值运行的项，每项为 `key`、`value` 与 `reason` |
 
 `PROXY` 含多个代理时组成代理池。账户出口的优先级为账户代理、代理池绑定、系统代理、直连。
 
-配置保存使用临时文件、`Sync` 和原子替换。监听地址、预览地址和管理登录配置在管理进程重启后应用；API key 列表、账户绑定、容量、路由策略、模型通道、抗截断/自动续写及日志等表中注明的即时项保存后生效，其余生成配置在 Stop/Start 后应用。新请求使用最新 key 快照，已准入请求的账户上限与后续当前绑定取交集，不因 key 轮换或撤销而扩大权限。已有显式请求超时与 `UPSTREAM_CHANNELS=playground,build` 不因旧默认值迁移而被删除，正数热池和用户并发配置同样保留。
+`PUT /api/config` 校验配置后通过临时文件、`Sync` 和原子替换保存，再发布新值，不自动启停服务。大多数设置用于下一次请求；直接编辑 `.env` 或仅调用 `GET /api/config` 不等同于在设置页保存。新请求读取一致的密钥与账户绑定快照；已准入请求的原账户上限与后续绑定取交集，不因 key 轮换或撤销而扩大权限。迁移保留显式请求超时、`UPSTREAM_CHANNELS=playground,build`、正数热池与用户并发配置。
 
 分配：
 
@@ -572,7 +576,10 @@ Camoufox 运行中与服务的 WebDriver BiDi 连接断开时，服务最多等 
 ```text
 PUT /api/config
   -> 校验并原子写入 .env
-  -> 返回 saved/active 差异
+  -> 发布热配置，返回 saved/active 差异与 active_requests；不会自动重启
+
+POST /api/control/restart
+  -> 先 stop 再 start；不会重启管理进程，可能中断活动请求
 
 POST /api/control/stop
   -> 取消账户任务、LAUNCHING、活动请求与后台扩容中的 Worker 启动
@@ -646,7 +653,7 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。冷�
 
 选号顺序：
 
-- `ROUTING_STRATEGY=round-robin` 在每个模型的候选账户间轮询，按上次选中的账户 ID 继续
+- `ROUTING_STRATEGY=round-robin` 在同一模型或方法范围内优先选择未用过、其次最久未用的合格账户与通道组合。服务启动时从请求账本恢复最近使用时间和当前配额日的请求数；这是本机使用历史，不是上游剩余额度
 - `fill-first` 持续使用 `ACCOUNT_ORDER` 顺序（未列出的账户在后并按 ID 排序）中的首个可用账户，并在并发槽位用满、冷却或不可用时切换
 - 带内联附件的生成请求优先选择已上传其中最多附件的账户，该账户并发槽位用满、冷却或不可用时再按策略选择
 - 已有生成请求在等待或生成 WAA proof（Camoufox 后端界面运行时到页面发出请求为止）的账户排在其余已就绪账户之后：会话粘性没有指定账户时，请求按策略先在没有 proof 排队的账户中选择，都在排队时再在全部有空槽位的账户中选择
@@ -654,8 +661,8 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。冷�
 上游通道：
 
 - 生成请求的候选为账户与 `UPSTREAM_CHANNELS` 所启用通道的组合：Playground 按 `ListModels` 与权益判断，Build 按 Build 代理返回的 Gemini API 模型目录与相同权益判断
-- 轮询与粘性在组合间按账户 ID 与通道顺序推进
-- 冷却按通道记录（Build 为 `build:<模型>`），一个通道冷却后同一账户可由另一通道继续；全部启用通道都冷却时按下文的冷却规则排队或返回 429
+- 轮询的最近使用时间相同时，再按账户 ID 和候选通道顺序决定；粘性策略遵循 `ACCOUNT_ORDER`
+- 冷却按通道记录（Build 为 `build:<模型>`）。只有自动路由且另一通道也合格时才可跨通道；`/v1` 固定 Playground，`/build/v1` 固定 Build。所有候选通道都冷却时按冷却规则排队或返回 429
 - `-build` 模型只使用 Build 写代码助手通道 `assistant`，冷却 scope 为 `-build` 模型 ID，同一账户同时只运行一个 `-build` 生成，对话续接得上某账户应用中的 trajectory 时该账户优先；通道规格见 [Build 通道](build.md)
 - 计数、Live、转录与 Drive 文件引用使用 Playground RPC
 
@@ -668,7 +675,7 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。冷�
 
 换号与重放：
 
-- 未固定账户的请求遇到可重试的 401、403、404、429、5xx、收到响应前的连接断开或单账户初始化超时时，可以在首个上游语义事件前继续切换尚未尝试的同能力账户；额度以外的失败最多换 `MAX_ACCOUNT_SWITCHES` 次，额度失败不计入
+- 未固定账户的请求遇到可重试错误时，可以在首个上游语义事件前切换到尚未尝试且有资格的账户。非额度错误计入 `MAX_ACCOUNT_SWITCHES`，额度用尽单独计入 `MAX_QUOTA_SWITCHES`，登录失效不占这两项预算。换号仍受请求原有的账户与通道范围约束
 - 上游以 403、协议错误码 7 拒绝账户（官网不跳转拒绝页的情形）时，自上次成功后第一次被拒只换号；没有其他账户可换时在该账户上重试一次；连续第二次被拒起，该账户在该模型上冷却 1、5、15、30、60 分钟，成功一次后重新计数
 - Drive 引用随需要临时复制到生成账户，显式账户和视频任务保持账户绑定
 - Chrome 导入状态保留续签材料，HTTP `401` 时在同一固定出口续签一次、重建该账户 WAA runtime 并重放请求
@@ -678,11 +685,10 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。
 启动与替换：
 
 - 活动数低于 `MAX_ACTIVE_WORKERS` 时直接启动并发布新 Worker
-- 容量已满且存在空闲旧实例时，先启动 pending Worker（正在启动、尚未发布的替代 Worker），再关闭旧实例并发布替代 Worker
+- 容量已满且存在空闲旧实例时，先关闭选中的旧实例并释放槽位，再启动替代 Worker；不能为了替换临时突破 `MAX_ACTIVE_WORKERS`
 - 被替换的空闲实例按以下顺序选择：对请求模型处于冷却（全局或该模型限额）的实例优先，同类中最久未用者优先；其次为最久未用实例
-- 多个冷却实例可并行替换，每次替换预留独立的旧实例，启动期间新旧进程短暂共存
-- 启动失败或取消时现有 Worker 继续服务
-- 旧 Worker 与 pending 回收同时失败时，两份进程与租约均保留为 cleanup pending（仍待关闭）并占用容量槽，后续 Stop 会重试关闭
+- 每次替换独占其选中的旧实例，其他仍在处理请求的 Worker 不受影响。启动并发仍受 `WARM_STARTUP_CONCURRENCY` 限制
+- 关闭失败的 Worker 或租约占用原槽位，后续 Stop 重试清理；不会把关闭失败视为已经释放容量
 
 排队：
 
@@ -693,7 +699,7 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。
 
 回收与容量设置：
 
-- 超出 `WARM_WORKER_LIMIT` 的 Worker 空闲 5 分钟后关闭，热池保持目标数量
+- 正数热池中超出 `WARM_WORKER_LIMIT` 的 Worker 空闲 5 分钟后关闭；默认零热池的空闲回收时间约为 30 秒
 - 管理端保存容量设置后立即作用于当前生成服务：Worker 数超过新的 `MAX_ACTIVE_WORKERS` 时立即关闭多出的空闲 Worker，忙碌的在请求结束后的回收检查中关闭；热池少于新的 `WARM_WORKER_LIMIT` 时补足预热；等待中的启动与请求按新的 `WARM_STARTUP_CONCURRENCY` 与 `PER_ACCOUNT_CONCURRENCY` 放行
 
 账户的 WAA runtime 租约由其他进程持有时：
@@ -714,7 +720,7 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。
 - 先用 Worker 已就绪且没有活动请求的其他账户，没有时用原账户的其余并发槽位
 - 引用已上传文件或指定账户的请求只用原账户的其余并发槽位
 - 都没有时每秒复查；同时进行的备用请求最多 4 个
-- 后台 Responses 与 Interaction、Deep Research 与 Antigravity 等经后台任务生成的 agent（`interaction_task`）与 `-build` 写代码助手请求不发起备用请求
+- 后台 Responses 与 Interaction、Deep Research 与 Antigravity 等 agent（`interaction_agent`）与 `-build` 写代码助手请求不发起备用请求
 
 结果：
 
@@ -722,7 +728,7 @@ Worker 容量由热池目标、活动上限和单账户并发共同约束。
 - 被取消的请求同样计入上游的每日与每分钟请求额度
 - 账本的 `attempts` 以 `hedge` 标记备用请求，以 `superseded` 标记被取代的一方
 
-`FIRST_EVENT_TIMEOUT` 不为 `off` 时，除后台 Responses、后台 Interactions 与经后台任务生成的 agent（`interaction_task`）外，每次生成尝试（含 `-build` 写代码助手）从取得账户起等待首个语义事件达到阈值后，取消该尝试并换号：
+`FIRST_EVENT_TIMEOUT` 不为 `off` 时，除后台 Responses、后台 Interactions 与 agent（`interaction_agent`）外，每次生成尝试（含 `-build` 写代码助手）从取得账户起等待首个语义事件达到阈值后，取消该尝试并换号：
 
 - 计入 `MAX_ACCOUNT_SWITCHES`，不冷却账户、不改账户状态、不重建 Worker；没有可换账户或换号用尽时返回 504 并写明 `FIRST_EVENT_TIMEOUT`
 - 与 `FIRST_EVENT_HEDGE` 同开时原请求与备用请求各自计时，一方到期取消不影响另一方继续等待；`REQUEST_TIMEOUT` 管整个请求，更早到期时直接结束请求不换号
@@ -912,7 +918,7 @@ Gemini 端点返回的语音 `audio/L16` 在页面封装为 WAV。
 
 管理面板默认打开日志页，不是账户页；侧栏折叠与账户地区不预填保持现有行为。抗截断 normal view 只在公开响应和用量展示层隐藏保留前缀，不修改实际目录与审计请求名。`requested_model` 保留原始请求，`response_model` 记录响应模型；用量展示只移除一次 `抗截断-`，保留 `models/` 与模型后缀。工具调用数来自实际观察到的内部传输工具和普通函数调用，不按抗截断开关固定填 1，内部工具名和统计字段不泄漏到生成响应，详见 [协议规范](protocol.md#抗截断与普通响应视图) 与 [用量账本](logging.md#用量账本)。
 
-“接入”页由 `web/src/access/` 提供客户端配置、按实时模型能力生成的 SDK/cURL 示例与端点表，复用试用页的协议转换及固定 URL 选择。目录中的 Build-only 和 `assistant_route` 写代码助手模型使用 `/build/v1`，不能因新接入页统一写死 `/v1`；通道按真实目录判断，而不是仅凭 `-build` 名称后缀。Agent 页按目录的 `interaction_task` 与 Interaction 配置显示 Deep Research / Antigravity 的工具及模型设置，支持范围取决于所选 Agent 和公开协议，不承诺所有客户端工具都由服务器执行。
+“接入”页由 `web/src/access/` 提供客户端配置、按实时模型能力生成的 SDK/cURL 示例与端点表，复用试用页的协议转换及固定 URL 选择。目录中的 Build-only 和 `assistant_route` 写代码助手模型使用 `/build/v1`，不能因新接入页统一写死 `/v1`；通道按真实目录判断，而不是仅凭 `-build` 名称后缀。Agent 页按目录的 Agents 分类和 Interaction 配置显示 Deep Research / Antigravity 的工具及模型设置；后台任务标记 `interaction_task` 本身不能区分 Agent 与普通模型。支持范围取决于所选 Agent 和公开协议，不承诺所有客户端工具都由服务器执行。
 
 ## 5. 协议实现
 
@@ -1057,9 +1063,9 @@ Docker 下载的 artifact 名为 `packages-linux-<arch>`，内容为该架构的
 
 | 步骤 | 行为 |
 | --- | --- |
-| 读取版本 | `GET /api/update` 读取 `https://api.github.com/repos/aueron1618/AIStudio2API/releases/latest`，结果缓存一小时，`?refresh=1` 立即重新读取；请求经 `PROXY` 的第一个代理，未设置时经系统代理 |
+| 读取版本 | `GET /api/update` 从 `aueron1618/AIStudio2API` 的 GitHub `/releases/latest` 跳转确认正式版本，从 `/releases.atom` 读取对应条目的纯文本说明，不调用 REST API。成功缓存一小时；失败后按限流恢复时间或默认 5 分钟再查，`?refresh=1` 可手动检查。请求经 `PROXY` 的第一个代理，未设置时经系统代理 |
 | 更新方式 | 链接时写入更新管理方的构建为 `managed`；非正式语义版本（含预发布、构建元数据或提交 SHA）为 `development`；正式版本在容器标记存在时为 `container`，其他受支持平台为 `binary`，包括 Linux 桌面 AppImage 与 deb |
-| 下载与校验 | `POST /api/update` 只在 `binary` 且有更新版本时执行，按当前系统与架构下载 `aistudio2api-<版本>-<系统>-<架构>.zip`（Windows）或 `.tar.gz`，macOS 桌面版下载 `aistudio2api-<版本>-darwin-universal.zip`，Linux 桌面版下载 `aistudio2api-<版本>-linux-<架构>.AppImage` 或 `.deb`，与 Release 资产的 `digest` 核对一致后取出其中的可执行文件或 `AIStudio2API.app` |
+| 下载与校验 | `POST /api/update` 只在 `binary` 且有新版本时安装。安装时才查询本 fork 已确认 tag 的 REST 元数据，精确匹配当前平台资产，并核对其 SHA-256；缺少有效摘要或校验不符即停止。Windows 使用 `.zip`，Linux/macOS 命令行版使用 `.tar.gz`，macOS 桌面版使用 `darwin-universal.zip`，Linux 桌面版使用 `.AppImage` 或 `.deb` |
 | 替换 | `minio/selfupdate` 替换当前可执行文件，失败时恢复原文件；Windows 上原文件改名为 `.aistudio2api.exe.old` |
 | 重启 | 返回 202 后按收到 SIGTERM 的顺序停止 HTTP 服务、生成服务与 Camoufox（HTTP 服务最多等待进行中的连接 10 秒，之后断开），再以原参数加 `-open-ui=false` 启动新程序：Windows 上新进程沿用当前控制台，其他系统以 exec 替换当前进程 |
 | 桌面版替换与重启 | Windows 与 macOS 桌面版经 Wails 更新器把新版本暂存到系统临时目录，返回 202 后启动更新辅助进程并按上一行的顺序退出；辅助进程等待原进程结束（最多 30 秒），替换可执行文件或 `AIStudio2API.app`，启动新版本后删除备份与暂存文件 |

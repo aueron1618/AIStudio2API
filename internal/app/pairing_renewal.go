@@ -111,7 +111,8 @@ func (admin *runtimeAdmin) RenewAccountCookies(ctx context.Context, accountID st
 	if err := admin.rejectRestrictedAccount(account.ID); err != nil {
 		return api.AdminAccount{}, errors.Join(err, lease.Release())
 	}
-	identity, err := admin.verifyCookieState(ctx, &verified, account.EffectiveProxy(admin.globalProxy), account.Config.AuthUser)
+	proxy := account.EffectiveProxy(admin.currentGlobalProxy())
+	identity, err := admin.verifyCookieState(ctx, &verified, proxy, account.Config.AuthUser)
 	if err != nil {
 		return api.AdminAccount{}, errors.Join(cookieVerificationError(err, "http"), lease.Release())
 	}
@@ -121,7 +122,7 @@ func (admin *runtimeAdmin) RenewAccountCookies(ctx context.Context, accountID st
 	if _, err := aistudio.NewSigner().Authorization(verified); err != nil {
 		return api.AdminAccount{}, errors.Join(invalidAccount(fmt.Errorf("验证后的 Cookie 不完整或已过期")), lease.Release())
 	}
-	if err := admin.checkAccountAccess(ctx, account.ID, &verified, account.EffectiveProxy(admin.globalProxy), account.Config.AuthUser); err != nil {
+	if err := admin.checkAccountAccess(ctx, account.ID, &verified, proxy, account.Config.AuthUser); err != nil {
 		return api.AdminAccount{}, errors.Join(err, lease.Release())
 	}
 	if err := ctx.Err(); err != nil {

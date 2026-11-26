@@ -613,7 +613,7 @@ func TestAntiTruncationPooledAssistantTailAndDisabledRequests(t *testing.T) {
 		})})
 		client.setModelCatalog(account.ID, modelCatalog{entries: map[string]modelEntry{model.ID: {model: model, defaults: GenerationDefaults{MaxOutputTokens: 1024}}}})
 		service := NewPooledService(pool, client)
-		service.ContinuationRewrite, service.ContinuationPrompt = true, "rewrite prompt"
+		service.SetRequestOptions(RequestOptions{ContinuationRewrite: true, ContinuationPrompt: "rewrite prompt"})
 		request := GenerateRequest{Model: model.ID, AccountID: account.ID, AntiTruncation: enabled, Contents: []Content{
 			{Role: RoleUser, Parts: []Part{{Text: "question"}}}, {Role: RoleAssistant, Parts: []Part{{Text: "original assistant"}}},
 		}}

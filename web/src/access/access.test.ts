@@ -6,7 +6,7 @@ import type { Model } from '@/types'
 import AccessPanel from '@/components/AccessPanel.vue'
 import GetCodeDialog from '@/playground/GetCodeDialog.vue'
 import { capabilities } from './capabilities'
-import { clients, type ClientInput, type Protocol } from './clients'
+import { clients, type ClientInput, type ClientStep, type Protocol } from './clients'
 import { endpointExample, endpointGroups, endpointPath } from './endpoints'
 
 const catalog = vi.hoisted(() => ({ value: [] as Model[] }))
@@ -40,7 +40,7 @@ vi.mock('@/desktop', () => ({ keepPage: () => () => {} }))
 vi.mock('@/console', () => ({
   useConsole: () => ({
     models: catalog,
-    config: { value: { proxy_api_key: 'first-key,second-key' } },
+    config: { value: { active_proxy_api_key: 'first-key,second-key' } },
   }),
 }))
 vi.mock('@/i18n', () => ({
@@ -221,6 +221,11 @@ describe('Access fixed-channel contracts', () => {
   })
 
   it('routes every REST/WebSocket endpoint example while leaving v1beta auto and media unchanged', () => {
+    expect(
+      endpointGroups
+        .flatMap((group) => group.endpoints)
+        .find((endpoint) => endpoint.path === '/health')?.docs,
+    ).toBe('https://github.com/aueron1618/AIStudio2API/blob/main/docs/protocol.md')
     for (const group of endpointGroups)
       for (const endpoint of group.endpoints) {
         const code = endpointExample(origin, group, endpoint, alias)
@@ -260,7 +265,7 @@ describe('Access fixed-channel contracts', () => {
   it('uses fixed Build URLs and the first key for Access connectivity probes', async () => {
     const props = reactive({
       models: catalog.value,
-      config: { active_proxy_api_key: 'first-key,second-key' },
+      config: { proxy_api_key: 'not-active', active_proxy_api_key: 'first-key,second-key' },
     })
     const instance = mountSetup<{
       testModel: string
@@ -304,6 +309,33 @@ describe('Access fixed-channel contracts', () => {
     await nextTick()
     expect(instance.state.tierModels.map((model) => model.id)).toEqual(['build-only', alias])
     expect(Object.values(instance.state.clientInput.tiers)).not.toContain('normal')
+  })
+
+  it('masks before formatting client snippets and hides a rotated key even after reveal', async () => {
+    const props = reactive({
+      models: catalog.value,
+      config: { proxy_api_key: 'saved-only', active_proxy_api_key: 'first-key' },
+    })
+    const { state, unmount } = mountSetup<{
+      clientID: string
+      keyShown: boolean
+      displayKey: string
+      key: string
+      steps: ClientStep[]
+      copyValue: (index: number) => string
+    }>(AccessPanel, props)
+    cleanups.push(unmount)
+    state.keyShown = true
+    props.config.active_proxy_api_key = 'offline"fixture-key'
+    state.clientID = 'opencode'
+    await nextTick()
+    expect(state.keyShown).toBe(false)
+    expect(state.displayKey).not.toContain('fixture-key')
+    expect(JSON.stringify(state.steps)).not.toContain('fixture-key')
+    expect(state.copyValue(0)).toContain('offline\\"fixture-key')
+    props.config.active_proxy_api_key = ''
+    await nextTick()
+    expect(state.key).toBe('aistudio2api')
   })
 
   it('keeps the request model and channel together if selection changes during discovery', async () => {

@@ -1833,5 +1833,22 @@
   "解析页面附件上传: %w": "Anhang-Upload der Seite auswerten: {0}",
   "记录页面附件上传: %w": "Anhang-Upload der Seite aufzeichnen: {0}",
   "读取官网思考档位: %w": "Denkstufe der Website lesen: {0}",
-  "读取官网页面模型: %w": "Modell der Website-Seite lesen: {0}"
+  "读取官网页面模型: %w": "Modell der Website-Seite lesen: {0}",
+  "ACCOUNT_SWITCH_INTERVAL 必须是 off 或正整数秒": "ACCOUNT_SWITCH_INTERVAL muss off oder eine positive ganze Zahl in Sekunden sein",
+  "Build 模型目录同步失败": "Synchronisierung des Build-Modellkatalogs fehlgeschlagen",
+  "GitHub 访问频率受限（HTTP %d）": "GitHub-Ratenlimit überschritten (HTTP {0})",
+  "MAX_QUOTA_SWITCHES 必须是 off、0 或正整数": "MAX_QUOTA_SWITCHES muss off, 0 oder eine positive Ganzzahl sein",
+  "只能在本机访问时关闭管理登录": "Die Konsolenanmeldung kann nur auf diesem Computer deaktiviert werden",
+  "最新发行版本跳转缺少版本号": "Die Weiterleitung zur neuesten Version enthält keine Versionsnummer",
+  "等待换号间隔": "Warten auf Kontowechsel-Intervall",
+  "读取校验摘要: %w": "Prüfsumme wird gelesen: {0}",
+  "读取账户历史使用记录失败": "Lesen des Kontonutzungsverlaufs fehlgeschlagen",
+  "模型 %s 需要 %s，本次请求可用的账户 %s 都不具备": "Modell {0} erfordert {1}, die für diese Anfrage verfügbaren Konten ({2}) verfügen nicht darüber",
+  "模型 %s 需要以下任一权益，本次请求可用的账户 %s 都不具备：%s": "Modell {0} erfordert eine dieser Berechtigungen, die für diese Anfrage verfügbaren Konten ({1}) verfügen nicht darüber: {2}",
+  "Interaction 模型的 contents[%d] 不接受服务端工具步骤 %s": "Interaction-Modell contents[{0}] akzeptiert keinen serverseitigen Tool-Schritt {1}",
+  "最新发行版本跳转不是本仓库的正式发行版本": "Die Weiterleitung zur neuesten Version verweist nicht auf eine stabile Version dieses Repositorys",
+  "读取发行包 %s: %w": "Release-Paket {0} lesen: {1}",
+  "发行包元数据过大": "Die Metadaten des Release-Pakets sind zu groß",
+  "发行包元数据与已确认的正式发行版本不一致": "Die Paketmetadaten stimmen nicht mit der bestätigten stabilen Version überein",
+  "发行版本 %s 的 %s 记录不唯一或下载地址无效": "Version {0} enthält für {1} doppelte Einträge oder eine ungültige Download-URL"
 }

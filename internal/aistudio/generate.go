@@ -769,7 +769,7 @@ func validateGenerateEntry(request GenerateRequest, entry modelEntry) error {
 	if err := validateTranscriptionConfig(request.Config.TranscriptionConfig, entry.model); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
-	if stream, task := interactionRoute(entry.model, entry.defaults, ChannelPlayground); stream || task {
+	if interactionRouting(entry.model, entry.defaults, ChannelPlayground).IsInteraction() {
 		return nil
 	}
 	if _, err := encodeGenerationConfig(applyModelMediaDefaults(request.Config, entry.model), entry.defaults); err != nil {
@@ -798,7 +798,7 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 	if build {
 		channel = ChannelBuild
 	}
-	interaction, task := interactionRoute(entry.model, entry.defaults, channel)
+	route := interactionRouting(entry.model, entry.defaults, channel)
 	apiKey, _ := ctx.Value(apiKeyContextKey{}).(string)
 	assistant := entry.model.Capabilities["assistant_route"]
 	if chineseRewriteEligible(request, entry) {
@@ -810,11 +810,15 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 	if thinkingGuardEligible(request, entry) {
 		request = applyThinkingGuard(request, entry)
 	}
-	restoring := request.restoreModelTurns && !build && !assistant && !interaction && !task
+	restoring := request.restoreModelTurns && c.turns != nil && !build && !assistant && !route.IsAgent()
 	if restoring {
-		var tip turnLink
-		request.Contents, request.turnToken, tip = c.turns.restore(apiKey, request.Contents)
-		request.turnChain = turnChain{contents: request.Contents, tip: tip}
+		if !route.IsInteraction() {
+			var tip turnLink
+			request.Contents, request.turnToken, tip = c.turns.restore(apiKey, request.Contents)
+			request.turnChain = turnChain{contents: request.Contents, tip: tip}
+		} else {
+			request.turnChain = turnChain{contents: request.Contents, tip: turnChain{}.tipOf(request.Contents)}
+		}
 	}
 	if err := validateVideoParts(request.Contents); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
@@ -829,10 +833,10 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 			return nil, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 		}
 	}
-	if request.AntiTruncation && (interaction || task) {
+	if request.AntiTruncation && route.IsInteraction() {
 		return nil, fmt.Errorf("%w: anti-truncation transport is not supported by the Interaction generation route", ErrInvalidArgument)
 	}
-	if interaction {
+	if route.IsStream() && entry.defaults.VideoOutput {
 		request.Tools = Tools{}
 	}
 	request, contract, err := prepareToolRequest(request, true)
@@ -858,11 +862,19 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 			return nil, err
 		}
 	}
-	if interaction {
-		return c.generateInteraction(ctx, request, entry)
+	if route.IsStream() {
+		events, err := c.generateInteraction(ctx, request, entry, route, apiKey, restoring)
+		if err != nil {
+			return nil, err
+		}
+		return contract.forward(ctx, events), nil
 	}
-	if task {
-		return c.generateInteractionTask(ctx, request, entry)
+	if route.IsTask() {
+		events, err := c.generateInteractionTask(ctx, request, entry, route, apiKey, restoring)
+		if err != nil {
+			return nil, err
+		}
+		return contract.forward(ctx, events), nil
 	}
 	request.Config = applyModelMediaDefaults(request.Config, entry.model)
 	request.ImageRoute = entry.defaults.ImageRoute
